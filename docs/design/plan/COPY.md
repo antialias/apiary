@@ -26,7 +26,6 @@ as such on the page.
 
 - `<title>`: Apiary — business plan
 - meta description: A member-owned pool of LLM capacity: lend idle GPUs running open models, burst past your own limits, earn credit for what you deliver.
-- `<meta name="robots" content="noindex">` while the founders review it.
 - URL: `/plan/` (file `site/static/plan/index.html`).
 
 ## Header (scrolls away)
@@ -69,7 +68,7 @@ H2: Four ways in
 | Icon (hexagon outline) | Label | Line |
 |---|---|---|
 | up arrow | Use it | Burst past your own limits when work spikes. |
-| GPU card | Contribute | Lend an idle GPU running open models. |
+| GPU card | Contribute | Lend idle capacity: a GPU running open models, or a plan or key its provider lets you pool. |
 | `</>` | Build it | Help build the engine in Go and Python. |
 | heart | Back it | Fund the pilot and the legal groundwork. |
 
@@ -148,14 +147,13 @@ H2: Four ways in
 - Columns:
   - Credit for delivery only — The pool mints credit only for capacity it actually used, as the brain measured it. Nothing for pledges, no pre-mine.
   - Priced by model class — A frontier-class hour and a small local model's answer are different goods, so members price each class.
-  - A ledger, not a token — Pilot credit can't be bought, sold or transferred, the way AI Horde's kudos have worked since 2022.¹¹ No token exists; none will be issued before counsel signs off.
+  - Credit now, a token later — Pilot credit is a ledger entry that can't be bought, sold or transferred, the way AI Horde's kudos have worked since 2022.¹¹ The token comes after economic modeling and counsel; none exists yet.
 - Panel title: Your month in the pool · sliders "Your GPU serves" (0–12, "{n} h a day", default 4) and "Crunch days you draw" (0–10, default 3)
 - Figures: "Credit earned" · "Credit spent" · "Balance" (signed, honey)
 - Caption: Illustrative rates. Members will set real prices per class.
 - Sub-heading: How the company earns
-  - Team pools — A hosted brain for companies pooling their own accounts and GPUs among their own people.
+  - Equity and tokens, not fees — Apiary is an exchange of equity and tokens among the people who build it: idea people, engineers and leaders. It takes no cut of the capacity it routes.
   - Running it yourself stays free — The engine runs on your machines at no charge.
-  - A fee on paid capacity, later — If counsel approves buying credit with money, a small fee on those purchases, as OpenRouter charges on credit today.¹²
 
 ## 06 · Market (`#market`)
 
@@ -173,7 +171,7 @@ H2: Four ways in
   - OpenRouter · One API across many model providers · 5.5% fee on credit purchases¹²
   - LiteLLM, Portkey · Gateways for your own keys · Open source plus paid plans
   - Chutes · Token-rewarded inference network · Lost 45% of its tokens when it ended subsidized use¹³
-  - Apiary (honey tint) · Your accounts, your GPU and a member pool in one router · Credit for delivered capacity only
+  - Apiary (honey tint) · Your accounts, your GPU and a member pool in one router · Credit for delivered capacity; equity and tokens for the people who build it
 
 ## 07 · Roadmap (`#roadmap`)
 
@@ -196,7 +194,7 @@ H2: Four ways in
 
 | Risk | What we do | Why (expanded) |
 |---|---|---|
-| Provider terms | The pool carries only capacity whose terms allow it: members' GPUs running open-weight models, and capacity a provider approves. Your own plans and keys serve only your own work. | Subscription plans can't be made available to anyone else,¹⁴ API keys can't be transferred to a third party,¹⁵ and startup credits can't be passed on to end customers.¹⁶ Anthropic also bars routing plan credentials on behalf of other users.¹ |
+| Provider terms | Provider by provider, the pool takes everything that provider's terms allow: members' GPUs running open-weight models, and plans, keys and credits wherever their provider permits pooling. Anything else serves only its owner's own work. | Each provider sets its own terms. Some subscription plans can't be made available to anyone else,¹⁴ some API keys can't be transferred to a third party,¹⁵ and some startup credits can't be passed on to end customers.¹⁶ Anthropic also bars routing plan credentials on behalf of other users.¹ |
 | Proving delivery | Receipts signed by both sides, random spot checks and reputation; hardware attestation as it matures. | A GPU owner and a requester could collude to mint credit for work that never happened. |
 | Securities law | No token without counsel. Pilot credit can't be bought, sold or transferred. | Credit that can be traded for money may count as a security. |
 | Privacy | A pooled request runs on another member's GPU. You choose which work may burst; the brain logs metadata only. | Whoever serves a request sees its content, as any inference provider does. The logging policy is written down before the first outside member joins. |
@@ -219,7 +217,7 @@ H2: Four ways in
 - Columns (label, text, button → link):
   - Pilot members — We're choosing about five members for the first pool: people who hit their limits, and people with GPUs to lend. — "Join the waggle list" → `/#join` (no choice ticked: pilot members both draw and lend)
   - Engineers — Metering, verification and scheduling, with real traffic behind them. — "Join the waggle list" → `/?want=dev-time#join`
-  - Capacity donors — Lend a GPU running open-weight models, or fund rented GPUs. We can't take plan logins, API keys or program credits. — "Join the waggle list" → `/?want=gpu#join`
+  - Capacity donors — Lend a GPU running open-weight models, or a plan or key its provider lets you pool. Or fund rented GPUs. — "Join the waggle list" → `/?want=gpu#join`
   - Backers — Fund the pilot: engineering time, counsel for the legal wrapper, and seed GPU capacity. — "Talk to us" (filled) → `/?want=funding#join`
 - Small print: This page describes plans. It is not an offer of tokens, securities or any investment. No token exists, and none will be issued before counsel signs off. Anything marked simulated or illustrative is a model, not data.
 

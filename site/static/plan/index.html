@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Apiary — business plan</title>
 <meta name="description" content="A member-owned pool of LLM capacity: lend idle GPUs running open models, burst past your own limits, earn credit for what you deliver.">
-<meta name="robots" content="noindex">
 <meta property="og:title" content="Apiary — business plan">
 <meta property="og:description" content="A member-owned pool of LLM capacity: lend idle GPUs running open models, burst past your own limits, earn credit for what you deliver.">
 <meta property="og:type" content="website">
@@ -99,7 +98,7 @@
         <h2>Four ways in</h2>
         <ul class="ways">
           <li><svg class="icon" aria-hidden="true"><use href="#i-up"/></svg><h3>Use it</h3><p>Burst past your own limits when work spikes.</p></li>
-          <li><svg class="icon" aria-hidden="true"><use href="#i-gpu"/></svg><h3>Contribute</h3><p>Lend an idle GPU running open models.</p></li>
+          <li><svg class="icon" aria-hidden="true"><use href="#i-gpu"/></svg><h3>Contribute</h3><p>Lend idle capacity: a GPU running open models, or a plan or key its provider lets you pool.</p></li>
           <li><svg class="icon" aria-hidden="true"><use href="#i-code"/></svg><h3>Build it</h3><p>Help build the engine in Go and Python.</p></li>
           <li><svg class="icon" aria-hidden="true"><use href="#i-heart"/></svg><h3>Back it</h3><p>Fund the pilot and the legal groundwork.</p></li>
         </ul>
@@ -259,7 +258,7 @@
         <div class="cols3">
           <div><h3>Credit for delivery only</h3><p>The pool mints credit only for capacity it actually used, as the brain measured it. Nothing for pledges, no pre-mine.</p></div>
           <div><h3>Priced by model class</h3><p>A frontier-class hour and a small local model's answer are different goods, so members price each class.</p></div>
-          <div><h3>A ledger, not a token</h3><p>Pilot credit can't be bought, sold or transferred, the way AI Horde's kudos have worked since 2022.<sup><a href="#src-11" aria-label="Source 11">11</a></sup> No token exists; none will be issued before counsel signs off.</p></div>
+          <div><h3>Credit now, a token later</h3><p>Pilot credit is a ledger entry that can't be bought, sold or transferred, the way AI Horde's kudos have worked since 2022.<sup><a href="#src-11" aria-label="Source 11">11</a></sup> The token comes after economic modeling and counsel; none exists yet.</p></div>
         </div>
 
         <div class="panel month" id="month">
@@ -286,9 +285,8 @@
 
         <h3 class="subhead">How the company earns</h3>
         <ul class="earns">
-          <li><h4>Team pools</h4><p>A hosted brain for companies pooling their own accounts and GPUs among their own people.</p></li>
+          <li><h4>Equity and tokens, not fees</h4><p>Apiary is an exchange of equity and tokens among the people who build it: idea people, engineers and leaders. It takes no cut of the capacity it routes.</p></li>
           <li><h4>Running it yourself stays free</h4><p>The engine runs on your machines at no charge.</p></li>
-          <li><h4>A fee on paid capacity, later</h4><p>If counsel approves buying credit with money, a small fee on those purchases, as OpenRouter charges on credit today.<sup><a href="#src-12" aria-label="Source 12">12</a></sup></p></li>
         </ul>
       </div>
     </section>
@@ -327,7 +325,7 @@
               <tr><th scope="row">OpenRouter</th><td>One API across many model providers</td><td>5.5% fee on credit purchases<sup><a href="#src-12" aria-label="Source 12">12</a></sup></td></tr>
               <tr><th scope="row">LiteLLM, Portkey</th><td>Gateways for your own keys</td><td>Open source plus paid plans</td></tr>
               <tr><th scope="row">Chutes</th><td>Token-rewarded inference network</td><td>Lost 45% of its tokens when it ended subsidized use<sup><a href="#src-13" aria-label="Source 13">13</a></sup></td></tr>
-              <tr class="us"><th scope="row">Apiary</th><td>Your accounts, your GPU and a member pool in one router</td><td>Credit for delivered capacity only</td></tr>
+              <tr class="us"><th scope="row">Apiary</th><td>Your accounts, your GPU and a member pool in one router</td><td>Credit for delivered capacity; equity and tokens for the people who build it</td></tr>
             </tbody>
           </table>
         </div>
@@ -374,8 +372,8 @@
         <div class="panel risks" id="risk-table">
           <div class="risk-head" aria-hidden="true"><span>Risk</span><span>What we do</span></div>
           <div class="risk">
-            <h3><button type="button" aria-expanded="true" aria-controls="why-1" id="risk-1"><span class="risk-mark" aria-hidden="true"><svg><use href="#i-chev"/></svg></span><span class="risk-name">Provider terms</span></button></h3><p class="risk-do">The pool carries only capacity whose terms allow it: members' GPUs running open-weight models, and capacity a provider approves. Your own plans and keys serve only your own work.</p><svg class="risk-up" aria-hidden="true"><use href="#i-chev"/></svg>
-            <div class="why" id="why-1" role="region" aria-labelledby="risk-1"><p class="why-label">Why</p><p>Subscription plans can't be made available to anyone else,<sup><a href="#src-14" aria-label="Source 14">14</a></sup> API keys can't be transferred to a third party,<sup><a href="#src-15" aria-label="Source 15">15</a></sup> and startup credits can't be passed on to end customers.<sup><a href="#src-16" aria-label="Source 16">16</a></sup> Anthropic also bars routing plan credentials on behalf of other users.<sup><a href="#src-1" aria-label="Source 1">1</a></sup></p></div>
+            <h3><button type="button" aria-expanded="true" aria-controls="why-1" id="risk-1"><span class="risk-mark" aria-hidden="true"><svg><use href="#i-chev"/></svg></span><span class="risk-name">Provider terms</span></button></h3><p class="risk-do">Provider by provider, the pool takes everything that provider's terms allow: members' GPUs running open-weight models, and plans, keys and credits wherever their provider permits pooling. Anything else serves only its owner's own work.</p><svg class="risk-up" aria-hidden="true"><use href="#i-chev"/></svg>
+            <div class="why" id="why-1" role="region" aria-labelledby="risk-1"><p class="why-label">Why</p><p>Each provider sets its own terms. Some subscription plans can't be made available to anyone else,<sup><a href="#src-14" aria-label="Source 14">14</a></sup> some API keys can't be transferred to a third party,<sup><a href="#src-15" aria-label="Source 15">15</a></sup> and some startup credits can't be passed on to end customers.<sup><a href="#src-16" aria-label="Source 16">16</a></sup> Anthropic also bars routing plan credentials on behalf of other users.<sup><a href="#src-1" aria-label="Source 1">1</a></sup></p></div>
           </div>
           <div class="risk">
             <h3><button type="button" aria-expanded="false" aria-controls="why-2" id="risk-2"><span class="risk-mark" aria-hidden="true"><svg><use href="#i-chev"/></svg></span><span class="risk-name">Proving delivery</span></button></h3><p class="risk-do">Receipts signed by both sides, random spot checks and reputation; hardware attestation as it matures.</p><svg class="risk-up" aria-hidden="true"><use href="#i-chev"/></svg>
@@ -427,7 +425,7 @@
         <ul class="asks">
           <li><svg class="icon" aria-hidden="true"><use href="#i-people"/></svg><h3>Pilot members</h3><p>We're choosing about five members for the first pool: people who hit their limits, and people with GPUs to lend.</p><a class="btn btn-ghost" href="/#join">Join the waggle list</a></li>
           <li><svg class="icon" aria-hidden="true"><use href="#i-code"/></svg><h3>Engineers</h3><p>Metering, verification and scheduling, with real traffic behind them.</p><a class="btn btn-ghost" href="/?want=dev-time#join">Join the waggle list</a></li>
-          <li><svg class="icon" aria-hidden="true"><use href="#i-gpu"/></svg><h3>Capacity donors</h3><p>Lend a GPU running open-weight models, or fund rented GPUs. We can't take plan logins, API keys or program credits.</p><a class="btn btn-ghost" href="/?want=gpu#join">Join the waggle list</a></li>
+          <li><svg class="icon" aria-hidden="true"><use href="#i-gpu"/></svg><h3>Capacity donors</h3><p>Lend a GPU running open-weight models, or a plan or key its provider lets you pool. Or fund rented GPUs.</p><a class="btn btn-ghost" href="/?want=gpu#join">Join the waggle list</a></li>
           <li><svg class="icon" aria-hidden="true"><use href="#i-heart"/></svg><h3>Backers</h3><p>Fund the pilot: engineering time, counsel for the legal wrapper, and seed GPU capacity.</p><a class="btn btn-fill" href="/?want=funding#join">Talk to us</a></li>
         </ul>
         <p class="smallprint">This page describes plans. It is not an offer of tokens, securities or any investment. No token exists, and none will be issued before counsel signs off. Anything marked simulated or illustrative is a model, not data.</p>
