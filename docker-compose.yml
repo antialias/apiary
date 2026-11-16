@@ -1,0 +1,59 @@
+# Apiary: the switch proxy and the brain on one machine, published only on loopback.
+#
+#   docker compose run --rm init    once: the two secrets and classes.json (init.sh)
+#   docker compose up -d            the brain on 127.0.0.1:9115, the proxy on 127.0.0.1:8787
+#
+# Everything either service keeps is on the `data` volume, mounted at /creds in both. Keys for
+# the optional providers come from a .env file beside this one (see the README), never from here.
+# Both images are published; `docker compose build` builds them from this checkout instead.
+name: apiary
+
+services:
+  brain:
+    image: ghcr.io/antialias/apiary-brain:latest
+    build: ./brain
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9115:9115"
+    environment:
+      SWITCH_KEY_FILE: /creds/switch_key
+      KIMI_API_KEY: ${SWITCH_KIMI_KEY:-}
+      LOCAL_UPSTREAM: ${LOCAL_UPSTREAM:-}
+    volumes:
+      - data:/creds
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  proxy:
+    image: ghcr.io/antialias/apiary-proxy:latest
+    build: ./proxy
+    restart: unless-stopped
+    depends_on:
+      - brain
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      SWITCH_BRAIN_URL: http://brain:9115
+      SWITCH_KEY_FILE: /creds/switch_key
+      SWITCH_CLIENT_SECRET_FILE: /creds/client_secret
+      SWITCH_CLASS_STATE_FILE: /creds/proxy/class-rows.json
+      SWITCH_CLIENT_BASE_URL: http://127.0.0.1:8787
+      SWITCH_KIMI_KEY: ${SWITCH_KIMI_KEY:-}
+      SWITCH_LOCAL_UPSTREAM: ${LOCAL_UPSTREAM:-}
+    volumes:
+      - data:/creds
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Run once, before the first `up`: docker compose run --rm init
+  init:
+    image: ghcr.io/antialias/apiary-brain:latest
+    profiles: [init]
+    network_mode: none
+    entrypoint: ["sh", "/init.sh"]
+    volumes:
+      - data:/creds
+      - ./init.sh:/init.sh:ro
+
+volumes:
+  data:

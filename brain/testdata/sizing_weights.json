@@ -1,0 +1,319 @@
+{
+ "_doc": "One Anthropic account's kept samples as /sizing served them on 2026-11-04 at about 13:00Z (quota-model 67 §1, §3), the account's name taken out: per sample its points and its list dollars by model. seven_day holds Opus, Fable and a little Sonnet and Haiku in a mix that moved from about 7 % Fable to 70 % and back; scoped:Fable holds Fable alone. The method of 67 §3 (_sizing_fit) gives Opus as the reference, Fable weighed at 2.311, Sonnet 5 a candidate that fails the bound, and seven_day's spread 0.013 at the weights against 0.124 at list prices. Its 70 % Fable step looks cheap at list prices and is not at the weight, so no sample leaves the weight's fit; scoped:Fable's one cheap step never enters it.",
+ "windows": {
+  "seven_day": [
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 2.95238,
+     "claude-haiku-5-5": 0.00398,
+     "claude-opus-5-5": 24.017804,
+     "claude-sonnet-5": 0.122272,
+     "claude-sonnet-5-5": 0.005902
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 3.7503,
+     "claude-haiku-5-5": 0.0039,
+     "claude-opus-5-5": 21.781663,
+     "claude-sonnet-5-5": 0.010412
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 3.704705,
+     "claude-haiku-5-5": 0.00343,
+     "claude-opus-5-5": 21.883176,
+     "claude-sonnet-5": 0.373768,
+     "claude-sonnet-5-5": 0.01066
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 2.342391,
+     "claude-haiku-5-5": 0.008141,
+     "claude-opus-5-5": 25.598528,
+     "claude-sonnet-5": 0.067906,
+     "claude-sonnet-5-5": 0.005844
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 3.26756,
+     "claude-haiku-5-5": 0.010188,
+     "claude-opus-5-5": 22.992831,
+     "claude-sonnet-5": 0.43586,
+     "claude-sonnet-5-5": 0.001517
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 9.945832,
+     "claude-haiku-5-5": 0.002506,
+     "claude-opus-5-5": 8.052197,
+     "claude-sonnet-5": 1.557733,
+     "claude-sonnet-5-5": 0.004445
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.058355,
+     "claude-haiku-5-5": 0.002593,
+     "claude-opus-5-5": 16.077128,
+     "claude-sonnet-5": 0.727847,
+     "claude-sonnet-5-5": 0.010176
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 11.121051,
+     "claude-haiku-5-5": 0.010626,
+     "claude-opus-5-5": 4.381436,
+     "claude-sonnet-5": 0.48211
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 7.953615,
+     "claude-haiku-4-5-20251001": 0.00424,
+     "claude-haiku-5-5": 0.007267,
+     "claude-opus-5-5": 11.744913,
+     "claude-sonnet-5": 1.965068
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 9.911216,
+     "claude-haiku-4-5-20251001": 0.007975,
+     "claude-haiku-5-5": 0.007561,
+     "claude-opus-5-5": 6.740591,
+     "claude-sonnet-5": 0.704765
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.716251,
+     "claude-haiku-4-5-20251001": 0.001231,
+     "claude-haiku-5-5": 0.008234,
+     "claude-opus-5-5": 13.074079,
+     "claude-sonnet-5": 2.143508
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.758415,
+     "claude-haiku-5-5": 0.010665,
+     "claude-opus-5-5": 14.456157,
+     "claude-sonnet-5": 0.606105
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 9.117506,
+     "claude-haiku-5-5": 0.012771,
+     "claude-opus-5-5": 11.025567,
+     "claude-sonnet-5": 0.155562
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 10.216385,
+     "claude-haiku-5-5": 0.012657,
+     "claude-opus-5-5": 6.434212
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 7.6907,
+     "claude-haiku-5-5": 0.00794,
+     "claude-opus-5-5": 12.261721
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 7.733523,
+     "claude-haiku-5-5": 0.014247,
+     "claude-opus-5-5": 11.524036,
+     "claude-sonnet-5": 1.575464
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 2.082095,
+     "claude-haiku-5-5": 0.00817,
+     "claude-opus-5-5": 24.799774,
+     "claude-sonnet-5": 1.478507
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 5.86268,
+     "claude-haiku-5-5": 0.007507,
+     "claude-opus-5-5": 17.423082,
+     "claude-sonnet-5": 1.38055
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 7.186299,
+     "claude-haiku-5-5": 0.007416,
+     "claude-opus-5-5": 13.756169,
+     "claude-sonnet-5": 1.0343
+    }
+   }
+  ],
+  "scoped:Fable": [
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 5.853572
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.526584
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 7.04841
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.902039
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.358556
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.451208
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.905545
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.723362
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.273456
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.755105
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.403207
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.246997
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.230062
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.038769
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.43944
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 9.784778
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 4.023888
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.484315
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.422148
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.343496
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 6.492729
+    }
+   },
+   {
+    "points": 1.0,
+    "usd": {
+     "claude-fable-5-1": 7.34953
+    }
+   }
+  ]
+ }
+}

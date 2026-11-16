@@ -1,0 +1,30 @@
+# NOTE: local/dev example only — this file does NOT drive prod. The production
+# compose is pinned on the host (see README "Deploy"); editing this changes nothing live.
+services:
+  apiary-site:
+    build: .
+    container_name: apiary-site
+    restart: always
+    environment:
+      - LISTEN=:8080
+      - SIGNUPS_FILE=/data/signups.jsonl
+    volumes:
+      - ./data:/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.apiary.rule=Host(`apiary.wtf`) || Host(`www.apiary.wtf`)"
+      - "traefik.http.routers.apiary.entrypoints=websecure"
+      - "traefik.http.routers.apiary.tls=true"
+      - "traefik.http.routers.apiary.tls.certresolver=myresolver"
+      - "traefik.http.routers.apiary.middlewares=hsts@docker"
+      - "traefik.http.routers.apiary-http.rule=Host(`apiary.wtf`) || Host(`www.apiary.wtf`)"
+      - "traefik.http.routers.apiary-http.entrypoints=web"
+      - "traefik.http.routers.apiary-http.middlewares=redirect-https@docker"
+      - "traefik.http.services.apiary.loadbalancer.server.port=8080"
+      - "com.centurylinklabs.watchtower.enable=false"
+    networks:
+      - webgateway
+
+networks:
+  webgateway:
+    external: true

@@ -1,0 +1,2334 @@
+{
+ "reset_slack_s": 600,
+ "cases": [
+  {
+   "name": "named until ahead, no newer reading: holds until it",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": 1800259200,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 100.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999700,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": 1800259200
+     }
+    }
+   ]
+  },
+  {
+   "name": "named until passed: ends",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": 1799999999,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 100.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999700,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": true,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "until exactly now: ends (live only before it)",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": 1800000000,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 100.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999700,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": true,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "unattributed, until ahead, newer reading open and changed: only time ends it",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": 1800003600,
+    "resets_at": null,
+    "by_reading": false,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 10.0,
+         "resets_at": 1800864000,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": 1800003600
+     }
+    }
+   ]
+  },
+  {
+   "name": "unattributed, until passed: ends",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": 1799999995,
+    "resets_at": null,
+    "by_reading": false,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 100.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": true,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "no until, the reading predates the refusal: holds by reading",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 10.0,
+         "resets_at": 1800864000,
+         "as_of": 1799999700,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "no until, the reading is as old as the refusal: not newer, holds",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 10.0,
+         "resets_at": 1800864000,
+         "as_of": 1799999880,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "no until, the window is not in the reading: holds",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "five_hour": {
+         "used_pct": 10.0,
+         "resets_at": 1800003600,
+         "as_of": 1799999970,
+         "period": "5h",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "an account never measured: holds",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": null,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {}
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "newer reading, a new period (reset past the slack) and open: ends",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 0.0,
+         "resets_at": 1800864000,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": true,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "newer reading, the same period at a lower use: ends",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 60.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": true,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "newer reading, a lower use and a reset that has passed: ends",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1799999990
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 5.0,
+         "resets_at": 1799999990,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": true,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "nothing seen at the refusal, newer reading open with a reset ahead: ends",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": null,
+     "resets_at": null
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 40.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": true,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "named until ahead, newer reading open and changed: the reading ends it first",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": 1800259200,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 0.0,
+         "resets_at": 1800864000,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": true,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "newer reading, same period at the same use, closed: holds, learns the reset",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 100.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": 1800259200
+     }
+    }
+   ]
+  },
+  {
+   "name": "newer reading, same period, open at the same use: no change, holds, learns the reset",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 98.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 98.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": 1800259200
+     }
+    }
+   ]
+  },
+  {
+   "name": "newer reading, a higher use, reset moved inside the slack: holds, learns the reset",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 97.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 99.0,
+         "resets_at": 1800259799,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": 1800259799
+     }
+    }
+   ]
+  },
+  {
+   "name": "newer reading, reset moved just past the slack, open: a new period, ends",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 97.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 99.0,
+         "resets_at": 1800259801,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": true,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "newer reading, a new period but at 100: closed, holds, learns the new reset",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 100.0,
+         "resets_at": 1800864000,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": 1800864000
+     }
+    }
+   ]
+  },
+  {
+   "name": "newer reading at 100 with its reset passed: no new period, holds with no until",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1799999990
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 100.0,
+         "resets_at": 1799999990,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "named until ahead, newer reading closed in a new period: keeps its own until",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": 1800259200,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 100.0,
+         "resets_at": 1800864000,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": 1800259200
+     }
+    }
+   ]
+  },
+  {
+   "name": "newer reading open and changed, the account's gate shut: holds",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": false,
+       "windows": {
+        "seven_day": {
+         "used_pct": 0.0,
+         "resets_at": 1800864000,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": 1800864000
+     }
+    }
+   ]
+  },
+  {
+   "name": "newer reading at a lower use, the window's own gate shut: closed, holds",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 30.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact",
+         "open": false
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": 1800259200
+     }
+    }
+   ]
+  },
+  {
+   "name": "a point below 100, seen at 98 (no utilization on the refusal): holds, learns the reset",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 98.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 99.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": 1800259200
+     }
+    }
+   ]
+  },
+  {
+   "name": "a 99 read after a refusal seen at 100: a point below, the same reading, holds, learns the reset",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 99.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": 1800259200
+     }
+    }
+   ]
+  },
+  {
+   "name": "a 99 with no reset read after a refusal seen at 100: the same period, holds",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 99.0,
+         "resets_at": null,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": null
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "a 98 read after a refusal seen at 100, the same period: more than a point below, ends",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 98.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": true,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "a 99 read after a refusal seen at 100, a new period: ends",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 99.0,
+         "resets_at": 1800864000,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": true,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "a 99 read before a refusal seen at 100: not newer, holds",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 99.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999700,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "a re-check after the refusal: ends",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": 1800259200,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": 1799999881,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 100.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999700,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": true,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "a re-check before the refusal: holds",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": 1800259200,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": 1799999879,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 100.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999700,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": 1800259200
+     }
+    }
+   ]
+  },
+  {
+   "name": "a re-check exactly at the refusal: holds (only a later one ends it)",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": 1800259200,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": 1799999880,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 100.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999700,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": 1800259200
+     }
+    }
+   ]
+  },
+  {
+   "name": "two steps: learns the reset, keeps it past a later reading, ends at it",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 100.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": false,
+      "until": 1800259200
+     }
+    },
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1800000030,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 100.0,
+         "resets_at": 1800864000,
+         "as_of": 1800000030,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000120,
+     "want": {
+      "ends": false,
+      "until": 1800259200
+     }
+    },
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1800000030,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "seven_day": {
+         "used_pct": 100.0,
+         "resets_at": 1800864000,
+         "as_of": 1800000030,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800259200,
+     "want": {
+      "ends": true,
+      "until": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "a scoped window: judged on its own reading",
+   "record": {
+    "window": "scoped:Fable",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "steps": [
+    {
+     "standing": {
+      "provider": "anthropic",
+      "kind": "subscription",
+      "as_of": 1799999940,
+      "next_poll_at": 1800000240,
+      "recheck_epoch": null,
+      "allowance": {
+       "open": null,
+       "windows": {
+        "scoped:Fable": {
+         "used_pct": 20.0,
+         "resets_at": 1800864000,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": "Fable",
+         "reset_basis": "exact"
+        },
+        "seven_day": {
+         "used_pct": 100.0,
+         "resets_at": 1800259200,
+         "as_of": 1799999970,
+         "period": "7d",
+         "scope": null,
+         "reset_basis": "exact"
+        }
+       }
+      },
+      "money": {
+       "credits": {
+        "open": null,
+        "balance": null,
+        "unit": null
+       }
+      }
+     },
+     "now": 1800000000,
+     "want": {
+      "ends": true,
+      "until": null
+     }
+    }
+   ]
+  }
+ ],
+ "windows": [
+  {
+   "name": "a named reset inside the clamp: ends at it, exact",
+   "record": {
+    "window": "five_hour",
+    "read_at": 1799999880,
+    "until": 1800007200,
+    "resets_at": 1800007200,
+    "by_reading": false,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "window": {
+    "used_pct": 80.0,
+    "resets_at": 1800007200,
+    "as_of": 1799999700,
+    "period": "5h",
+    "scope": null,
+    "reset_basis": "exact"
+   },
+   "now": 1800000000,
+   "want": {
+    "used_pct": 100.0,
+    "resets_at": 1800007200,
+    "as_of": 1799999880,
+    "reset_basis": "exact"
+   }
+  },
+  {
+   "name": "a named reset beyond the clamp: resets at the named reset, exact",
+   "record": {
+    "window": "five_hour",
+    "read_at": 1799999880,
+    "until": 1800021600,
+    "resets_at": 1800259200,
+    "by_reading": false,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "window": {
+    "used_pct": 80.0,
+    "resets_at": 1800007200,
+    "as_of": 1799999700,
+    "period": "5h",
+    "scope": null,
+    "reset_basis": "exact"
+   },
+   "now": 1800000000,
+   "want": {
+    "used_pct": 100.0,
+    "resets_at": 1800259200,
+    "as_of": 1799999880,
+    "reset_basis": "exact"
+   }
+  },
+  {
+   "name": "no named reset: ends at its until, record",
+   "record": {
+    "window": "five_hour",
+    "read_at": 1799999880,
+    "until": 1800001800,
+    "resets_at": null,
+    "by_reading": false,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "window": {
+    "used_pct": 80.0,
+    "resets_at": 1800007200,
+    "as_of": 1799999700,
+    "period": "5h",
+    "scope": null,
+    "reset_basis": "exact"
+   },
+   "now": 1800000000,
+   "want": {
+    "used_pct": 100.0,
+    "resets_at": 1800001800,
+    "as_of": 1799999880,
+    "reset_basis": "record"
+   }
+  },
+  {
+   "name": "a window's own basis stands when the record's is exact",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": 1800259200,
+    "resets_at": 1800259200,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "window": {
+    "used_pct": 100.0,
+    "resets_at": 1800259200,
+    "as_of": 1799999700,
+    "period": "7d",
+    "scope": null,
+    "reset_basis": "early_possible"
+   },
+   "now": 1800000000,
+   "want": {
+    "used_pct": 100.0,
+    "resets_at": 1800259200,
+    "as_of": 1799999880,
+    "reset_basis": "early_possible"
+   }
+  },
+  {
+   "name": "a window's own basis gives way to record",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": 1800001800,
+    "resets_at": null,
+    "by_reading": false,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "window": {
+    "used_pct": 100.0,
+    "resets_at": 1800259200,
+    "as_of": 1799999700,
+    "period": "7d",
+    "scope": null,
+    "reset_basis": "early_possible"
+   },
+   "now": 1800000000,
+   "want": {
+    "used_pct": 100.0,
+    "resets_at": 1800001800,
+    "as_of": 1799999880,
+    "reset_basis": "record"
+   }
+  },
+  {
+   "name": "by reading, no until, the reading's reset ahead: kept",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "window": {
+    "used_pct": 100.0,
+    "resets_at": 1800259200,
+    "as_of": 1799999700,
+    "period": "7d",
+    "scope": null,
+    "reset_basis": "exact"
+   },
+   "now": 1800000000,
+   "want": {
+    "used_pct": 100.0,
+    "resets_at": 1800259200,
+    "as_of": 1799999880,
+    "reset_basis": "exact"
+   }
+  },
+  {
+   "name": "by reading, no until, the reading's reset passed: cleared, record",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": null,
+    "resets_at": null,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "window": {
+    "used_pct": 100.0,
+    "resets_at": 1799999990,
+    "as_of": 1799999700,
+    "period": "7d",
+    "scope": null,
+    "reset_basis": "exact"
+   },
+   "now": 1800000000,
+   "want": {
+    "used_pct": 100.0,
+    "resets_at": null,
+    "as_of": 1799999880,
+    "reset_basis": "record"
+   }
+  },
+  {
+   "name": "a window read after the refusal keeps its own as_of",
+   "record": {
+    "window": "seven_day",
+    "read_at": 1799999880,
+    "until": 1800259200,
+    "resets_at": 1800259200,
+    "by_reading": true,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "window": {
+    "used_pct": 100.0,
+    "resets_at": 1800259200,
+    "as_of": 1799999970,
+    "period": "7d",
+    "scope": null,
+    "reset_basis": "exact"
+   },
+   "now": 1800000000,
+   "want": {
+    "used_pct": 100.0,
+    "resets_at": 1800259200,
+    "as_of": 1799999970,
+    "reset_basis": "exact"
+   }
+  },
+  {
+   "name": "a window the reading lacks: made at 100 from nothing",
+   "record": {
+    "window": "five_hour",
+    "read_at": 1799999880,
+    "until": 1800001800,
+    "resets_at": null,
+    "by_reading": false,
+    "seen": {
+     "used_pct": 100.0,
+     "resets_at": 1800259200
+    }
+   },
+   "window": {
+    "used_pct": null,
+    "resets_at": null,
+    "as_of": null,
+    "period": "5h",
+    "scope": null,
+    "reset_basis": null
+   },
+   "now": 1800000000,
+   "want": {
+    "used_pct": 100.0,
+    "resets_at": 1800001800,
+    "as_of": 1799999880,
+    "reset_basis": "record"
+   }
+  }
+ ],
+ "refusals": {
+  "applied": [
+   {
+    "name": "a window refusal with class spent and limit null",
+    "event": {
+     "id": "ref-02",
+     "kind": "refusal",
+     "account": "anthropic-1",
+     "read_at": 1799999890,
+     "window": "seven_day",
+     "limit": null,
+     "class": "spent",
+     "until": null,
+     "resets_at": null,
+     "by_reading": true,
+     "seen": {
+      "used_pct": 100.0,
+      "resets_at": 1800259200
+     }
+    },
+    "record": {
+     "account": "anthropic-1",
+     "limit": "seven_day",
+     "lim_kind": "window",
+     "class": "spent",
+     "refused_at": 1799999890,
+     "until": null,
+     "resets": null,
+     "attributed": true,
+     "seen": {
+      "used_pct": 100.0,
+      "resets_at": 1800259200
+     },
+     "ended_at": null
+    }
+   },
+   {
+    "name": "a model limit with its class",
+    "event": {
+     "id": "ref-04",
+     "kind": "refusal",
+     "account": "anthropic-1",
+     "read_at": 1799999880,
+     "window": null,
+     "limit": "model:claude-haiku-5",
+     "class": "spent",
+     "until": 1800001800,
+     "resets_at": null,
+     "by_reading": false,
+     "seen": null
+    },
+    "record": {
+     "account": "anthropic-1",
+     "limit": "model:claude-haiku-5",
+     "lim_kind": "model",
+     "class": "spent",
+     "refused_at": 1799999880,
+     "until": 1800001800,
+     "resets": null,
+     "attributed": false,
+     "seen": {
+      "used_pct": null,
+      "resets_at": null
+     },
+     "ended_at": null
+    }
+   },
+   {
+    "name": "a model limit",
+    "event": {
+     "id": "ref-05",
+     "kind": "refusal",
+     "account": "anthropic-1",
+     "read_at": 1799999900,
+     "window": null,
+     "limit": "model:claude-opus-4-1",
+     "class": "spent",
+     "until": 1800007100,
+     "resets_at": 1800007100,
+     "by_reading": false,
+     "seen": null
+    },
+    "record": {
+     "account": "anthropic-1",
+     "limit": "model:claude-opus-4-1",
+     "lim_kind": "model",
+     "class": "spent",
+     "refused_at": 1799999900,
+     "until": 1800007100,
+     "resets": 1800007100,
+     "attributed": false,
+     "seen": {
+      "used_pct": null,
+      "resets_at": null
+     },
+     "ended_at": null
+    }
+   },
+   {
+    "name": "a pool limit",
+    "event": {
+     "id": "ref-06",
+     "kind": "refusal",
+     "account": "kimi-1",
+     "read_at": 1799999880,
+     "window": null,
+     "limit": "pool:total_quota",
+     "class": "spent",
+     "until": 1800001680,
+     "resets_at": null,
+     "by_reading": false,
+     "seen": null
+    },
+    "record": {
+     "account": "kimi-1",
+     "limit": "total_quota",
+     "lim_kind": "pool",
+     "class": "spent",
+     "refused_at": 1799999880,
+     "until": 1800001680,
+     "resets": null,
+     "attributed": false,
+     "seen": {
+      "used_pct": null,
+      "resets_at": null
+     },
+     "ended_at": null
+    }
+   },
+   {
+    "name": "a not_entitled model",
+    "event": {
+     "id": "ref-07",
+     "kind": "refusal",
+     "account": "codex-1",
+     "read_at": 1799999880,
+     "window": null,
+     "limit": "model:gpt-6.1-sol",
+     "class": "not_entitled",
+     "until": 1800021480,
+     "resets_at": null,
+     "by_reading": false,
+     "seen": null
+    },
+    "record": {
+     "account": "codex-1",
+     "limit": "model:gpt-6.1-sol",
+     "lim_kind": "model",
+     "class": "not_entitled",
+     "refused_at": 1799999880,
+     "until": 1800021480,
+     "resets": null,
+     "attributed": false,
+     "seen": {
+      "used_pct": null,
+      "resets_at": null
+     },
+     "ended_at": null
+    }
+   },
+   {
+    "name": "a model limit ended",
+    "event": {
+     "id": "ref-08",
+     "kind": "refusal",
+     "account": "anthropic-1",
+     "read_at": 1799999940,
+     "window": null,
+     "limit": "model:claude-opus-4-1",
+     "class": "spent",
+     "until": 1800007100,
+     "resets_at": 1800007100,
+     "by_reading": false,
+     "seen": null,
+     "ended": true
+    },
+    "record": {
+     "account": "anthropic-1",
+     "limit": "model:claude-opus-4-1",
+     "lim_kind": "model",
+     "class": "spent",
+     "refused_at": 1799999900,
+     "until": 1800007100,
+     "resets": 1800007100,
+     "attributed": false,
+     "seen": {
+      "used_pct": null,
+      "resets_at": null
+     },
+     "ended_at": 1799999940
+    }
+   }
+  ],
+  "refused": [
+   {
+    "name": "a window refusal as the proxy sent it before 67: no limit, no class",
+    "event": {
+     "id": "ref-01",
+     "kind": "refusal",
+     "account": "anthropic-1",
+     "read_at": 1799999880,
+     "window": "seven_day",
+     "until": null,
+     "resets_at": null,
+     "by_reading": true,
+     "seen": {
+      "used_pct": 100.0,
+      "resets_at": 1800259200
+     }
+    },
+    "why": "class is required: spent, or not_entitled on a limit"
+   },
+   {
+    "name": "a limit with no class",
+    "event": {
+     "id": "ref-03",
+     "kind": "refusal",
+     "account": "anthropic-1",
+     "read_at": 1799999880,
+     "window": null,
+     "limit": "model:claude-sonnet-5",
+     "until": 1800001800,
+     "resets_at": null,
+     "by_reading": false,
+     "seen": null
+    },
+    "why": "class is required: spent, or not_entitled on a limit"
+   },
+   {
+    "name": "both window and limit",
+    "event": {
+     "id": "ref-20",
+     "kind": "refusal",
+     "account": "anthropic-1",
+     "read_at": 1799999880,
+     "window": "seven_day",
+     "limit": "model:claude-opus-4-1",
+     "class": "spent",
+     "until": 1800001680,
+     "resets_at": null,
+     "by_reading": false,
+     "seen": null
+    },
+    "why": "a refusal names exactly one of window and limit"
+   },
+   {
+    "name": "neither",
+    "event": {
+     "id": "ref-21",
+     "kind": "refusal",
+     "account": "anthropic-1",
+     "read_at": 1799999880,
+     "window": null,
+     "limit": null,
+     "class": "spent",
+     "until": 1800001680,
+     "resets_at": null,
+     "by_reading": false,
+     "seen": null
+    },
+    "why": "a refusal names exactly one of window and limit"
+   },
+   {
+    "name": "a limit with no until",
+    "event": {
+     "id": "ref-22",
+     "kind": "refusal",
+     "account": "anthropic-1",
+     "read_at": 1799999880,
+     "window": null,
+     "limit": "model:claude-opus-4-1",
+     "class": "spent",
+     "until": null,
+     "resets_at": null,
+     "by_reading": false,
+     "seen": null
+    },
+    "why": "a limit's refusal carries its until: no reading can end it"
+   },
+   {
+    "name": "an unknown limit prefix",
+    "event": {
+     "id": "ref-23",
+     "kind": "refusal",
+     "account": "anthropic-1",
+     "read_at": 1799999880,
+     "window": null,
+     "limit": "scope:Sonnet",
+     "class": "spent",
+     "until": 1800001680,
+     "resets_at": null,
+     "by_reading": false,
+     "seen": null
+    },
+    "why": "unknown limit 'scope:Sonnet': a limit is model:<model> or pool:<name>"
+   }
+  ]
+ }
+}

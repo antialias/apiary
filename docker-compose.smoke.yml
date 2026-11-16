@@ -1,0 +1,30 @@
+# docker-compose.smoke.yml: the compose smoke test's override (smoke/run.sh), not for running
+# Apiary. It builds both images from this checkout under local-only names, so nothing is pulled,
+# and points the brain and the proxy at a stub Anthropic API inside the compose network, so no
+# request leaves it.
+services:
+  brain:
+    image: apiary-smoke/brain:local
+    pull_policy: build
+    environment:
+      ANTHROPIC_API_BASE: http://stub:8080
+      POLL_INTERVAL: "5"
+
+  proxy:
+    image: apiary-smoke/proxy:local
+    pull_policy: build
+    depends_on:
+      - stub
+    environment:
+      ANTHROPIC_UPSTREAM: http://stub:8080
+
+  init:
+    image: apiary-smoke/brain:local
+
+  stub:
+    image: apiary-smoke/brain:local
+    entrypoint: ["python3", "/smoke/stub_upstream.py"]
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - ./smoke/stub_upstream.py:/smoke/stub_upstream.py:ro

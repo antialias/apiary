@@ -1,0 +1,128 @@
+{
+ "_doc": "Served events on one account's seven_day window, hand-made around the 7d transitions the proxy logged on 2026-11-03 (rlat= of the first rl=7d:0.10, 0.11, 0.12, 0.13; 66 §2), with made-up Claude Opus 5.5 tokens. Times are UTC on `date`; each event's seven_day reading is the meter at its head. The 20:05 case: the first 0.10 in end order has head 20:05:54.851, and one ending 7 s later has head 20:05:51.630. The 20:50 flips: long requests whose heads preceded T_13 end among short ones after it. Events are listed in end order; the brain must find the same boundaries and samples in head order. The first head anchors at 9 and its first transition is no step.",
+ "date": "2026-11-03",
+ "account": "anthropic-1",
+ "model": "claude-opus-5-5",
+ "resets_at": 1794326400,
+ "events": [
+  {"seq": 1, "head": "20:00:07.250", "end": "20:00:10.375", "seven_day": 9, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 2, "head": "20:01:07.250", "end": "20:01:17.375", "seven_day": 9, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 3, "head": "20:02:09.250", "end": "20:02:26.375", "seven_day": 9, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 4, "head": "20:03:13.250", "end": "20:03:22.375", "seven_day": 9, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 5, "head": "20:04:19.250", "end": "20:04:35.375", "seven_day": 9, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 6, "head": "20:05:27.250", "end": "20:05:35.375", "seven_day": 9, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 7, "head": "20:05:54.851", "end": "20:05:58.040", "seven_day": 10, "tokens": {"input": 200, "cache_write_5m": 0, "cache_write_1h": 0, "cache_read": 5000, "output": 30}},
+  {"seq": 8, "head": "20:05:51.630", "end": "20:06:05.020", "seven_day": 10, "tokens": {"input": 200, "cache_write_5m": 0, "cache_write_1h": 0, "cache_read": 5000, "output": 30}},
+  {"seq": 9, "head": "20:06:37.250", "end": "20:06:52.375", "seven_day": 10, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 10, "head": "20:07:38.250", "end": "20:07:45.375", "seven_day": 10, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 11, "head": "20:08:41.250", "end": "20:08:55.375", "seven_day": 10, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 12, "head": "20:09:46.250", "end": "20:09:52.375", "seven_day": 10, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 13, "head": "20:10:53.250", "end": "20:11:06.375", "seven_day": 10, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 14, "head": "20:12:02.250", "end": "20:12:07.375", "seven_day": 10, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 15, "head": "20:13:02.250", "end": "20:13:14.375", "seven_day": 10, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 16, "head": "20:14:04.250", "end": "20:14:08.375", "seven_day": 10, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 17, "head": "20:15:08.250", "end": "20:15:19.375", "seven_day": 10, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 18, "head": "20:16:14.250", "end": "20:16:17.375", "seven_day": 10, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 19, "head": "20:17:22.250", "end": "20:17:32.375", "seven_day": 10, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 20, "head": "20:17:43.276", "end": "20:17:47.910", "seven_day": 11, "tokens": {"input": 200, "cache_write_5m": 0, "cache_write_1h": 0, "cache_read": 5000, "output": 30}},
+  {"seq": 21, "head": "20:18:32.250", "end": "20:18:49.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 22, "head": "20:19:33.250", "end": "20:19:42.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 23, "head": "20:20:36.250", "end": "20:20:52.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 24, "head": "20:21:41.250", "end": "20:21:49.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 25, "head": "20:22:48.250", "end": "20:23:03.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 26, "head": "20:23:57.250", "end": "20:24:04.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 27, "head": "20:24:57.250", "end": "20:25:11.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 28, "head": "20:25:59.250", "end": "20:26:05.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 29, "head": "20:27:03.250", "end": "20:27:16.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 30, "head": "20:28:09.250", "end": "20:28:14.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 31, "head": "20:29:17.250", "end": "20:29:29.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 32, "head": "20:30:27.250", "end": "20:30:31.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 33, "head": "20:31:28.250", "end": "20:31:39.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 34, "head": "20:32:31.250", "end": "20:32:34.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 35, "head": "20:33:36.250", "end": "20:33:46.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 36, "head": "20:34:43.250", "end": "20:35:00.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 37, "head": "20:35:52.250", "end": "20:36:01.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 38, "head": "20:36:59.522", "end": "20:37:02.300", "seven_day": 12, "tokens": {"input": 200, "cache_write_5m": 0, "cache_write_1h": 0, "cache_read": 5000, "output": 30}},
+  {"seq": 39, "head": "20:36:52.250", "end": "20:37:08.375", "seven_day": 11, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 40, "head": "20:37:54.250", "end": "20:38:02.375", "seven_day": 12, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 41, "head": "20:38:58.250", "end": "20:39:13.375", "seven_day": 12, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 42, "head": "20:40:04.250", "end": "20:40:11.375", "seven_day": 12, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 43, "head": "20:41:12.250", "end": "20:41:26.375", "seven_day": 12, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 44, "head": "20:42:22.250", "end": "20:42:28.375", "seven_day": 12, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 45, "head": "20:43:23.250", "end": "20:43:36.375", "seven_day": 12, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 46, "head": "20:44:26.250", "end": "20:44:31.375", "seven_day": 12, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 47, "head": "20:45:31.250", "end": "20:45:43.375", "seven_day": 12, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 48, "head": "20:46:38.250", "end": "20:46:42.375", "seven_day": 12, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 49, "head": "20:47:47.250", "end": "20:47:58.375", "seven_day": 12, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 50, "head": "20:48:47.250", "end": "20:48:50.375", "seven_day": 12, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 51, "head": "20:49:49.250", "end": "20:49:59.375", "seven_day": 12, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 52, "head": "20:50:20.788", "end": "20:50:21.400", "seven_day": 13, "tokens": {"input": 200, "cache_write_5m": 0, "cache_write_1h": 0, "cache_read": 5000, "output": 30}},
+  {"seq": 53, "head": "20:49:58.100", "end": "20:50:23.500", "seven_day": 12, "tokens": {"input": 200, "cache_write_5m": 0, "cache_write_1h": 0, "cache_read": 5000, "output": 30}},
+  {"seq": 54, "head": "20:50:22.050", "end": "20:50:26.700", "seven_day": 13, "tokens": {"input": 200, "cache_write_5m": 0, "cache_write_1h": 0, "cache_read": 5000, "output": 30}},
+  {"seq": 55, "head": "20:50:02.700", "end": "20:50:29.800", "seven_day": 12, "tokens": {"input": 200, "cache_write_5m": 0, "cache_write_1h": 0, "cache_read": 5000, "output": 30}},
+  {"seq": 56, "head": "20:50:27.400", "end": "20:50:32.100", "seven_day": 13, "tokens": {"input": 200, "cache_write_5m": 0, "cache_write_1h": 0, "cache_read": 5000, "output": 30}},
+  {"seq": 57, "head": "20:50:09.300", "end": "20:50:35.200", "seven_day": 12, "tokens": {"input": 200, "cache_write_5m": 0, "cache_write_1h": 0, "cache_read": 5000, "output": 30}},
+  {"seq": 58, "head": "20:50:33.000", "end": "20:50:38.300", "seven_day": 13, "tokens": {"input": 200, "cache_write_5m": 0, "cache_write_1h": 0, "cache_read": 5000, "output": 30}},
+  {"seq": 59, "head": "20:50:14.900", "end": "20:50:41.600", "seven_day": 12, "tokens": {"input": 200, "cache_write_5m": 0, "cache_write_1h": 0, "cache_read": 5000, "output": 30}},
+  {"seq": 60, "head": "20:50:39.200", "end": "20:50:44.900", "seven_day": 13, "tokens": {"input": 200, "cache_write_5m": 0, "cache_write_1h": 0, "cache_read": 5000, "output": 30}},
+  {"seq": 61, "head": "20:50:53.250", "end": "20:51:10.375", "seven_day": 13, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 62, "head": "20:51:59.250", "end": "20:52:08.375", "seven_day": 13, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 63, "head": "20:53:07.250", "end": "20:53:23.375", "seven_day": 13, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 64, "head": "20:54:17.250", "end": "20:54:25.375", "seven_day": 13, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 65, "head": "20:55:18.250", "end": "20:55:33.375", "seven_day": 13, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 66, "head": "20:56:21.250", "end": "20:56:28.375", "seven_day": 13, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 67, "head": "20:57:26.250", "end": "20:57:40.375", "seven_day": 13, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 68, "head": "20:58:33.250", "end": "20:58:39.375", "seven_day": 13, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 69, "head": "20:59:42.250", "end": "20:59:55.375", "seven_day": 13, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 70, "head": "21:00:42.250", "end": "21:00:47.375", "seven_day": 13, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}},
+  {"seq": 71, "head": "21:01:44.250", "end": "21:01:56.375", "seven_day": 13, "tokens": {"input": 3000, "cache_write_5m": 0, "cache_write_1h": 4000, "cache_read": 220000, "output": 1800}}
+ ],
+ "expect": {
+  "boundaries": {
+   "10": "20:05:51.630",
+   "11": "20:17:43.276",
+   "12": "20:36:59.522",
+   "13": "20:50:20.788"
+  },
+  "anchor": {
+   "q": 13,
+   "t": "20:50:20.788"
+  },
+  "samples": [
+   {
+    "p": 10,
+    "q": 11,
+    "from": "20:05:51.630",
+    "to": "20:17:43.276",
+    "events": 13,
+    "usd": 1.3688
+   },
+   {
+    "p": 11,
+    "q": 12,
+    "from": "20:17:43.276",
+    "to": "20:36:59.522",
+    "events": 18,
+    "usd": 2.1104
+   },
+   {
+    "p": 12,
+    "q": 13,
+    "from": "20:36:59.522",
+    "to": "20:50:20.788",
+    "events": 14,
+    "usd": 1.6144
+   }
+  ],
+  "steps_total": {
+   "sample": 3
+  },
+  "boundary_10_after": {
+   "20:05:58.040": "20:05:54.851",
+   "20:06:05.020": "20:05:51.630"
+  },
+  "samples_before": {
+   "21:00:20.788": 2
+  }
+ }
+}

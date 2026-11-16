@@ -1,0 +1,56 @@
+[
+  {
+    "name": "fable-5-1",
+    "display": "Claude Fable 5.1",
+    "type": "anthropic",
+    "context_window": 200000
+  },
+  {
+    "name": "fable-5-1",
+    "display": "Claude Fable 5.1 (1M)",
+    "type": "anthropic",
+    "context_window": 1000000
+  },
+  {
+    "name": "fable-5",
+    "display": "Claude Fable 5",
+    "type": "anthropic",
+    "context_window": 200000
+  },
+  {
+    "name": "fable-5",
+    "display": "Claude Fable 5 (1M)",
+    "type": "anthropic",
+    "context_window": 1000000
+  },
+  {
+    "name": "opus-5-5",
+    "display": "Claude Opus 5.5",
+    "type": "anthropic",
+    "context_window": 200000
+  },
+  {
+    "name": "opus-5-5",
+    "display": "Claude Opus 5.5 (1M)",
+    "type": "anthropic",
+    "context_window": 1000000
+  },
+  {
+    "name": "sonnet-5",
+    "display": "Claude Sonnet 5",
+    "type": "anthropic",
+    "context_window": 200000
+  },
+  {
+    "name": "sonnet-5",
+    "display": "Claude Sonnet 5 (1M)",
+    "type": "anthropic",
+    "context_window": 1000000
+  },
+  {
+    "name": "haiku-4-5-20251001",
+    "display": "Claude Haiku 4.5",
+    "type": "anthropic",
+    "context_window": 200000
+  }
+]

@@ -1,0 +1,3118 @@
+{
+ "doc": "The figure's cases (quota-model 67 §11): standings in short form, the classes and bare lanes' settings the routes come from, the sizing view (_sizing_fleet_view's shape: whole-window dollars) and the fleet expected, compared as a subset. Made-up names and numbers. Times are seconds from `now`: a window's resets_in, an account's age.",
+ "cases": [
+  {
+   "name": "67 §5 worked example",
+   "notes": [
+    "Provider P is anthropic (R = Opus, the reference; F = Fable weighed at 2.3; S = Sonnet 5 unweighed), Q is gpt (T its reference). A, B, C, G, K are sub-A, sub-B, sub-C, gpt-G, gpt-K.",
+    "Two corrections to 67 §5's arithmetic, both from rules 67 §6 states itself. (1) A stop_at is per route, so the frontier member's stop_at 7d 80 caps A (and C) as well as B: A's main window is cap 80, capacity 80 x 13.0435 = $1,043.48, room 30 x 13.0435 = $391.30, and A takes room $391.30, not $455. (2) A stop_at naming 7d names the unscoped seven_day window (_stop_window), not scoped:Fable, so B's scoped window keeps cap 100: capacity and room 100 x 1.3 = $130, not $104.",
+    "frontier is therefore capacity 650 + 130 + 2000 = $2,780, room 391.30 + 130 + 1500 = $2,021.30, 72.7 % left (67 §5: $2,754, $2,059, 75 %). lane:opus (the doc's lane:R), fast and the whole proxy are as 67 §5 has them: $6,600 / $2,340 / 35.5 %, $5,573.68 / $1,826.84 / 32.8 %, $7,573.68 / $3,326.84 / 43.9 %.",
+    "lane:default has no model of its own lane weighed, so it is valued at each window's mix, as fast is (67 §11)."
+   ],
+   "now": 1793740000,
+   "accounts": {
+    "sub-A": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 50,
+       "resets_in": 300000
+      },
+      "scoped:Fable": {
+       "period_s": 604800,
+       "scope": "Fable",
+       "used": 30,
+       "resets_in": 300000
+      }
+     }
+    },
+    "sub-B": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 10,
+       "resets_in": 300000
+      },
+      "scoped:Fable": {
+       "period_s": 604800,
+       "scope": "Fable",
+       "used": 0,
+       "resets_in": 300000
+      }
+     }
+    },
+    "sub-C": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 90,
+       "resets_in": 300000
+      },
+      "five_hour": {
+       "period_s": 18000,
+       "scope": null,
+       "used": 100,
+       "resets_in": 3600
+      },
+      "scoped:Fable": {
+       "period_s": 604800,
+       "scope": "Fable",
+       "used": 20,
+       "resets_in": 300000
+      }
+     }
+    },
+    "gpt-G": {
+     "provider": "gpt",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 25,
+       "resets_in": 300000
+      }
+     }
+    },
+    "gpt-K": {
+     "provider": "gpt",
+     "measured": false
+    }
+   },
+   "classes": [
+    {
+     "class": "frontier",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "fable",
+       "model": "claude-fable-5-1",
+       "priority": 1,
+       "stop_at": {
+        "window": "7d",
+        "level": 80
+       }
+      },
+      {
+       "kind": "provider",
+       "provider": "gpt",
+       "model": "gpt-6-astra",
+       "priority": 2,
+       "stop_at": null
+      }
+     ]
+    },
+    {
+     "class": "fast",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "sonnet",
+       "model": "claude-sonnet-5",
+       "priority": 1,
+       "stop_at": null
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizing": {
+    "providers": {
+     "anthropic": {
+      "reference": "claude-opus-5-5",
+      "models": {
+       "claude-opus-5-5": {
+        "basis": "reference",
+        "dollars": 1000.0
+       },
+       "claude-fable-5-1": {
+        "basis": "weighed",
+        "dollars": 400.0
+       },
+       "claude-sonnet-5": {
+        "basis": "unweighed",
+        "dollars": 20.0
+       }
+      }
+     },
+     "gpt": {
+      "reference": "gpt-6-astra",
+      "models": {
+       "gpt-6-astra": {
+        "basis": "reference",
+        "dollars": 500.0
+       }
+      }
+     }
+    },
+    "windows": {
+     "sub-A": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 1973.6842,
+       "sizes": {
+        "claude-opus-5-5": 3000.0,
+        "claude-fable-5-1": 1304.3478
+       },
+       "samples": 20
+      },
+      "scoped:Fable": {
+       "basis": "learned",
+       "mix": 650.0,
+       "sizes": {
+        "claude-fable-5-1": 650.0
+       },
+       "samples": 20
+      }
+     },
+     "sub-B": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 600.0,
+       "sizes": {
+        "claude-opus-5-5": 600.0,
+        "claude-fable-5-1": 260.8696
+       },
+       "samples": 20
+      },
+      "scoped:Fable": {
+       "basis": "learned",
+       "mix": 130.0,
+       "sizes": {
+        "claude-fable-5-1": 130.0
+       },
+       "samples": 20
+      }
+     },
+     "sub-C": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 3000.0,
+       "sizes": {
+        "claude-opus-5-5": 3000.0,
+        "claude-fable-5-1": 1304.3478
+       },
+       "samples": 20
+      },
+      "scoped:Fable": {
+       "basis": "few_steps",
+       "mix": 640.0,
+       "sizes": {
+        "claude-fable-5-1": 640.0
+       },
+       "samples": 2
+      }
+     },
+     "gpt-G": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 2000.0,
+       "sizes": {
+        "gpt-6-astra": 2000.0
+       },
+       "samples": 20
+      }
+     }
+    }
+   },
+   "expect": {
+    "unit": "api_usd",
+    "proxy": {
+     "capacity": 7573.68,
+     "room": 3326.84,
+     "left_pct": 43.9,
+     "valued": "mix",
+     "resting": [
+      "sub-C"
+     ],
+     "stale": [],
+     "listed": [
+      {
+       "account": "gpt-K",
+       "why": "unmeasured"
+      }
+     ]
+    },
+    "selections": {
+     "frontier": {
+      "capacity": 2780.0,
+      "room": 2021.3,
+      "left_pct": 72.7,
+      "resting": [],
+      "stale": [],
+      "listed": [
+       {
+        "account": "gpt-K",
+        "why": "unmeasured"
+       },
+       {
+        "account": "sub-C",
+        "why": "scoped:Fable not sized yet (few_steps)"
+       }
+      ],
+      "accounts": {
+       "sub-A": {
+        "member": "lane:fable",
+        "model": "claude-fable-5-1",
+        "valued": "claude-fable-5-1",
+        "capacity": 650.0,
+        "room": 391.3,
+        "refused": null,
+        "resting_until": null,
+        "windows": {
+         "seven_day": {
+          "cap": 80.0,
+          "used": 50.0,
+          "per_point": 13.0435,
+          "capacity": 1043.48,
+          "room": 391.3
+         },
+         "scoped:Fable": {
+          "cap": 100.0,
+          "used": 30.0,
+          "per_point": 6.5,
+          "capacity": 650.0,
+          "room": 455.0
+         }
+        }
+       },
+       "sub-B": {
+        "capacity": 130.0,
+        "room": 130.0,
+        "windows": {
+         "seven_day": {
+          "cap": 80.0,
+          "per_point": 2.6087,
+          "capacity": 208.7,
+          "room": 182.61
+         },
+         "scoped:Fable": {
+          "cap": 100.0,
+          "capacity": 130.0,
+          "room": 130.0
+         }
+        }
+       },
+       "gpt-G": {
+        "member": "gpt/gpt-6-astra",
+        "model": "gpt-6-astra",
+        "valued": "gpt-6-astra",
+        "capacity": 2000.0,
+        "room": 1500.0
+       }
+      }
+     },
+     "lane:opus": {
+      "capacity": 6600.0,
+      "room": 2340.0,
+      "left_pct": 35.5,
+      "resting": [
+       "sub-C"
+      ],
+      "listed": [],
+      "accounts": {
+       "sub-A": {
+        "member": "lane:opus",
+        "model": "claude-opus-5-5",
+        "valued": "claude-opus-5-5",
+        "capacity": 3000.0,
+        "room": 1500.0
+       },
+       "sub-B": {
+        "capacity": 600.0,
+        "room": 540.0
+       },
+       "sub-C": {
+        "capacity": 3000.0,
+        "room": 300.0,
+        "resting_until": 1793743600,
+        "refused": null
+       }
+      }
+     },
+     "fast": {
+      "capacity": 5573.68,
+      "room": 1826.84,
+      "left_pct": 32.8,
+      "resting": [
+       "sub-C"
+      ],
+      "accounts": {
+       "sub-A": {
+        "model": "claude-sonnet-5",
+        "valued": "mix",
+        "capacity": 1973.68,
+        "room": 986.84
+       },
+       "sub-B": {
+        "valued": "mix",
+        "capacity": 600.0,
+        "room": 540.0
+       },
+       "sub-C": {
+        "valued": "mix",
+        "capacity": 3000.0,
+        "room": 300.0
+       }
+      }
+     },
+     "lane:default": {
+      "capacity": 5573.68,
+      "room": 1826.84,
+      "left_pct": 32.8,
+      "accounts": {
+       "sub-A": {
+        "model": null,
+        "valued": "mix"
+       }
+      }
+     }
+    },
+    "accounts": {
+     "sub-A": {
+      "main": "seven_day",
+      "used": 50.0,
+      "cap": 100.0,
+      "left_pct": 50.0,
+      "stale": false,
+      "size_basis": "learned",
+      "steps": 20,
+      "sizes": {
+       "mix": 1973.68,
+       "claude-opus-5-5": 3000.0,
+       "claude-fable-5-1": 1304.35
+      },
+      "reference": "claude-opus-5-5",
+      "scoped": {
+       "scoped:Fable": {
+        "used": 30.0,
+        "cap": 100.0,
+        "left_pct": 70.0,
+        "size_basis": "learned",
+        "sizes": {
+         "mix": 650.0,
+         "claude-fable-5-1": 650.0
+        }
+       }
+      },
+      "capacity": 1973.68,
+      "room": 986.84,
+      "resting_until": null,
+      "listed": null,
+      "limits": []
+     },
+     "sub-B": {
+      "cap": 100.0,
+      "left_pct": 90.0,
+      "capacity": 600.0,
+      "room": 540.0
+     },
+     "sub-C": {
+      "resting_until": 1793743600,
+      "capacity": 3000.0,
+      "room": 300.0,
+      "scoped": {
+       "scoped:Fable": {
+        "size_basis": "few_steps",
+        "sizes": {}
+       }
+      }
+     },
+     "gpt-K": {
+      "main": null,
+      "listed": "unmeasured",
+      "limits": []
+     }
+    }
+   }
+  },
+  {
+   "name": "one account, one window: left_pct is (cap - used) / cap whatever the model",
+   "notes": [
+    "Valued at Opus ($10/pt), at Fable ($4/pt) or at the mix ($8/pt), 35 of 100 used leaves 65 %.",
+    "The bare opus lane has two weighed models of its own: it is valued at the one with more dollars, Opus 5.5 ($10/pt), not Opus 4.1 ($6/pt)."
+   ],
+   "now": 1793740000,
+   "accounts": {
+    "sub-A": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 35,
+       "resets_in": 300000
+      }
+     }
+    }
+   },
+   "classes": [
+    {
+     "class": "o",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1,
+       "stop_at": null
+      }
+     ]
+    },
+    {
+     "class": "f",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "fable",
+       "model": "claude-fable-5-1",
+       "priority": 1,
+       "stop_at": null
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizing": {
+    "providers": {
+     "anthropic": {
+      "reference": "claude-opus-5-5",
+      "models": {
+       "claude-opus-5-5": {
+        "basis": "reference",
+        "dollars": 1000.0
+       },
+       "claude-fable-5-1": {
+        "basis": "weighed",
+        "dollars": 400.0
+       },
+       "claude-sonnet-5": {
+        "basis": "unweighed",
+        "dollars": 20.0
+       },
+       "claude-opus-4-1": {
+        "basis": "weighed",
+        "dollars": 50.0
+       }
+      }
+     }
+    },
+    "windows": {
+     "sub-A": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 800.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0,
+        "claude-fable-5-1": 400.0,
+        "claude-opus-4-1": 600.0
+       },
+       "samples": 20
+      }
+     }
+    }
+   },
+   "expect": {
+    "proxy": {
+     "capacity": 800.0,
+     "room": 520.0,
+     "left_pct": 65.0
+    },
+    "selections": {
+     "o": {
+      "capacity": 1000.0,
+      "room": 650.0,
+      "left_pct": 65.0
+     },
+     "lane:opus": {
+      "capacity": 1000.0,
+      "room": 650.0,
+      "accounts": {
+       "sub-A": {
+        "model": "claude-opus-5-5",
+        "valued": "claude-opus-5-5"
+       }
+      }
+     },
+     "f": {
+      "capacity": 400.0,
+      "room": 260.0,
+      "left_pct": 65.0
+     },
+     "lane:haiku": {
+      "capacity": 800.0,
+      "room": 520.0,
+      "left_pct": 65.0,
+      "accounts": {
+       "sub-A": {
+        "valued": "mix"
+       }
+      }
+     }
+    },
+    "accounts": {
+     "sub-A": {
+      "left_pct": 65.0
+     }
+    }
+   }
+  },
+  {
+   "name": "cap from a route's stop_at: by period, by scope, effective, at or above 100, and 0",
+   "notes": [
+    "Fable is $5/pt on seven_day (used 20) and $2/pt on scoped:Fable (used 10).",
+    "by-period (7d 50): seven_day 250/150, scoped 200/180 -> 200/150.",
+    "by-scope (Fable 40): seven_day 500/400, scoped 80/60 -> 80/60.",
+    "effective (60): seven_day 300/200, scoped 120/100 -> 120/100.",
+    "over (7d 150): cap 100 -> 200/180. zero (7d 0): seven_day 0/0 -> 0/0, no left_pct; negative (7d -10) is cap 0 as well. A stop_at reached on a counted window is room 0 by the arithmetic, not refused.",
+    "The accounts level takes the highest cap any route allows: the bare lanes allow 100."
+   ],
+   "now": 1793740000,
+   "accounts": {
+    "sub-A": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 20,
+       "resets_in": 300000
+      },
+      "scoped:Fable": {
+       "period_s": 604800,
+       "scope": "Fable",
+       "used": 10,
+       "resets_in": 300000
+      }
+     }
+    }
+   },
+   "classes": [
+    {
+     "class": "by-period",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "fable",
+       "model": "claude-fable-5-1",
+       "priority": 1,
+       "stop_at": {
+        "window": "7d",
+        "level": 50
+       }
+      }
+     ]
+    },
+    {
+     "class": "by-scope",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "fable",
+       "model": "claude-fable-5-1",
+       "priority": 1,
+       "stop_at": {
+        "window": "Fable",
+        "level": 40
+       }
+      }
+     ]
+    },
+    {
+     "class": "effective",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "fable",
+       "model": "claude-fable-5-1",
+       "priority": 1,
+       "stop_at": {
+        "window": "effective",
+        "level": 60
+       }
+      }
+     ]
+    },
+    {
+     "class": "over",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "fable",
+       "model": "claude-fable-5-1",
+       "priority": 1,
+       "stop_at": {
+        "window": "7d",
+        "level": 150
+       }
+      }
+     ]
+    },
+    {
+     "class": "zero",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "fable",
+       "model": "claude-fable-5-1",
+       "priority": 1,
+       "stop_at": {
+        "window": "7d",
+        "level": 0
+       }
+      }
+     ]
+    },
+    {
+     "class": "negative",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "fable",
+       "model": "claude-fable-5-1",
+       "priority": 1,
+       "stop_at": {
+        "window": "7d",
+        "level": -10
+       }
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizing": {
+    "providers": {
+     "anthropic": {
+      "reference": "claude-opus-5-5",
+      "models": {
+       "claude-opus-5-5": {
+        "basis": "reference",
+        "dollars": 1000.0
+       },
+       "claude-fable-5-1": {
+        "basis": "weighed",
+        "dollars": 400.0
+       },
+       "claude-sonnet-5": {
+        "basis": "unweighed",
+        "dollars": 20.0
+       }
+      }
+     }
+    },
+    "windows": {
+     "sub-A": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 800.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0,
+        "claude-fable-5-1": 500.0
+       },
+       "samples": 20
+      },
+      "scoped:Fable": {
+       "basis": "learned",
+       "mix": 200.0,
+       "sizes": {
+        "claude-fable-5-1": 200.0
+       },
+       "samples": 20
+      }
+     }
+    }
+   },
+   "expect": {
+    "selections": {
+     "by-period": {
+      "capacity": 200.0,
+      "room": 150.0,
+      "accounts": {
+       "sub-A": {
+        "windows": {
+         "seven_day": {
+          "cap": 50.0,
+          "capacity": 250.0,
+          "room": 150.0
+         },
+         "scoped:Fable": {
+          "cap": 100.0
+         }
+        }
+       }
+      }
+     },
+     "by-scope": {
+      "capacity": 80.0,
+      "room": 60.0,
+      "accounts": {
+       "sub-A": {
+        "windows": {
+         "seven_day": {
+          "cap": 100.0
+         },
+         "scoped:Fable": {
+          "cap": 40.0
+         }
+        }
+       }
+      }
+     },
+     "effective": {
+      "capacity": 120.0,
+      "room": 100.0,
+      "accounts": {
+       "sub-A": {
+        "windows": {
+         "seven_day": {
+          "cap": 60.0
+         },
+         "scoped:Fable": {
+          "cap": 60.0
+         }
+        }
+       }
+      }
+     },
+     "over": {
+      "capacity": 200.0,
+      "room": 180.0
+     },
+     "zero": {
+      "capacity": 0.0,
+      "room": 0.0,
+      "left_pct": null,
+      "accounts": {
+       "sub-A": {
+        "refused": null
+       }
+      }
+     },
+     "negative": {
+      "capacity": 0.0,
+      "room": 0.0,
+      "left_pct": null,
+      "accounts": {
+       "sub-A": {
+        "windows": {
+         "seven_day": {
+          "cap": 0.0
+         }
+        }
+       }
+      }
+     }
+    },
+    "accounts": {
+     "sub-A": {
+      "cap": 100.0,
+      "scoped": {
+       "scoped:Fable": {
+        "cap": 100.0
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "the whole proxy takes the highest cap any route allows",
+   "notes": [
+    "Every route names seven_day: a 7d 50, b effective 60, every bare lane 7d 70. The proxy level caps the account at 70: at the mix ($8/pt), 560 / 400, 71.4 %."
+   ],
+   "now": 1793740000,
+   "accounts": {
+    "sub-A": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 20,
+       "resets_in": 300000
+      }
+     }
+    }
+   },
+   "classes": [
+    {
+     "class": "a",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1,
+       "stop_at": {
+        "window": "7d",
+        "level": 50
+       }
+      }
+     ]
+    },
+    {
+     "class": "b",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "fable",
+       "model": "claude-fable-5-1",
+       "priority": 1,
+       "stop_at": {
+        "window": "effective",
+        "level": 60
+       }
+      }
+     ]
+    }
+   ],
+   "lanes": {
+    "fable": {
+     "stop_at": {
+      "window": "7d",
+      "level": 70
+     }
+    },
+    "opus": {
+     "stop_at": {
+      "window": "7d",
+      "level": 70
+     }
+    },
+    "sonnet": {
+     "stop_at": {
+      "window": "7d",
+      "level": 70
+     }
+    },
+    "haiku": {
+     "stop_at": {
+      "window": "7d",
+      "level": 70
+     }
+    },
+    "default": {
+     "stop_at": {
+      "window": "7d",
+      "level": 70
+     }
+    }
+   },
+   "sizing": {
+    "providers": {
+     "anthropic": {
+      "reference": "claude-opus-5-5",
+      "models": {
+       "claude-opus-5-5": {
+        "basis": "reference",
+        "dollars": 1000.0
+       },
+       "claude-fable-5-1": {
+        "basis": "weighed",
+        "dollars": 400.0
+       },
+       "claude-sonnet-5": {
+        "basis": "unweighed",
+        "dollars": 20.0
+       }
+      }
+     }
+    },
+    "windows": {
+     "sub-A": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 800.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0,
+        "claude-fable-5-1": 500.0
+       },
+       "samples": 20
+      }
+     }
+    }
+   },
+   "expect": {
+    "proxy": {
+     "capacity": 560.0,
+     "room": 400.0,
+     "left_pct": 71.4
+    },
+    "selections": {
+     "a": {
+      "capacity": 500.0,
+      "room": 300.0
+     },
+     "b": {
+      "capacity": 300.0,
+      "room": 200.0
+     },
+     "lane:opus": {
+      "capacity": 700.0,
+      "room": 500.0
+     }
+    },
+    "accounts": {
+     "sub-A": {
+      "cap": 70.0,
+      "left_pct": 71.4,
+      "capacity": 560.0,
+      "room": 400.0
+     }
+    }
+   }
+  },
+  {
+   "name": "a held main window, a closed short window, both closed, a stale reading, a passed reset, a closed short scoped window",
+   "notes": [
+    "Each account is $10/pt at Opus. held: seven_day at 100 (a hold reads 100): room 0, capacity kept, refused until its reset. resting: five_hour closed, seven_day at 40: room 600 counted, resting until the five_hour reset. both: room 0, refused until the later reset, not resting. stale: read 4000 s ago, counted at 40 and marked. reopened: seven_day read 100 but its reset has passed: it counts as reopened, used 0, as the dial check reads it (50 §1.4).",
+    "short-scoped: a 5-hour window scoped to Opus is closed; shorter than the main, it is a speed limit, not the scoped window of the min rule: lane:opus rests the account, room 600 counted. The whole proxy (unscoped) does not see it.",
+    "fable-spent: its weekly scoped:Fable window is spent, the main open: the scoped window is as long as the main, so lane:fable refuses the account (room 0 until that reset); lane:opus, which it does not bind, counts 600.",
+    "two-short: five_hour and a one-day window both closed: resting until the later reset.",
+    "gate-short: the provider's own gate is shut beside a closed five_hour: refused, not resting. own-gate: seven_day at 30 but shut by its own gate: it counts 100, refused.",
+    "lane:opus: capacity 10 x 1000, room 600 x 5 (resting, stale, short-scoped, fable-spent, two-short) + 1000 (reopened) = 4000, 40 %."
+   ],
+   "now": 1793740000,
+   "accounts": {
+    "held": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 100,
+       "resets_in": 200000
+      },
+      "five_hour": {
+       "period_s": 18000,
+       "scope": null,
+       "used": 20,
+       "resets_in": 3600
+      }
+     }
+    },
+    "resting": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 40,
+       "resets_in": 300000
+      },
+      "five_hour": {
+       "period_s": 18000,
+       "scope": null,
+       "used": 100,
+       "resets_in": 3600
+      }
+     }
+    },
+    "both": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 100,
+       "resets_in": 200000
+      },
+      "five_hour": {
+       "period_s": 18000,
+       "scope": null,
+       "used": 100,
+       "resets_in": 3600
+      }
+     }
+    },
+    "stale": {
+     "provider": "anthropic",
+     "age": 4000,
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 40,
+       "resets_in": 300000
+      }
+     }
+    },
+    "reopened": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 100,
+       "resets_in": -60
+      }
+     }
+    },
+    "short-scoped": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 40,
+       "resets_in": 300000
+      },
+      "window:5h:Opus": {
+       "period_s": 18000,
+       "scope": "Opus",
+       "used": 100,
+       "resets_in": 3600
+      }
+     }
+    },
+    "fable-spent": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 40,
+       "resets_in": 300000
+      },
+      "scoped:Fable": {
+       "period_s": 604800,
+       "scope": "Fable",
+       "used": 100,
+       "resets_in": 200000
+      }
+     }
+    },
+    "two-short": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 40,
+       "resets_in": 300000
+      },
+      "five_hour": {
+       "period_s": 18000,
+       "scope": null,
+       "used": 100,
+       "resets_in": 3600
+      },
+      "window:1d": {
+       "period_s": 86400,
+       "scope": null,
+       "used": 100,
+       "resets_in": 50000
+      }
+     }
+    },
+    "gate-short": {
+     "provider": "anthropic",
+     "gate": false,
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 40,
+       "resets_in": 300000
+      },
+      "five_hour": {
+       "period_s": 18000,
+       "scope": null,
+       "used": 100,
+       "resets_in": 3600
+      }
+     }
+    },
+    "own-gate": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 30,
+       "resets_in": 300000,
+       "open": false
+      }
+     }
+    }
+   },
+   "classes": [],
+   "lanes": {},
+   "sizing": {
+    "providers": {
+     "anthropic": {
+      "reference": "claude-opus-5-5",
+      "models": {
+       "claude-opus-5-5": {
+        "basis": "reference",
+        "dollars": 1.0
+       }
+      }
+     }
+    },
+    "windows": {
+     "held": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 1000.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0
+       },
+       "samples": 20
+      },
+      "scoped:Fable": {
+       "basis": "learned",
+       "mix": 200.0,
+       "sizes": {},
+       "samples": 20
+      }
+     },
+     "resting": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 1000.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0
+       },
+       "samples": 20
+      },
+      "scoped:Fable": {
+       "basis": "learned",
+       "mix": 200.0,
+       "sizes": {},
+       "samples": 20
+      }
+     },
+     "both": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 1000.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0
+       },
+       "samples": 20
+      },
+      "scoped:Fable": {
+       "basis": "learned",
+       "mix": 200.0,
+       "sizes": {},
+       "samples": 20
+      }
+     },
+     "stale": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 1000.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0
+       },
+       "samples": 20
+      },
+      "scoped:Fable": {
+       "basis": "learned",
+       "mix": 200.0,
+       "sizes": {},
+       "samples": 20
+      }
+     },
+     "reopened": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 1000.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0
+       },
+       "samples": 20
+      },
+      "scoped:Fable": {
+       "basis": "learned",
+       "mix": 200.0,
+       "sizes": {},
+       "samples": 20
+      }
+     },
+     "short-scoped": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 1000.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0
+       },
+       "samples": 20
+      },
+      "scoped:Fable": {
+       "basis": "learned",
+       "mix": 200.0,
+       "sizes": {},
+       "samples": 20
+      }
+     },
+     "fable-spent": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 1000.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0
+       },
+       "samples": 20
+      },
+      "scoped:Fable": {
+       "basis": "learned",
+       "mix": 200.0,
+       "sizes": {},
+       "samples": 20
+      }
+     },
+     "two-short": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 1000.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0
+       },
+       "samples": 20
+      },
+      "scoped:Fable": {
+       "basis": "learned",
+       "mix": 200.0,
+       "sizes": {},
+       "samples": 20
+      }
+     },
+     "gate-short": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 1000.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0
+       },
+       "samples": 20
+      },
+      "scoped:Fable": {
+       "basis": "learned",
+       "mix": 200.0,
+       "sizes": {},
+       "samples": 20
+      }
+     },
+     "own-gate": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 1000.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0
+       },
+       "samples": 20
+      },
+      "scoped:Fable": {
+       "basis": "learned",
+       "mix": 200.0,
+       "sizes": {},
+       "samples": 20
+      }
+     }
+    }
+   },
+   "expect": {
+    "selections": {
+     "lane:opus": {
+      "capacity": 10000.0,
+      "room": 4000.0,
+      "left_pct": 40.0,
+      "resting": [
+       "resting",
+       "short-scoped",
+       "two-short"
+      ],
+      "stale": [
+       "stale"
+      ],
+      "accounts": {
+       "held": {
+        "capacity": 1000.0,
+        "room": 0.0,
+        "resting_until": null,
+        "refused": {
+         "why": "spent",
+         "until": 1793940000
+        }
+       },
+       "resting": {
+        "capacity": 1000.0,
+        "room": 600.0,
+        "refused": null,
+        "resting_until": 1793743600
+       },
+       "both": {
+        "capacity": 1000.0,
+        "room": 0.0,
+        "resting_until": null,
+        "refused": {
+         "why": "spent",
+         "until": 1793940000
+        }
+       },
+       "stale": {
+        "room": 600.0,
+        "stale": true
+       },
+       "reopened": {
+        "room": 1000.0,
+        "refused": null,
+        "windows": {
+         "seven_day": {
+          "used": 0.0
+         }
+        }
+       },
+       "short-scoped": {
+        "room": 600.0,
+        "refused": null,
+        "resting_until": 1793743600,
+        "windows": {
+         "seven_day": {
+          "used": 40.0
+         }
+        }
+       },
+       "fable-spent": {
+        "room": 600.0,
+        "refused": null
+       },
+       "two-short": {
+        "room": 600.0,
+        "refused": null,
+        "resting_until": 1793790000
+       },
+       "gate-short": {
+        "room": 0.0,
+        "resting_until": null,
+        "refused": {
+         "why": "spent",
+         "until": 1793743600
+        }
+       },
+       "own-gate": {
+        "capacity": 1000.0,
+        "room": 0.0,
+        "refused": {
+         "why": "spent",
+         "until": 1794040000
+        },
+        "windows": {
+         "seven_day": {
+          "used": 100.0
+         }
+        }
+       }
+      }
+     },
+     "lane:fable": {
+      "resting": [
+       "resting",
+       "two-short"
+      ],
+      "accounts": {
+       "fable-spent": {
+        "room": 0.0,
+        "resting_until": null,
+        "refused": {
+         "why": "spent",
+         "until": 1793940000
+        }
+       }
+      }
+     }
+    },
+    "proxy": {
+     "capacity": 10000.0,
+     "room": 4000.0,
+     "resting": [
+      "resting",
+      "two-short"
+     ],
+     "stale": [
+      "stale"
+     ]
+    },
+    "accounts": {
+     "held": {
+      "used": 100.0,
+      "left_pct": 0.0,
+      "refused": {
+       "why": "spent",
+       "until": 1793940000
+      }
+     },
+     "resting": {
+      "resting_until": 1793743600
+     },
+     "stale": {
+      "stale": true
+     }
+    }
+   }
+  },
+  {
+   "name": "a class whose two members reach one account values it at the higher-priority member",
+   "notes": [
+    "fable-first runs Fable first: Fable's $5/pt on seven_day (40 used) and the scoped:Fable window ($2/pt, 50 used): min(500, 200) / min(300, 100) = 200 / 100. Opus first: $10/pt on seven_day alone, Opus having no scoped window: 1000 / 600."
+   ],
+   "now": 1793740000,
+   "accounts": {
+    "sub-A": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 40,
+       "resets_in": 300000
+      },
+      "scoped:Fable": {
+       "period_s": 604800,
+       "scope": "Fable",
+       "used": 50,
+       "resets_in": 300000
+      }
+     }
+    }
+   },
+   "classes": [
+    {
+     "class": "fable-first",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "fable",
+       "model": "claude-fable-5-1",
+       "priority": 1,
+       "stop_at": null
+      },
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 2,
+       "stop_at": null
+      }
+     ]
+    },
+    {
+     "class": "opus-first",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "fable",
+       "model": "claude-fable-5-1",
+       "priority": 2,
+       "stop_at": null
+      },
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1,
+       "stop_at": null
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizing": {
+    "providers": {
+     "anthropic": {
+      "reference": "claude-opus-5-5",
+      "models": {
+       "claude-opus-5-5": {
+        "basis": "reference",
+        "dollars": 1000.0
+       },
+       "claude-fable-5-1": {
+        "basis": "weighed",
+        "dollars": 400.0
+       },
+       "claude-sonnet-5": {
+        "basis": "unweighed",
+        "dollars": 20.0
+       }
+      }
+     }
+    },
+    "windows": {
+     "sub-A": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 800.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0,
+        "claude-fable-5-1": 500.0
+       },
+       "samples": 20
+      },
+      "scoped:Fable": {
+       "basis": "learned",
+       "mix": 200.0,
+       "sizes": {
+        "claude-fable-5-1": 200.0
+       },
+       "samples": 20
+      }
+     }
+    }
+   },
+   "expect": {
+    "selections": {
+     "fable-first": {
+      "capacity": 200.0,
+      "room": 100.0,
+      "accounts": {
+       "sub-A": {
+        "member": "lane:fable",
+        "model": "claude-fable-5-1",
+        "valued": "claude-fable-5-1"
+       }
+      }
+     },
+     "opus-first": {
+      "capacity": 1000.0,
+      "room": 600.0,
+      "accounts": {
+       "sub-A": {
+        "member": "lane:opus",
+        "model": "claude-opus-5-5",
+        "valued": "claude-opus-5-5",
+        "windows": {
+         "seven_day": {
+          "cap": 100.0
+         }
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "unmeasured, api, no main window, not sized, not read; a closed gate; a cycle pool as main",
+   "notes": [
+    "Listed with why and never added: sub-U (no reading), runway (an api account), sub-N (a scoped window only), sub-S (seven_day few_steps; its own left_pct, 75 %, still shows on the accounts level, 67 §13 Q7).",
+    "gpt-X: codex's own gate is shut with seven_day at 30: refused, capacity kept ($20/pt: 2000), room 0, until the window's reset.",
+    "kimi: its monthly pool (1mo) is longer than its weekly window, so it is the main window: $1/pt, 30 used: 100 / 70.",
+    "kimi-2: its pool reads 100: room 0 by the arithmetic, but not refused, since the dial check reads only windows and never gates on the pool (K2). Its pool was read 4000 s ago, its windows now: stale by its main window.",
+    "kimi-3: its pool reads 100 and its five_hour is closed: the main window is not open, so it is refused, not resting, until the five_hour reset.",
+    "sub-R: its scoped:Fable window has no reading: listed for c, whose first member is the Fable lane, rather than counted on its main window alone.",
+    "c: 2000 + 100 + 100 + 100 = 2300 of capacity, 70 of room, 3.0 %."
+   ],
+   "now": 1793740000,
+   "accounts": {
+    "sub-U": {
+     "provider": "anthropic",
+     "measured": false
+    },
+    "runway": {
+     "provider": "runway",
+     "kind": "api"
+    },
+    "sub-N": {
+     "provider": "anthropic",
+     "windows": {
+      "scoped:Fable": {
+       "period_s": 604800,
+       "scope": "Fable",
+       "used": 10,
+       "resets_in": 300000
+      }
+     }
+    },
+    "sub-S": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 25,
+       "resets_in": 300000
+      }
+     }
+    },
+    "gpt-X": {
+     "provider": "gpt",
+     "gate": false,
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 30,
+       "resets_in": 100000
+      }
+     }
+    },
+    "kimi": {
+     "provider": "kimi",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 10,
+       "resets_in": 300000
+      },
+      "five_hour": {
+       "period_s": 18000,
+       "scope": null,
+       "used": 5,
+       "resets_in": 300000
+      }
+     },
+     "pools": {
+      "total_quota": {
+       "period": "1mo",
+       "used": 30
+      }
+     }
+    },
+    "kimi-2": {
+     "provider": "kimi",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 10,
+       "resets_in": 300000
+      }
+     },
+     "pools": {
+      "total_quota": {
+       "period": "1mo",
+       "used": 100,
+       "age": 4000
+      }
+     }
+    },
+    "kimi-3": {
+     "provider": "kimi",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 10,
+       "resets_in": 300000
+      },
+      "five_hour": {
+       "period_s": 18000,
+       "scope": null,
+       "used": 100,
+       "resets_in": 3600
+      }
+     },
+     "pools": {
+      "total_quota": {
+       "period": "1mo",
+       "used": 100
+      }
+     }
+    },
+    "sub-R": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 20,
+       "resets_in": 300000
+      },
+      "scoped:Fable": {
+       "period_s": 604800,
+       "scope": "Fable",
+       "used": null,
+       "resets_in": 300000
+      }
+     }
+    }
+   },
+   "classes": [
+    {
+     "class": "c",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "fable",
+       "model": "claude-fable-5-1",
+       "priority": 1,
+       "stop_at": null
+      },
+      {
+       "kind": "provider",
+       "provider": "gpt",
+       "model": "gpt-6-astra",
+       "priority": 2,
+       "stop_at": null
+      },
+      {
+       "kind": "provider",
+       "provider": "runway",
+       "model": "gen-4",
+       "priority": 3,
+       "stop_at": null
+      },
+      {
+       "kind": "provider",
+       "provider": "kimi",
+       "model": "kimi-k3",
+       "priority": 4,
+       "stop_at": null
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizing": {
+    "providers": {
+     "anthropic": {
+      "reference": "claude-opus-5-5",
+      "models": {
+       "claude-opus-5-5": {
+        "basis": "reference",
+        "dollars": 1000.0
+       },
+       "claude-fable-5-1": {
+        "basis": "weighed",
+        "dollars": 400.0
+       },
+       "claude-sonnet-5": {
+        "basis": "unweighed",
+        "dollars": 20.0
+       }
+      }
+     },
+     "gpt": {
+      "reference": "gpt-6-astra",
+      "models": {
+       "gpt-6-astra": {
+        "basis": "reference",
+        "dollars": 500.0
+       }
+      }
+     },
+     "kimi": {
+      "reference": "kimi-k3",
+      "models": {
+       "kimi-k3": {
+        "basis": "reference",
+        "dollars": 5.0
+       }
+      }
+     }
+    },
+    "windows": {
+     "sub-S": {
+      "seven_day": {
+       "basis": "few_steps",
+       "mix": 900.0,
+       "sizes": {
+        "claude-opus-5-5": 900.0
+       },
+       "samples": 2
+      }
+     },
+     "gpt-X": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 2000.0,
+       "sizes": {
+        "gpt-6-astra": 2000.0
+       },
+       "samples": 20
+      }
+     },
+     "kimi": {
+      "total_quota": {
+       "basis": "learned",
+       "mix": 100.0,
+       "sizes": {
+        "kimi-k3": 100.0
+       },
+       "samples": 20
+      }
+     },
+     "kimi-2": {
+      "total_quota": {
+       "basis": "learned",
+       "mix": 100.0,
+       "sizes": {
+        "kimi-k3": 100.0
+       },
+       "samples": 20
+      }
+     },
+     "kimi-3": {
+      "total_quota": {
+       "basis": "learned",
+       "mix": 100.0,
+       "sizes": {
+        "kimi-k3": 100.0
+       },
+       "samples": 20
+      }
+     },
+     "sub-R": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 900.0,
+       "sizes": {
+        "claude-opus-5-5": 900.0
+       },
+       "samples": 20
+      }
+     }
+    }
+   },
+   "expect": {
+    "selections": {
+     "c": {
+      "capacity": 2300.0,
+      "room": 70.0,
+      "left_pct": 3.0,
+      "stale": [
+       "kimi-2"
+      ],
+      "listed": [
+       {
+        "account": "runway",
+        "why": "api account"
+       },
+       {
+        "account": "sub-N",
+        "why": "no main window"
+       },
+       {
+        "account": "sub-R",
+        "why": "scoped:Fable not read"
+       },
+       {
+        "account": "sub-S",
+        "why": "seven_day not sized yet (few_steps)"
+       },
+       {
+        "account": "sub-U",
+        "why": "unmeasured"
+       }
+      ],
+      "accounts": {
+       "gpt-X": {
+        "capacity": 2000.0,
+        "room": 0.0,
+        "refused": {
+         "why": "spent",
+         "until": 1793840000
+        }
+       },
+       "kimi": {
+        "model": "kimi-k3",
+        "valued": "kimi-k3",
+        "capacity": 100.0,
+        "room": 70.0,
+        "windows": {
+         "total_quota": {
+          "used": 30.0
+         }
+        }
+       },
+       "kimi-2": {
+        "capacity": 100.0,
+        "room": 0.0,
+        "refused": null,
+        "stale": true
+       },
+       "kimi-3": {
+        "capacity": 100.0,
+        "room": 0.0,
+        "resting_until": null,
+        "refused": {
+         "why": "spent",
+         "until": 1793743600
+        }
+       }
+      }
+     }
+    },
+    "accounts": {
+     "sub-U": {
+      "main": null,
+      "listed": "unmeasured",
+      "limits": []
+     },
+     "runway": {
+      "main": null,
+      "listed": "api account",
+      "limits": []
+     },
+     "sub-N": {
+      "main": null,
+      "listed": "no main window",
+      "limits": []
+     },
+     "sub-S": {
+      "main": "seven_day",
+      "used": 25.0,
+      "left_pct": 75.0,
+      "size_basis": "few_steps",
+      "sizes": {},
+      "capacity": null,
+      "room": null,
+      "listed": "seven_day not sized yet (few_steps)"
+     },
+     "kimi": {
+      "main": "total_quota",
+      "used": 30.0,
+      "left_pct": 70.0
+     }
+    }
+   }
+  },
+  {
+   "name": "a no-window limit zeroes the bound selections only: a model limit by model and by lane scope, a pool for all; ended at until and at re-check",
+   "notes": [
+    "sub-A: model:claude-sonnet-5-1 is not the member's model (claude-sonnet-5) but its lane scope is Sonnet: it refuses fast and lane:sonnet there, not o, lane:opus, lane:default or the proxy.",
+    "sub-A: model:claude-mystery-1 is in no scoped lane: it binds by its id alone, so nothing here (lane:default is at the mix, with no scope).",
+    "gpt-A: model:gpt-6.1-sol (not_entitled) refuses fast's gpt member, which runs it, and not o's, which runs gpt-6-astra.",
+    "kimi-A: pool:total_quota refuses every selection reaching it and the whole proxy; the accounts entry shows it refused.",
+    "sub-B: one limit past its until and one older than the owner's re-check: neither binds nor is listed.",
+    "Capacity is kept wherever room is zeroed."
+   ],
+   "now": 1793740000,
+   "accounts": {
+    "sub-A": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 40,
+       "resets_in": 300000
+      }
+     }
+    },
+    "sub-B": {
+     "provider": "anthropic",
+     "recheck_ago": 100,
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 20,
+       "resets_in": 300000
+      }
+     }
+    },
+    "gpt-A": {
+     "provider": "gpt",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 50,
+       "resets_in": 100000
+      }
+     }
+    },
+    "kimi-A": {
+     "provider": "kimi",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 10,
+       "resets_in": 300000
+      }
+     },
+     "pools": {
+      "total_quota": {
+       "period": "1mo",
+       "used": 30
+      }
+     }
+    }
+   },
+   "limits": {
+    "sub-A": [
+     {
+      "limit": "model:claude-sonnet-5-1",
+      "until_in": 1800
+     },
+     {
+      "limit": "model:claude-mystery-1",
+      "until_in": 1800
+     }
+    ],
+    "gpt-A": [
+     {
+      "limit": "model:gpt-6.1-sol",
+      "class": "not_entitled",
+      "until_in": 21600
+     }
+    ],
+    "kimi-A": [
+     {
+      "limit": "pool:total_quota",
+      "until_in": 3600
+     }
+    ],
+    "sub-B": [
+     {
+      "limit": "model:claude-opus-5-5",
+      "until_in": -5
+     },
+     {
+      "limit": "model:claude-sonnet-5",
+      "until_in": 1800,
+      "refused_ago": 200
+     }
+    ]
+   },
+   "classes": [
+    {
+     "class": "fast",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "sonnet",
+       "model": "claude-sonnet-5",
+       "priority": 1,
+       "stop_at": null
+      },
+      {
+       "kind": "provider",
+       "provider": "gpt",
+       "model": "gpt-6.1-sol",
+       "priority": 2,
+       "stop_at": null
+      },
+      {
+       "kind": "provider",
+       "provider": "kimi",
+       "model": "kimi-k3",
+       "priority": 3,
+       "stop_at": null
+      }
+     ]
+    },
+    {
+     "class": "o",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1,
+       "stop_at": null
+      },
+      {
+       "kind": "provider",
+       "provider": "gpt",
+       "model": "gpt-6-astra",
+       "priority": 2,
+       "stop_at": null
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizing": {
+    "providers": {
+     "anthropic": {
+      "reference": "claude-opus-5-5",
+      "models": {
+       "claude-opus-5-5": {
+        "basis": "reference",
+        "dollars": 1000.0
+       },
+       "claude-sonnet-5": {
+        "basis": "unweighed",
+        "dollars": 20.0
+       }
+      }
+     },
+     "gpt": {
+      "reference": "gpt-6.1-sol",
+      "models": {
+       "gpt-6.1-sol": {
+        "basis": "reference",
+        "dollars": 500.0
+       },
+       "gpt-6-astra": {
+        "basis": "weighed",
+        "dollars": 100.0
+       }
+      }
+     },
+     "kimi": {
+      "reference": "kimi-k3",
+      "models": {
+       "kimi-k3": {
+        "basis": "reference",
+        "dollars": 5.0
+       }
+      }
+     }
+    },
+    "windows": {
+     "sub-A": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 1000.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0
+       },
+       "samples": 20
+      }
+     },
+     "sub-B": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 500.0,
+       "sizes": {
+        "claude-opus-5-5": 500.0
+       },
+       "samples": 20
+      }
+     },
+     "gpt-A": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 2000.0,
+       "sizes": {
+        "gpt-6.1-sol": 2000.0,
+        "gpt-6-astra": 2000.0
+       },
+       "samples": 20
+      }
+     },
+     "kimi-A": {
+      "total_quota": {
+       "basis": "learned",
+       "mix": 100.0,
+       "sizes": {
+        "kimi-k3": 100.0
+       },
+       "samples": 20
+      }
+     }
+    }
+   },
+   "expect": {
+    "proxy": {
+     "capacity": 3600.0,
+     "room": 2000.0,
+     "left_pct": 55.6
+    },
+    "selections": {
+     "fast": {
+      "capacity": 3600.0,
+      "room": 400.0,
+      "left_pct": 11.1,
+      "accounts": {
+       "sub-A": {
+        "capacity": 1000.0,
+        "room": 0.0,
+        "refused": {
+         "why": "spent",
+         "limit": "model:claude-sonnet-5-1",
+         "until": 1793741800
+        }
+       },
+       "sub-B": {
+        "capacity": 500.0,
+        "room": 400.0,
+        "refused": null
+       },
+       "gpt-A": {
+        "capacity": 2000.0,
+        "room": 0.0,
+        "refused": {
+         "why": "not_entitled",
+         "limit": "model:gpt-6.1-sol",
+         "until": 1793761600
+        }
+       },
+       "kimi-A": {
+        "capacity": 100.0,
+        "room": 0.0,
+        "refused": {
+         "why": "spent",
+         "limit": "pool:total_quota",
+         "until": 1793743600
+        }
+       }
+      }
+     },
+     "o": {
+      "capacity": 3500.0,
+      "room": 2000.0,
+      "accounts": {
+       "sub-A": {
+        "room": 600.0,
+        "refused": null
+       },
+       "gpt-A": {
+        "room": 1000.0,
+        "refused": null
+       }
+      }
+     },
+     "lane:sonnet": {
+      "capacity": 1500.0,
+      "room": 400.0,
+      "accounts": {
+       "sub-A": {
+        "model": null,
+        "capacity": 1000.0,
+        "room": 0.0,
+        "refused": {
+         "why": "spent",
+         "limit": "model:claude-sonnet-5-1",
+         "until": 1793741800
+        }
+       }
+      }
+     },
+     "lane:opus": {
+      "capacity": 1500.0,
+      "room": 1000.0
+     },
+     "lane:default": {
+      "capacity": 1500.0,
+      "room": 1000.0,
+      "accounts": {
+       "sub-A": {
+        "model": null,
+        "refused": null
+       }
+      }
+     }
+    },
+    "accounts": {
+     "sub-A": {
+      "capacity": 1000.0,
+      "room": 600.0,
+      "refused": null,
+      "limits": [
+       {
+        "limit": "model:claude-mystery-1",
+        "class": "spent",
+        "until": 1793741800
+       },
+       {
+        "limit": "model:claude-sonnet-5-1",
+        "class": "spent",
+        "until": 1793741800
+       }
+      ]
+     },
+     "sub-B": {
+      "room": 400.0,
+      "limits": []
+     },
+     "gpt-A": {
+      "room": 1000.0,
+      "refused": null,
+      "limits": [
+       {
+        "limit": "model:gpt-6.1-sol",
+        "class": "not_entitled",
+        "until": 1793761600
+       }
+      ]
+     },
+     "kimi-A": {
+      "capacity": 100.0,
+      "room": 0.0,
+      "left_pct": 70.0,
+      "refused": {
+       "why": "spent",
+       "limit": "pool:total_quota",
+       "until": 1793743600
+      },
+      "limits": [
+       {
+        "limit": "pool:total_quota",
+        "class": "spent",
+        "until": 1793743600
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "name": "the default lane keeps §7's valuation; a model limit never binds it, a pool does",
+   "notes": [
+    "claude-mystery-1 matches no scoped lane and is the most-dollared weighed model: the default lane is valued at it ($4/pt), as push 2 built (67 §7).",
+    "A limit on claude-mystery-1 leaves the default lane unrefused: one model's limit stops one of the many models that lane serves.",
+    "sub-P: a pool limit still refuses the default lane."
+   ],
+   "now": 1793740000,
+   "accounts": {
+    "sub-D": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 25,
+       "resets_in": 300000
+      }
+     }
+    },
+    "sub-P": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 25,
+       "resets_in": 300000
+      }
+     }
+    }
+   },
+   "limits": {
+    "sub-D": [
+     {
+      "limit": "model:claude-mystery-1",
+      "until_in": 1800
+     }
+    ],
+    "sub-P": [
+     {
+      "limit": "pool:total_quota",
+      "until_in": 1800
+     }
+    ]
+   },
+   "classes": [],
+   "lanes": {},
+   "sizing": {
+    "providers": {
+     "anthropic": {
+      "reference": "claude-opus-5-5",
+      "models": {
+       "claude-opus-5-5": {
+        "basis": "reference",
+        "dollars": 1000.0
+       },
+       "claude-sonnet-5": {
+        "basis": "weighed",
+        "dollars": 300.0
+       },
+       "claude-mystery-1": {
+        "basis": "weighed",
+        "dollars": 200.0
+       }
+      }
+     }
+    },
+    "windows": {
+     "sub-D": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 800.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0,
+        "claude-sonnet-5": 500.0,
+        "claude-mystery-1": 400.0
+       },
+       "samples": 20
+      }
+     },
+     "sub-P": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 800.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0,
+        "claude-sonnet-5": 500.0,
+        "claude-mystery-1": 400.0
+       },
+       "samples": 20
+      }
+     }
+    }
+   },
+   "expect": {
+    "selections": {
+     "lane:default": {
+      "capacity": 800.0,
+      "room": 300.0,
+      "accounts": {
+       "sub-D": {
+        "model": "claude-mystery-1",
+        "valued": "claude-mystery-1",
+        "refused": null
+       },
+       "sub-P": {
+        "room": 0.0,
+        "refused": {
+         "why": "spent",
+         "limit": "pool:total_quota",
+         "until": 1793741800
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "a class whose higher-priority member a model limit binds is valued at the next member, and refused only when every member is bound",
+   "notes": [
+    "Class s2: lane:sonnet (1) then lane:opus (2), both on sub-M and sub-N. A Sonnet limit on sub-M leaves the Opus member: valued at Opus, not refused.",
+    "On sub-N limits bind both members: refused, valued at the higher-priority member (Sonnet), until the first member frees: the Opus limit ends at +900, before the Sonnet one at +1800, so it is named."
+   ],
+   "now": 1793740000,
+   "accounts": {
+    "sub-M": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 40,
+       "resets_in": 300000
+      }
+     }
+    },
+    "sub-N": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 40,
+       "resets_in": 300000
+      }
+     }
+    }
+   },
+   "limits": {
+    "sub-M": [
+     {
+      "limit": "model:claude-sonnet-5",
+      "until_in": 1800
+     }
+    ],
+    "sub-N": [
+     {
+      "limit": "model:claude-sonnet-5",
+      "until_in": 1800
+     },
+     {
+      "limit": "model:claude-opus-5-5",
+      "until_in": 900
+     }
+    ]
+   },
+   "classes": [
+    {
+     "class": "s2",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "sonnet",
+       "model": "claude-sonnet-5",
+       "priority": 1,
+       "stop_at": null
+      },
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 2,
+       "stop_at": null
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizing": {
+    "providers": {
+     "anthropic": {
+      "reference": "claude-opus-5-5",
+      "models": {
+       "claude-opus-5-5": {
+        "basis": "reference",
+        "dollars": 1000.0
+       },
+       "claude-sonnet-5": {
+        "basis": "weighed",
+        "dollars": 300.0
+       },
+       "claude-mystery-1": {
+        "basis": "weighed",
+        "dollars": 200.0
+       }
+      }
+     }
+    },
+    "windows": {
+     "sub-M": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 800.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0,
+        "claude-sonnet-5": 500.0,
+        "claude-mystery-1": 400.0
+       },
+       "samples": 20
+      }
+     },
+     "sub-N": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 800.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0,
+        "claude-sonnet-5": 500.0,
+        "claude-mystery-1": 400.0
+       },
+       "samples": 20
+      }
+     }
+    }
+   },
+   "expect": {
+    "selections": {
+     "s2": {
+      "capacity": 1500.0,
+      "room": 600.0,
+      "accounts": {
+       "sub-M": {
+        "member": "lane:opus",
+        "model": "claude-opus-5-5",
+        "capacity": 1000.0,
+        "room": 600.0,
+        "refused": null
+       },
+       "sub-N": {
+        "member": "lane:sonnet",
+        "model": "claude-sonnet-5",
+        "capacity": 500.0,
+        "room": 0.0,
+        "refused": {
+         "why": "spent",
+         "limit": "model:claude-opus-5-5",
+         "until": 1793740900
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "a window's refusal and a limit's: the later shows, an unknown end the latest; a limit refuses a resting account; the limit that ends last shows",
+   "notes": [
+    "sub-W: seven_day spent, resetting in 600 s, and a Sonnet limit to 1800 s: the limit ends later, so it shows (until +1800).",
+    "sub-V: the mirror: seven_day spent, resetting in 300000 s, and the same limit: the window shows, no limit named.",
+    "sub-U: seven_day spent with no known reset and the same limit: an unknown end counts as later, the window shows.",
+    "sub-R: five_hour closed, seven_day open (resting) and a Sonnet limit: refused by the limit, not resting.",
+    "sub-T: two Sonnet-lane limits, ending in 1800 s and 3600 s: the later shows."
+   ],
+   "now": 1793740000,
+   "accounts": {
+    "sub-W": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 100,
+       "resets_in": 600
+      }
+     }
+    },
+    "sub-R": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 30,
+       "resets_in": 300000
+      },
+      "five_hour": {
+       "period_s": 18000,
+       "scope": null,
+       "used": 100,
+       "resets_in": 3600
+      }
+     }
+    },
+    "sub-T": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 30,
+       "resets_in": 300000
+      }
+     }
+    },
+    "sub-V": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 100,
+       "resets_in": 300000
+      }
+     }
+    },
+    "sub-U": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 100,
+       "resets_in": null
+      }
+     }
+    }
+   },
+   "limits": {
+    "sub-W": [
+     {
+      "limit": "model:claude-sonnet-5",
+      "until_in": 1800
+     }
+    ],
+    "sub-R": [
+     {
+      "limit": "model:claude-sonnet-5",
+      "until_in": 1800
+     }
+    ],
+    "sub-T": [
+     {
+      "limit": "model:claude-sonnet-5-1",
+      "until_in": 1800
+     },
+     {
+      "limit": "model:claude-sonnet-5",
+      "until_in": 3600
+     }
+    ],
+    "sub-V": [
+     {
+      "limit": "model:claude-sonnet-5",
+      "until_in": 1800
+     }
+    ],
+    "sub-U": [
+     {
+      "limit": "model:claude-sonnet-5",
+      "until_in": 1800
+     }
+    ]
+   },
+   "classes": [],
+   "lanes": {},
+   "sizing": {
+    "providers": {
+     "anthropic": {
+      "reference": "claude-opus-5-5",
+      "models": {
+       "claude-opus-5-5": {
+        "basis": "reference",
+        "dollars": 1000.0
+       },
+       "claude-sonnet-5": {
+        "basis": "weighed",
+        "dollars": 300.0
+       },
+       "claude-mystery-1": {
+        "basis": "weighed",
+        "dollars": 200.0
+       }
+      }
+     }
+    },
+    "windows": {
+     "sub-W": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 800.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0,
+        "claude-sonnet-5": 500.0,
+        "claude-mystery-1": 400.0
+       },
+       "samples": 20
+      }
+     },
+     "sub-R": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 800.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0,
+        "claude-sonnet-5": 500.0,
+        "claude-mystery-1": 400.0
+       },
+       "samples": 20
+      }
+     },
+     "sub-T": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 800.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0,
+        "claude-sonnet-5": 500.0,
+        "claude-mystery-1": 400.0
+       },
+       "samples": 20
+      }
+     },
+     "sub-V": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 800.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0,
+        "claude-sonnet-5": 500.0,
+        "claude-mystery-1": 400.0
+       },
+       "samples": 20
+      }
+     },
+     "sub-U": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 800.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0,
+        "claude-sonnet-5": 500.0,
+        "claude-mystery-1": 400.0
+       },
+       "samples": 20
+      }
+     }
+    }
+   },
+   "expect": {
+    "selections": {
+     "lane:sonnet": {
+      "resting": [],
+      "accounts": {
+       "sub-W": {
+        "room": 0.0,
+        "refused": {
+         "why": "spent",
+         "limit": "model:claude-sonnet-5",
+         "until": 1793741800
+        }
+       },
+       "sub-R": {
+        "room": 0.0,
+        "resting_until": null,
+        "refused": {
+         "why": "spent",
+         "limit": "model:claude-sonnet-5",
+         "until": 1793741800
+        }
+       },
+       "sub-T": {
+        "room": 0.0,
+        "refused": {
+         "why": "spent",
+         "limit": "model:claude-sonnet-5",
+         "until": 1793743600
+        }
+       },
+       "sub-V": {
+        "room": 0.0,
+        "refused": {
+         "why": "spent",
+         "until": 1794040000
+        }
+       },
+       "sub-U": {
+        "room": 0.0,
+        "refused": {
+         "why": "spent",
+         "until": null
+        }
+       }
+      }
+     },
+     "lane:opus": {
+      "resting": [
+       "sub-R"
+      ],
+      "accounts": {
+       "sub-R": {
+        "refused": null,
+        "resting_until": 1793743600
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "a class member on the default lane is bound by its model's id, as the proxy refuses it",
+   "notes": [
+    "Class d1: the default lane running claude-mystery-1 (1), then lane:sonnet (2). Only the bare default lane is exempt from a model limit (67 §9).",
+    "sub-E: a claude-mystery-1 limit binds the default-lane member: the account falls through to the Sonnet member.",
+    "sub-F: limits on claude-mystery-1 and claude-sonnet-5 bind both: refused, valued at the default-lane member, until the first member frees (+900)."
+   ],
+   "now": 1793740000,
+   "accounts": {
+    "sub-E": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 40,
+       "resets_in": 300000
+      }
+     }
+    },
+    "sub-F": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 40,
+       "resets_in": 300000
+      }
+     }
+    }
+   },
+   "limits": {
+    "sub-E": [
+     {
+      "limit": "model:claude-mystery-1",
+      "until_in": 1800
+     }
+    ],
+    "sub-F": [
+     {
+      "limit": "model:claude-mystery-1",
+      "until_in": 900
+     },
+     {
+      "limit": "model:claude-sonnet-5",
+      "until_in": 1800
+     }
+    ]
+   },
+   "classes": [
+    {
+     "class": "d1",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "default",
+       "model": "claude-mystery-1",
+       "priority": 1,
+       "stop_at": null
+      },
+      {
+       "kind": "anthropic",
+       "lane": "sonnet",
+       "model": "claude-sonnet-5",
+       "priority": 2,
+       "stop_at": null
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizing": {
+    "providers": {
+     "anthropic": {
+      "reference": "claude-opus-5-5",
+      "models": {
+       "claude-opus-5-5": {
+        "basis": "reference",
+        "dollars": 1000.0
+       },
+       "claude-sonnet-5": {
+        "basis": "weighed",
+        "dollars": 300.0
+       },
+       "claude-mystery-1": {
+        "basis": "weighed",
+        "dollars": 200.0
+       }
+      }
+     }
+    },
+    "windows": {
+     "sub-E": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 800.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0,
+        "claude-sonnet-5": 500.0,
+        "claude-mystery-1": 400.0
+       },
+       "samples": 20
+      }
+     },
+     "sub-F": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 800.0,
+       "sizes": {
+        "claude-opus-5-5": 1000.0,
+        "claude-sonnet-5": 500.0,
+        "claude-mystery-1": 400.0
+       },
+       "samples": 20
+      }
+     }
+    }
+   },
+   "expect": {
+    "selections": {
+     "d1": {
+      "accounts": {
+       "sub-E": {
+        "member": "lane:sonnet",
+        "model": "claude-sonnet-5",
+        "valued": "claude-sonnet-5",
+        "capacity": 500.0,
+        "room": 300.0,
+        "refused": null
+       },
+       "sub-F": {
+        "member": "lane:default",
+        "model": "claude-mystery-1",
+        "capacity": 400.0,
+        "room": 0.0,
+        "refused": {
+         "why": "spent",
+         "limit": "model:claude-mystery-1",
+         "until": 1793740900
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  {
+   "name": "a class falls through by model id where no lane scope matches",
+   "notes": [
+    "Class g2: two members on the gpt provider, gpt-6.1-sol (1) then gpt-6-astra (2); neither model is in a scoped lane.",
+    "gpt-B: a gpt-6.1-sol limit binds the first member by its id alone: the account is valued at gpt-6-astra, not refused."
+   ],
+   "now": 1793740000,
+   "accounts": {
+    "gpt-B": {
+     "provider": "gpt",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "scope": null,
+       "used": 50,
+       "resets_in": 100000
+      }
+     }
+    }
+   },
+   "limits": {
+    "gpt-B": [
+     {
+      "limit": "model:gpt-6.1-sol",
+      "class": "not_entitled",
+      "until_in": 21600
+     }
+    ]
+   },
+   "classes": [
+    {
+     "class": "g2",
+     "members": [
+      {
+       "kind": "provider",
+       "provider": "gpt",
+       "model": "gpt-6.1-sol",
+       "priority": 1,
+       "stop_at": null
+      },
+      {
+       "kind": "provider",
+       "provider": "gpt",
+       "model": "gpt-6-astra",
+       "priority": 2,
+       "stop_at": null
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizing": {
+    "providers": {
+     "gpt": {
+      "reference": "gpt-6.1-sol",
+      "models": {
+       "gpt-6.1-sol": {
+        "basis": "reference",
+        "dollars": 500.0
+       },
+       "gpt-6-astra": {
+        "basis": "weighed",
+        "dollars": 100.0
+       }
+      }
+     }
+    },
+    "windows": {
+     "gpt-B": {
+      "seven_day": {
+       "basis": "learned",
+       "mix": 2000.0,
+       "sizes": {
+        "gpt-6.1-sol": 2000.0,
+        "gpt-6-astra": 1000.0
+       },
+       "samples": 20
+      }
+     }
+    }
+   },
+   "expect": {
+    "selections": {
+     "g2": {
+      "accounts": {
+       "gpt-B": {
+        "member": "gpt/gpt-6-astra",
+        "model": "gpt-6-astra",
+        "valued": "gpt-6-astra",
+        "capacity": 1000.0,
+        "room": 500.0,
+        "refused": null
+       }
+      }
+     }
+    }
+   }
+  }
+ ]
+}

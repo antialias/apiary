@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apiary — business plan</title>
+<meta name="description" content="A member-owned pool of LLM capacity: lend idle GPUs running open models, burst past your own limits, earn credit for what you deliver.">
+<meta name="robots" content="noindex">
+<meta property="og:title" content="Apiary — business plan">
+<meta property="og:description" content="A member-owned pool of LLM capacity: lend idle GPUs running open models, burst past your own limits, earn credit for what you deliver.">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..900,50,1&family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT,WONK@1,9..144,400..900,50,1&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><polygon points='50 3 93 27 93 73 50 97 7 73 7 27' fill='%23eda72c'/></svg>">
+<link rel="stylesheet" href="plan.css">
+<script type="module" src="plan.js"></script>
+</head>
+<body>
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-hexfill" viewBox="0 0 100 100"><polygon points="50 3 93 27 93 73 50 97 7 73 7 27" fill="currentColor"/></symbol>
+  <symbol id="i-hex" viewBox="0 0 100 100"><polygon points="50 4 91 27.5 91 72.5 50 96 9 72.5 9 27.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/></symbol>
+  <symbol id="i-up" viewBox="0 0 100 100"><use href="#i-hex"/><g fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M50 71V31M35 46 50 31 65 46"/></g></symbol>
+  <symbol id="i-gpu" viewBox="0 0 100 100"><use href="#i-hex"/><g fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M22 36v30M22 39h5"/><rect x="27" y="37" width="51" height="25" rx="2.5"/><circle cx="43" cy="49.5" r="8"/><circle cx="62" cy="49.5" r="8"/><path d="M43 41.5v16M35 49.5h16M37.3 43.8l11.4 11.4M48.7 43.8 37.3 55.2M62 41.5v16M54 49.5h16M56.3 43.8l11.4 11.4M67.7 43.8 56.3 55.2"/><path d="M33 62v5h36v-5"/><path d="M38 64.5h26" stroke-dasharray="2 2.5"/></g></symbol>
+  <symbol id="i-code" viewBox="0 0 100 100"><use href="#i-hex"/><g fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M38 37 27 50l11 13M62 37l11 13-11 13M55 33 45 67"/></g></symbol>
+  <symbol id="i-heart" viewBox="0 0 100 100"><use href="#i-hex"/><path d="M50 68 35.5 53.5c-4.6-4.6-4.6-11.4-.4-15.2 4-3.6 10.3-3.1 14.9 2.3 4.6-5.4 10.9-5.9 14.9-2.3 4.2 3.8 4.2 10.6-.4 15.2Z" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linejoin="round"/></symbol>
+  <symbol id="i-people" viewBox="0 0 100 100"><use href="#i-hex"/><g fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="50" cy="42" r="6.5"/><path d="M38 65v-4c0-6.6 5.4-11 12-11s12 4.4 12 11v4"/><circle cx="33" cy="45" r="5.5"/><path d="M23 64v-3c0-5.4 4.2-9 9.5-9 2.3 0 4.3.6 5.9 1.8"/><circle cx="67" cy="45" r="5.5"/><path d="M77 64v-3c0-5.4-4.2-9-9.5-9-2.3 0-4.3.6-5.9 1.8"/></g></symbol>
+  <symbol id="i-check" viewBox="0 0 16 16"><path d="M2.5 8.5 6.2 12 13.5 3.8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+</svg>
+
+<header class="site-head">
+  <a class="wordmark" href="/"><svg aria-hidden="true"><use href="#i-hexfill"/></svg><span>apiary</span></a>
+  <nav class="top-nav" aria-label="Plan">
+    <a href="#short">The idea</a>
+    <a href="#how">How it works</a>
+    <a href="#economics">Economics</a>
+    <a href="#roadmap">Roadmap</a>
+  </nav>
+  <a class="btn btn-fill btn-sm" href="#ask">Get involved</a>
+</header>
+
+<div class="phonebar" aria-hidden="true">
+  <span class="phonebar-name" id="phonebar-name">Short version</span>
+  <span class="phonebar-line"><span id="phonebar-progress"></span></span>
+</div>
+
+<div class="layout">
+  <nav class="rail" aria-label="Sections">
+    <ol>
+      <li><a href="#short" data-spy="short"><svg aria-hidden="true"><use href="#i-check"/></svg>Short version</a></li>
+      <li><a href="#ways" data-spy="ways"><svg aria-hidden="true"><use href="#i-check"/></svg>Four ways in</a></li>
+      <li><a href="#problem" data-spy="problem"><svg aria-hidden="true"><use href="#i-check"/></svg>The problem</a></li>
+      <li><a href="#how" data-spy="how"><svg aria-hidden="true"><use href="#i-check"/></svg>How it works</a></li>
+      <li><a href="#pooling" data-spy="pooling"><svg aria-hidden="true"><use href="#i-check"/></svg>Why pooling works</a></li>
+      <li><a href="#exists" data-spy="exists"><svg aria-hidden="true"><use href="#i-check"/></svg>What exists</a></li>
+      <li><a href="#economics" data-spy="economics"><svg aria-hidden="true"><use href="#i-check"/></svg>Economics</a></li>
+      <li><a href="#market" data-spy="market"><svg aria-hidden="true"><use href="#i-check"/></svg>Market</a></li>
+      <li><a href="#roadmap" data-spy="roadmap"><svg aria-hidden="true"><use href="#i-check"/></svg>Roadmap</a></li>
+      <li><a href="#risks" data-spy="risks"><svg aria-hidden="true"><use href="#i-check"/></svg>Risks</a></li>
+      <li><a href="#team" data-spy="team"><svg aria-hidden="true"><use href="#i-check"/></svg>Team</a></li>
+      <li><a href="#ask" data-spy="ask"><svg aria-hidden="true"><use href="#i-check"/></svg>The ask</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <!-- ================= hero ================= -->
+    <section class="hero" aria-labelledby="hero-h">
+      <canvas class="field field-hero" data-field="hero" aria-hidden="true"></canvas>
+      <div class="hero-shade" aria-hidden="true"></div>
+      <div class="wrap hero-copy">
+        <p class="kicker">BUSINESS PLAN · NOVEMBER 2026</p>
+        <h1 id="hero-h">Share the idle.<br>Survive the <em>crunch</em>.</h1>
+        <p class="hero-p">Apiary is a member-owned pool of LLM capacity. Members contribute what sits idle, earn credit for what they actually deliver, and draw on the pool when their own work spikes. The routing engine already runs every day for its first operator.</p>
+        <div class="cta-row">
+          <a class="btn btn-fill btn-lg" href="#ask">Get involved</a>
+          <a class="btn btn-ghost btn-lg" href="#how">See it work</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= short version ================= -->
+    <section id="short" class="sec" data-name="Short version">
+      <div class="wrap">
+        <h2>The short version</h2>
+        <ol class="short-list">
+          <li><span class="numeral">01</span><h3>The problem</h3><p>Plans hit their caps mid-crunch. GPUs sit idle most of the day.</p></li>
+          <li><span class="numeral">02</span><h3>The fix</h3><p>Pool it. Members' peaks rarely line up, so a shared pool needs far less headroom.</p></li>
+          <li><span class="numeral">03</span><h3>What exists</h3><p>A working proxy and scheduler that route, meter and fail over. A self-host edition is built and tested.</p></li>
+          <li><span class="numeral">04</span><h3>The ask</h3><p>Pilot members, engineers, GPU donors and early backers.</p></li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- ================= four ways in ================= -->
+    <section id="ways" class="sec" data-name="Four ways in">
+      <div class="wrap">
+        <h2>Four ways in</h2>
+        <ul class="ways">
+          <li><svg class="icon" aria-hidden="true"><use href="#i-up"/></svg><h3>Use it</h3><p>Burst past your own limits when work spikes.</p></li>
+          <li><svg class="icon" aria-hidden="true"><use href="#i-gpu"/></svg><h3>Contribute</h3><p>Lend an idle GPU running open models.</p></li>
+          <li><svg class="icon" aria-hidden="true"><use href="#i-code"/></svg><h3>Build it</h3><p>Help build the engine in Go and Python.</p></li>
+          <li><svg class="icon" aria-hidden="true"><use href="#i-heart"/></svg><h3>Back it</h3><p>Fund the pilot and the legal groundwork.</p></li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ================= 01 problem ================= -->
+    <section id="problem" class="sec has-field" data-name="The problem">
+      <canvas class="field field-sec" data-field="hub" data-seed="31" aria-hidden="true"></canvas>
+      <div class="wrap">
+        <p class="tag">01 · THE PROBLEM</p>
+        <h2>Capacity comes in<br class="d"> bursts, <em>on both sides.</em></h2>
+        <p class="lede">A coding agent works in sprints. A quiet week barely touches a plan's allowance; a deadline week can use it up by Wednesday. Meanwhile the GPUs that could fill the gap sit idle whenever their owners aren't using them.</p>
+
+        <div class="panel week" id="week">
+          <div class="week-head">
+            <h3 class="panel-title mono-title" id="week-title">One member's week</h3>
+            <div class="seg seg-joined" role="radiogroup" aria-labelledby="week-title" data-seg="week">
+              <button type="button" role="radio" aria-checked="false" data-value="quiet">Quiet week</button>
+              <button type="button" role="radio" aria-checked="true" data-value="deadline">Deadline week</button>
+            </div>
+          </div>
+          <div class="week-body">
+            <div class="week-lanes">
+              <p class="lane-label">Plan used this week</p>
+              <svg class="week-plan" id="week-plan" role="img" aria-labelledby="week-plan-label"></svg>
+              <span class="sr-only" id="week-plan-label">Plan used this week</span>
+              <p class="lane-label">Their GPU</p>
+              <svg class="week-gpu" id="week-gpu" role="img" aria-label="Their GPU"></svg>
+            </div>
+            <div class="week-figs" aria-live="polite">
+              <div class="fig"><p class="fig-label">Hours blocked</p><p class="fig-num honey" id="fig-blocked">31</p></div>
+              <div class="fig"><p class="fig-label">GPU busy</p><p class="fig-num honey" id="fig-gpu">9%</p></div>
+            </div>
+          </div>
+        </div>
+        <p class="caption">Simulated: one member's coding demand and home GPU, hour by hour.</p>
+
+        <div class="facts">
+          <p class="fact">Plan limits “assume ordinary, individual usage.”<sup><a href="#src-1" aria-label="Source 1">1</a></sup></p>
+          <p class="fact">Microsoft says heavy Copilot use weighed on margins until GitHub moved to usage-based pricing in June 2026.<sup><a href="#src-2" aria-label="Source 2">2</a></sup></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 02 how ================= -->
+    <section id="how" class="sec has-field" data-name="How it works">
+      <canvas class="field field-sec field-wide" data-field="hub" data-seed="77" aria-hidden="true"></canvas>
+      <div class="wrap">
+        <p class="tag">02 · HOW IT WORKS</p>
+        <h2>Your tools stay yours.<br class="d"> The pool is a <em>fallback,<br class="d"> not a dependency.</em></h2>
+        <p class="lede lede-sm">A small proxy runs beside your tools. The brain decides where each request goes, from the same measurements it pays out on.</p>
+
+        <div class="panel route" id="route">
+          <div class="seg seg-split" role="radiogroup" aria-label="Scenario" data-seg="route">
+            <button type="button" role="radio" aria-checked="true" data-value="normal">Normal day</button>
+            <button type="button" role="radio" aria-checked="false" data-value="cap">Your plan hits its cap</button>
+            <button type="button" role="radio" aria-checked="false" data-value="offline">The pool goes offline</button>
+          </div>
+          <div class="route-stage" id="route-stage">
+            <svg class="route-svg" id="route-svg" role="img" aria-label="Your tools → Proxy · your machine → Brain · scheduler"></svg>
+            <div class="route-left" aria-hidden="true"></div>
+            <div class="ladder">
+              <p class="ladder-rule">Tried in order. The first with room answers.</p>
+              <p class="ladder-zone" aria-hidden="true"><span>near its limit</span></p>
+              <ol class="rungs" id="rungs">
+              <li class="rung" data-i="0"><span class="rung-n" aria-hidden="true">1</span><span class="rung-label">Your own accounts</span><span class="rung-chip"><span class="cs cs-serving">Serving</span><span class="cs cs-standby">Standby</span><span class="cs cs-full">Full</span><span class="cs cs-offline">Offline</span></span><span class="rung-bar" aria-hidden="true"><span class="rung-zone"></span><span class="rung-fill"></span></span><span class="rung-pct"></span></li>
+              <li class="rung" data-i="1"><span class="rung-n" aria-hidden="true">2</span><span class="rung-label">Pool GPUs<span class="rung-sep"> · </span><span class="rung-sub">open models</span></span><span class="rung-chip"><span class="cs cs-serving">Serving</span><span class="cs cs-standby">Standby</span><span class="cs cs-full">Full</span><span class="cs cs-offline">Offline</span></span><span class="rung-bar" aria-hidden="true"><span class="rung-zone"></span><span class="rung-fill"></span></span><span class="rung-pct"></span></li>
+              <li class="rung" data-i="2"><span class="rung-n" aria-hidden="true">3</span><span class="rung-label">Your own GPU<span class="rung-sep"> · </span><span class="rung-sub">local model</span></span><span class="rung-chip"><span class="cs cs-serving">Serving</span><span class="cs cs-standby">Standby</span><span class="cs cs-full">Full</span><span class="cs cs-offline">Offline</span></span><span class="rung-bar" aria-hidden="true"><span class="rung-zone"></span><span class="rung-fill"></span></span><span class="rung-pct"></span></li>
+              </ol>
+            </div>
+          </div>
+          <div class="route-status" aria-live="polite">
+            <p class="route-routed">Routed to: <span id="route-dest">Your own accounts</span><span class="live"><span class="live-dot" aria-hidden="true"></span>live</span></p>
+            <p class="route-why" id="route-why">Why: your accounts have room, so they answer first.</p>
+          </div>
+        </div>
+        <p class="note">The brain sees model class, token counts, timing and source. Never your prompts or your code.</p>
+      </div>
+    </section>
+
+    <!-- ================= 03 pooling ================= -->
+    <section id="pooling" class="sec" data-name="Why pooling works">
+      <div class="wrap">
+        <p class="tag">03 · WHY POOLING WORKS</p>
+        <h2 class="h2-md">Everyone's peak is someone else's quiet hour.</h2>
+
+        <div class="panel pool" id="pool">
+          <div class="pool-controls">
+            <div class="slider-block">
+              <div class="slider-top"><span id="members-label">Members</span><output id="members-out">40</output></div>
+              <div class="slider" id="members" role="slider" tabindex="0" aria-labelledby="members-label"><span class="track"><span class="fill"></span></span><span class="thumb"></span></div>
+              <div class="ticks ticks-4" aria-hidden="true"><span>10</span><span>25</span><span>50</span><span>100</span></div>
+            </div>
+            <div class="slider-block">
+              <div class="slider-top"><span id="overlap-label">Overlap</span><output id="overlap-out">Low</output></div>
+              <div class="slider" id="overlap" role="slider" tabindex="0" aria-labelledby="overlap-label"><span class="track"><span class="fill"></span></span><span class="thumb"></span></div>
+              <div class="ticks ticks-3" aria-hidden="true"><span>Low</span><span>Medium</span><span>High</span></div>
+              <div class="seg seg-joined overlap-seg" role="radiogroup" aria-labelledby="overlap-label" data-seg="overlap">
+                <button type="button" role="radio" aria-checked="true" data-value="0">Low</button>
+                <button type="button" role="radio" aria-checked="false" data-value="1">Medium</button>
+                <button type="button" role="radio" aria-checked="false" data-value="2">High</button>
+              </div>
+            </div>
+          </div>
+          <div class="pool-body">
+            <div class="pool-chart">
+              <svg id="pool-svg" role="img" aria-labelledby="pool-legend"></svg>
+              <p class="legend" id="pool-legend"><span class="leg"><span class="key key-cream" aria-hidden="true"></span>One member's demand</span> <span class="leg"><span class="key key-honey" aria-hidden="true"></span>Pool demand, per member</span></p>
+            </div>
+            <div class="pool-figs" aria-live="polite">
+              <div class="fig"><p class="fig-label">Headroom alone</p><p class="fig-num" id="fig-alone">4.1×</p></div>
+              <div class="fig"><p class="fig-label">Headroom pooled</p><p class="fig-num honey" id="fig-pooled">1.4×</p></div>
+            </div>
+          </div>
+        </div>
+        <p class="caption">Simulated: bursty weekly demand, 95th-percentile peak over average.</p>
+      </div>
+    </section>
+
+    <!-- ================= 04 exists ================= -->
+    <section id="exists" class="sec has-field" data-name="What exists">
+      <canvas class="field field-sec field-small" data-field="hub" data-seed="5" data-clusters="0" aria-hidden="true"></canvas>
+      <div class="wrap">
+        <p class="tag">04 · WHAT EXISTS</p>
+        <h2>The engine already runs.</h2>
+        <p class="lede lede-cream">Built for one operator's own accounts and GPUs, used every day, and split so anyone can run it.</p>
+        <div class="exists-grid">
+          <ul class="hexlist">
+            <li><h3>Routing proxy</h3><p>Go. Sits beside Claude Code, Codex and other tools, and routes each request by model class.</p></li>
+            <li><h3>Failover</h3><p>On a limit or an error it retries elsewhere before your tool notices.</p></li>
+            <li><h3>The brain</h3><p>Python. Reads each source's usage and limits and picks who serves what.</p></li>
+            <li><h3>Local models</h3><p>A model on your own GPU is one more source in the same picker.</p></li>
+            <li><h3>Self-host edition</h3><p>Two containers and one setup command, tested end to end on every change.</p></li>
+          </ul>
+          <div class="panel term" id="term">
+            <p class="term-head"><span class="live-dot" aria-hidden="true"></span>The engine is real</p>
+            <ul class="sr-only">
+              <li>class=frontier → your account · 200</li>
+              <li>class=fast → your account · 200</li>
+              <li>plan at limit → pool GPU · qwen3-coder-30b · 200</li>
+              <li>pool GPU busy → another member's GPU · 200</li>
+              <li>class=local → your GPU · 127.0.0.1 · 200</li>
+            </ul>
+            <div class="term-lines" id="term-lines" aria-hidden="true"></div>
+            <p class="term-cap">Illustrative.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 05 economics ================= -->
+    <section id="economics" class="sec" data-name="Economics">
+      <div class="wrap">
+        <p class="tag">05 · ECONOMICS</p>
+        <h2>Earn on delivery. <em>Pay by model class.</em></h2>
+        <div class="cols3">
+          <div><h3>Credit for delivery only</h3><p>The pool mints credit only for capacity it actually used, as the brain measured it. Nothing for pledges, no pre-mine.</p></div>
+          <div><h3>Priced by model class</h3><p>A frontier-class hour and a small local model's answer are different goods, so members price each class.</p></div>
+          <div><h3>A ledger, not a token</h3><p>Pilot credit can't be bought, sold or transferred, the way AI Horde's kudos have worked since 2022.<sup><a href="#src-11" aria-label="Source 11">11</a></sup> No token exists; none will be issued before counsel signs off.</p></div>
+        </div>
+
+        <div class="panel month" id="month">
+          <div class="month-controls">
+            <h3 class="panel-title serif-title">Your month in the pool</h3>
+            <div class="mslider">
+              <span class="mslider-label" id="hours-label">Your GPU serves</span>
+              <div class="slider" id="hours" role="slider" tabindex="0" aria-labelledby="hours-label"><span class="track"><span class="fill"></span></span><span class="thumb"></span></div>
+              <output class="mslider-out" id="hours-out">4 h a day</output>
+            </div>
+            <div class="mslider">
+              <span class="mslider-label" id="days-label">Crunch days you draw</span>
+              <div class="slider" id="days" role="slider" tabindex="0" aria-labelledby="days-label"><span class="track"><span class="fill"></span></span><span class="thumb"></span></div>
+              <output class="mslider-out" id="days-out">3</output>
+            </div>
+          </div>
+          <div class="month-figs" aria-live="polite">
+            <div class="fig"><p class="fig-label">Credit earned</p><p class="fig-num" id="fig-earned">480</p></div>
+            <div class="fig"><p class="fig-label">Credit spent</p><p class="fig-num" id="fig-spent">360</p></div>
+            <div class="fig"><p class="fig-label">Balance</p><p class="fig-num honey" id="fig-balance">+120</p></div>
+          </div>
+        </div>
+        <p class="caption">Illustrative rates. Members will set real prices per class.</p>
+
+        <h3 class="subhead">How the company earns</h3>
+        <ul class="earns">
+          <li><h4>Team pools</h4><p>A hosted brain for companies pooling their own accounts and GPUs among their own people.</p></li>
+          <li><h4>Running it yourself stays free</h4><p>The engine runs on your machines at no charge.</p></li>
+          <li><h4>A fee on paid capacity, later</h4><p>If counsel approves buying credit with money, a small fee on those purchases, as OpenRouter charges on credit today.<sup><a href="#src-12" aria-label="Source 12">12</a></sup></p></li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ================= 06 market ================= -->
+    <section id="market" class="sec has-field" data-name="Market">
+      <canvas class="field field-sec field-top" data-field="hub" data-seed="12" data-clusters="3" aria-hidden="true"></canvas>
+      <div class="wrap">
+        <p class="tag">06 · MARKET</p>
+        <h2>Open models now carry<br class="d"> <em>most routed traffic.</em></h2>
+        <ul class="keyfigs">
+          <li><p class="keynum">128.4T</p><p>tokens a week through OpenRouter in September 2026, up from 0.5T in January 2025.<sup><a href="#src-3" aria-label="Source 3">3</a></sup></p></li>
+          <li><p class="keynum">$2.5B</p><p>run-rate for Claude Code in February 2026.<sup><a href="#src-4" aria-label="Source 4">4</a></sup></p></li>
+          <li><p class="keynum">4.7M</p><p>paid GitHub Copilot subscribers, up 75% in a year.<sup><a href="#src-5" aria-label="Source 5">5</a></sup></p></li>
+          <li><p class="keynum">$37B</p><p>enterprise generative-AI spend in 2025; coding was $4.0B of it.<sup><a href="#src-6" aria-label="Source 6">6</a></sup></p></li>
+        </ul>
+
+        <div class="charts">
+          <figure class="panel chart" id="share">
+            <h3 class="chart-title" id="share-title">Open-weight share of OpenRouter tokens</h3>
+            <div class="share-plot" id="share-plot" role="group" aria-labelledby="share-title"></div>
+            <figcaption class="caption caption-in">Approximate, from OpenRouter's reports.<sup><a href="#src-3" aria-label="Source 3">3</a> <a href="#src-7" aria-label="Source 7">7</a></sup></figcaption>
+          </figure>
+          <figure class="panel chart" id="price">
+            <h3 class="chart-title" id="price-title">Price per million output tokens</h3>
+            <div class="bars" id="bars" role="group" aria-labelledby="price-title"></div>
+            <figcaption class="caption caption-in">List prices; the open-model bar is batched serving cost, not a list price.<sup><a href="#src-8" aria-label="Source 8">8</a> <a href="#src-9" aria-label="Source 9">9</a> <a href="#src-10" aria-label="Source 10">10</a></sup></figcaption>
+          </figure>
+        </div>
+
+        <div class="panel tablewrap">
+          <table class="who">
+            <thead><tr><th scope="col">Who</th><th scope="col">What it is</th><th scope="col">How contributors are rewarded</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">AI Horde</th><td>Volunteer GPU pool for images and text, since 2022</td><td>Kudos buy priority and can never be bought or sold<sup><a href="#src-11" aria-label="Source 11">11</a></sup></td></tr>
+              <tr><th scope="row">OpenRouter</th><td>One API across many model providers</td><td>5.5% fee on credit purchases<sup><a href="#src-12" aria-label="Source 12">12</a></sup></td></tr>
+              <tr><th scope="row">LiteLLM, Portkey</th><td>Gateways for your own keys</td><td>Open source plus paid plans</td></tr>
+              <tr><th scope="row">Chutes</th><td>Token-rewarded inference network</td><td>Lost 45% of its tokens when it ended subsidized use<sup><a href="#src-13" aria-label="Source 13">13</a></sup></td></tr>
+              <tr class="us"><th scope="row">Apiary</th><td>Your accounts, your GPU and a member pool in one router</td><td>Credit for delivered capacity only</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 07 roadmap ================= -->
+    <section id="roadmap" class="sec comb-faint" data-name="Roadmap">
+      <div class="wrap">
+        <p class="tag">07 · ROADMAP</p>
+        <h2>Pilot <em>before token.</em></h2>
+        <div class="steps" role="tablist" aria-label="Roadmap" id="steps">
+          <button type="button" role="tab" id="step-1" aria-controls="step-panel" aria-selected="true" class="step"><span class="step-hex"><svg aria-hidden="true"><use href="#i-hex"/></svg><span class="step-n">1</span></span><span class="step-label">Generalize the engine</span><span class="chip chip-honey">Underway</span></button>
+          <button type="button" role="tab" id="step-2" aria-controls="step-panel" aria-selected="false" tabindex="-1" class="step"><span class="step-hex"><svg aria-hidden="true"><use href="#i-hex"/></svg><span class="step-n">2</span></span><span class="step-label">Source drivers</span><span class="chip chip-honey">Partly built</span></button>
+          <button type="button" role="tab" id="step-3" aria-controls="step-panel" aria-selected="false" tabindex="-1" class="step"><span class="step-hex"><svg aria-hidden="true"><use href="#i-hex"/></svg><span class="step-n">3</span></span><span class="step-label">Metering into a ledger</span><span class="chip chip-dim">Not started</span></button>
+          <button type="button" role="tab" id="step-4" aria-controls="step-panel" aria-selected="false" tabindex="-1" class="step"><span class="step-hex"><svg aria-hidden="true"><use href="#i-hex"/></svg><span class="step-n">4</span></span><span class="step-label">Membership funnel</span><span class="chip chip-live">Live</span></button>
+          <button type="button" role="tab" id="step-5" aria-controls="step-panel" aria-selected="false" tabindex="-1" class="step"><span class="step-hex"><svg aria-hidden="true"><use href="#i-hex"/></svg><span class="step-n">5</span></span><span class="step-label">Token and governance design</span><span class="chip chip-dim">Later</span></button>
+          <button type="button" role="tab" id="step-6" aria-controls="step-panel" aria-selected="false" tabindex="-1" class="step"><span class="step-hex"><svg aria-hidden="true"><use href="#i-hex"/></svg><span class="step-n">6</span></span><span class="step-label">Minimum viable pool</span><span class="chip chip-dim">Not started</span></button>
+        </div>
+        <div class="panel step-panel" id="step-panel" role="tabpanel" aria-labelledby="step-1" tabindex="0">
+          <svg class="step-art" id="step-art" viewBox="0 0 240 260" aria-hidden="true"></svg>
+          <div class="step-copy">
+            <h3 id="step-title">Generalize the engine</h3>
+            <p id="step-detail">Configuration instead of hard-coded hosts, pluggable alert channels, and member sign-in on the brain. The self-host edition is the first piece.</p>
+          </div>
+          <template id="step-details">
+            <p>Configuration instead of hard-coded hosts, pluggable alert channels, and member sign-in on the brain. The self-host edition is the first piece.</p>
+            <p>Your own accounts are built; community inference grows out of the local-model support.</p>
+            <p>A plain database first, built from the brain's existing measurements.</p>
+            <p>The waggle list at apiary.wtf, then personas and user stories.</p>
+            <p>Economic modeling and counsel; issuance only after both.</p>
+            <p>About five friendly members, coding-burst and local-inference classes, a database ledger, no token.</p>
+          </template>
+        </div>
+        <p class="note note-cream">The pilot (6) runs before any token (5): real delivery data first, economics second.</p>
+      </div>
+    </section>
+
+    <!-- ================= 08 risks ================= -->
+    <section id="risks" class="sec" data-name="Risks">
+      <div class="wrap">
+        <p class="tag">08 · RISKS</p>
+        <h2 class="h2-md">What could go wrong,<br> and what we do about it.</h2>
+        <div class="panel risks" id="risk-table">
+          <div class="risk-head" aria-hidden="true"><span>Risk</span><span>What we do</span></div>
+          <div class="risk">
+            <h3><button type="button" aria-expanded="true" aria-controls="why-1" id="risk-1"><span class="risk-mark" aria-hidden="true"><svg><use href="#i-chev"/></svg></span><span class="risk-name">Provider terms</span></button></h3><p class="risk-do">The pool carries only capacity whose terms allow it: members' GPUs running open-weight models, and capacity a provider approves. Your own plans and keys serve only your own work.</p><svg class="risk-up" aria-hidden="true"><use href="#i-chev"/></svg>
+            <div class="why" id="why-1" role="region" aria-labelledby="risk-1"><p class="why-label">Why</p><p>Subscription plans can't be made available to anyone else,<sup><a href="#src-14" aria-label="Source 14">14</a></sup> API keys can't be transferred to a third party,<sup><a href="#src-15" aria-label="Source 15">15</a></sup> and startup credits can't be passed on to end customers.<sup><a href="#src-16" aria-label="Source 16">16</a></sup> Anthropic also bars routing plan credentials on behalf of other users.<sup><a href="#src-1" aria-label="Source 1">1</a></sup></p></div>
+          </div>
+          <div class="risk">
+            <h3><button type="button" aria-expanded="false" aria-controls="why-2" id="risk-2"><span class="risk-mark" aria-hidden="true"><svg><use href="#i-chev"/></svg></span><span class="risk-name">Proving delivery</span></button></h3><p class="risk-do">Receipts signed by both sides, random spot checks and reputation; hardware attestation as it matures.</p><svg class="risk-up" aria-hidden="true"><use href="#i-chev"/></svg>
+            <div class="why" id="why-2" role="region" aria-labelledby="risk-2" hidden><p class="why-label">Why</p><p>A GPU owner and a requester could collude to mint credit for work that never happened.</p></div>
+          </div>
+          <div class="risk">
+            <h3><button type="button" aria-expanded="false" aria-controls="why-3" id="risk-3"><span class="risk-mark" aria-hidden="true"><svg><use href="#i-chev"/></svg></span><span class="risk-name">Securities law</span></button></h3><p class="risk-do">No token without counsel. Pilot credit can't be bought, sold or transferred.</p><svg class="risk-up" aria-hidden="true"><use href="#i-chev"/></svg>
+            <div class="why" id="why-3" role="region" aria-labelledby="risk-3" hidden><p class="why-label">Why</p><p>Credit that can be traded for money may count as a security.</p></div>
+          </div>
+          <div class="risk">
+            <h3><button type="button" aria-expanded="false" aria-controls="why-4" id="risk-4"><span class="risk-mark" aria-hidden="true"><svg><use href="#i-chev"/></svg></span><span class="risk-name">Privacy</span></button></h3><p class="risk-do">A pooled request runs on another member's GPU. You choose which work may burst; the brain logs metadata only.</p><svg class="risk-up" aria-hidden="true"><use href="#i-chev"/></svg>
+            <div class="why" id="why-4" role="region" aria-labelledby="risk-4" hidden><p class="why-label">Why</p><p>Whoever serves a request sees its content, as any inference provider does. The logging policy is written down before the first outside member joins.</p></div>
+          </div>
+          <div class="risk">
+            <h3><button type="button" aria-expanded="false" aria-controls="why-5" id="risk-5"><span class="risk-mark" aria-hidden="true"><svg><use href="#i-chev"/></svg></span><span class="risk-name">The subsidy trap</span></button></h3><p class="risk-do">Credit only for delivery, and no signup rewards.</p><svg class="risk-up" aria-hidden="true"><use href="#i-chev"/></svg>
+            <div class="why" id="why-5" role="region" aria-labelledby="risk-5" hidden><p class="why-label">Why</p><p>Free capacity attracts load that never pays back: Chutes processed 45% fewer tokens in six weeks once it cut subsidized use.<sup><a href="#src-13" aria-label="Source 13">13</a></sup></p></div>
+          </div>
+          <div class="risk">
+            <h3><button type="button" aria-expanded="false" aria-controls="why-6" id="risk-6"><span class="risk-mark" aria-hidden="true"><svg><use href="#i-chev"/></svg></span><span class="risk-name">Everyone crunches at once</span></button></h3><p class="risk-do">Members across time zones, GPU owners with different peaks, per-member budgets.</p><svg class="risk-up" aria-hidden="true"><use href="#i-chev"/></svg>
+            <div class="why" id="why-6" role="region" aria-labelledby="risk-6" hidden><p class="why-label">Why</p><p>Correlated demand erodes the pooling benefit. Try "Overlap: High" in the demo above.</p></div>
+          </div>
+          <div class="risk">
+            <h3><button type="button" aria-expanded="false" aria-controls="why-7" id="risk-7"><span class="risk-mark" aria-hidden="true"><svg><use href="#i-chev"/></svg></span><span class="risk-name">Open models aren't frontier models</span></button></h3><p class="risk-do">Routing per model class: you decide what may burst, and to what.</p><svg class="risk-up" aria-hidden="true"><use href="#i-chev"/></svg>
+            <div class="why" id="why-7" role="region" aria-labelledby="risk-7" hidden><p class="why-label">Why</p><p>A 30B open model is a step down for some work.</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= 09 team ================= -->
+    <section id="team" class="sec" data-name="Team">
+      <div class="wrap">
+        <p class="tag">09 · TEAM</p>
+        <h2>Who's building it.</h2>
+        <ul class="people">
+          <li><span class="mono-hex" aria-hidden="true"><svg><use href="#i-hex"/></svg><span>T</span></span><div><h3>Thomas</h3><p>Built the routing engine and runs it every day.</p></div></li>
+          <li><span class="mono-hex" aria-hidden="true"><svg><use href="#i-hex"/></svg><span>J</span></span><div><h3>Jared</h3><p>Co-founder.</p></div></li>
+        </ul>
+        <p class="team-p">Members will govern which sources join, how classes are priced and how credit is issued. Until counsel helps choose a legal wrapper, the founders steward the pool, and they publish their reasons for any founders' allocation and for each provider policy.</p>
+      </div>
+    </section>
+
+    <!-- ================= 10 ask ================= -->
+    <section id="ask" class="sec has-field" data-name="The ask">
+      <canvas class="field field-band" data-field="cells" data-seed="9" aria-hidden="true"></canvas>
+      <div class="wrap">
+        <p class="tag">10 · THE ASK</p>
+        <h2>Get <em>involved.</em></h2>
+        <ul class="asks">
+          <li><svg class="icon" aria-hidden="true"><use href="#i-people"/></svg><h3>Pilot members</h3><p>We're choosing about five members for the first pool: people who hit their limits, and people with GPUs to lend.</p><a class="btn btn-ghost" href="/#join">Join the waggle list</a></li>
+          <li><svg class="icon" aria-hidden="true"><use href="#i-code"/></svg><h3>Engineers</h3><p>Metering, verification and scheduling, with real traffic behind them.</p><a class="btn btn-ghost" href="/?want=dev-time#join">Join the waggle list</a></li>
+          <li><svg class="icon" aria-hidden="true"><use href="#i-gpu"/></svg><h3>Capacity donors</h3><p>Lend a GPU running open-weight models, or fund rented GPUs. We can't take plan logins, API keys or program credits.</p><a class="btn btn-ghost" href="/?want=gpu#join">Join the waggle list</a></li>
+          <li><svg class="icon" aria-hidden="true"><use href="#i-heart"/></svg><h3>Backers</h3><p>Fund the pilot: engineering time, counsel for the legal wrapper, and seed GPU capacity.</p><a class="btn btn-fill" href="/?want=funding#join">Talk to us</a></li>
+        </ul>
+        <p class="smallprint">This page describes plans. It is not an offer of tokens, securities or any investment. No token exists, and none will be issued before counsel signs off. Anything marked simulated or illustrative is a model, not data.</p>
+      </div>
+    </section>
+
+    <!-- ================= sources ================= -->
+    <section id="sources" class="sec sources" aria-labelledby="sources-h">
+      <div class="wrap">
+        <h2 id="sources-h">Sources</h2>
+        <ol>
+          <li id="src-1"><a href="https://code.claude.com/docs/en/legal-and-compliance">Anthropic, Claude Code legal and compliance</a></li>
+          <li id="src-2"><a href="https://www.microsoft.com/en-us/investor/events/fy-2026/earnings-fy-2026-q4">Microsoft, FY2026 Q4 earnings call, July 2026</a></li>
+          <li id="src-3"><a href="https://openrouter.ai/data/newsletter/the-token-state-of-play">OpenRouter, The token state of play, September 2026</a></li>
+          <li id="src-4"><a href="https://www.anthropic.com/news/anthropic-raises-30-billion-series-g-funding-380-billion-post-money-valuation">Anthropic, Series G announcement, February 2026</a></li>
+          <li id="src-5"><a href="https://www.microsoft.com/en-us/investor/events/fy-2026/earnings-fy-2026-q2">Microsoft, FY2026 Q2 earnings call, January 2026</a></li>
+          <li id="src-6"><a href="https://menlovc.com/perspective/2025-the-state-of-generative-AI-in-the-enterprise/">Menlo Ventures, 2025: The State of Generative AI in the Enterprise, December 2025</a></li>
+          <li id="src-7"><a href="https://arxiv.org/html/2601.10088v1">OpenRouter and a16z, State of AI, January 2026</a></li>
+          <li id="src-8"><a href="https://platform.claude.com/docs/en/about-claude/pricing">Anthropic, Pricing</a></li>
+          <li id="src-9"><a href="https://developers.openai.com/api/docs/pricing">OpenAI, API pricing</a></li>
+          <li id="src-10"><a href="https://www.cloudrift.ai/blog/benchmarking-rtx-gpus-for-llm-inference">CloudRift, Benchmarking RTX GPUs for LLM inference, October 2025 (Qwen3-Coder-30B, 4-bit, high concurrency)</a></li>
+          <li id="src-11"><a href="https://aihorde.net/mission">AI Horde, Mission</a></li>
+          <li id="src-12"><a href="https://openrouter.ai/docs/faq">OpenRouter, FAQ</a></li>
+          <li id="src-13"><a href="https://chutes.ai/news/from-volume-to-value-building-a-sustainable-ai-inference-platform-2">Chutes, From volume to value, March 2026</a></li>
+          <li id="src-14"><a href="https://www.anthropic.com/legal/consumer-terms">Anthropic, Consumer terms</a></li>
+          <li id="src-15"><a href="https://cdn.openai.com/osa/openai-services-agreement.pdf">OpenAI, Services Agreement</a></li>
+          <li id="src-16"><a href="https://aws.amazon.com/activate/terms">AWS, Activate terms</a></li>
+        </ol>
+      </div>
+    </section>
+  </main>
+</div>
+
+<footer class="site-foot">
+  <a class="wordmark" href="/"><svg aria-hidden="true"><use href="#i-hexfill"/></svg><span>apiary</span></a>
+  <p class="foot-right"><span>apiary.wtf</span><span class="foot-dot" aria-hidden="true">·</span><a href="/#join">Back to the waggle list</a></p>
+</footer>
+</body>
+</html>

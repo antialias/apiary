@@ -1,0 +1,363 @@
+{
+  "_comment": "Written by the switch proxy's TestSessionFactsGoldenIsCurrent (session_asks_test.go): GET /_switch/session replies for quota-model 68 §9's cases, from testdata/preferred_c2.json as edited per case. The status line's test reads a copy. Regenerate with UPDATE_SESSION_FACTS_GOLDEN=1.",
+  "cases": [
+    {
+      "name": "plenty",
+      "model": "claude-frontier",
+      "reply": {
+        "v": 2,
+        "as_of": "2027-01-15T08:00:00Z",
+        "seen": true,
+        "class": "claude-frontier",
+        "model": {
+          "name": "opus 5.5"
+        },
+        "account": {
+          "name": "acct-b",
+          "provider": "anthropic",
+          "kind": "subscription"
+        },
+        "paying": null,
+        "unavailable_until": null,
+        "room": {
+          "selection": "frontier",
+          "unit": "api_usd",
+          "capacity": 646.6,
+          "room": 517.28,
+          "left_pct": 80,
+          "heard_at": "2027-01-15T08:00:00Z",
+          "coverage": {
+            "counted": 3,
+            "empty": 0,
+            "learning": 0,
+            "not_quota": 0,
+            "stale": 0,
+            "unread": 0
+          },
+          "more_at": "2027-01-15T10:00:00Z",
+          "back_at": null
+        },
+        "asks": [],
+        "problems": []
+      }
+    },
+    {
+      "name": "partial",
+      "model": "claude-frontier",
+      "reply": {
+        "v": 2,
+        "as_of": "2027-01-15T08:00:00Z",
+        "seen": true,
+        "class": "claude-frontier",
+        "model": {
+          "name": "opus 5.5"
+        },
+        "account": {
+          "name": "acct-b",
+          "provider": "anthropic",
+          "kind": "subscription"
+        },
+        "paying": null,
+        "unavailable_until": null,
+        "room": {
+          "selection": "frontier",
+          "unit": "api_usd",
+          "capacity": 646.6,
+          "room": 316.83,
+          "left_pct": 49,
+          "heard_at": "2027-01-15T08:00:00Z",
+          "coverage": {
+            "counted": 1,
+            "empty": 2,
+            "learning": 3,
+            "not_quota": 0,
+            "stale": 0,
+            "unread": 0
+          },
+          "more_at": "2027-01-16T08:00:00Z",
+          "back_at": "2027-01-15T20:00:00Z"
+        },
+        "asks": [],
+        "problems": []
+      }
+    },
+    {
+      "name": "low",
+      "model": "claude-frontier",
+      "reply": {
+        "v": 2,
+        "as_of": "2027-01-15T08:00:00Z",
+        "seen": true,
+        "class": "claude-frontier",
+        "model": {
+          "name": "opus 5.5"
+        },
+        "account": {
+          "name": "acct-b",
+          "provider": "anthropic",
+          "kind": "subscription"
+        },
+        "paying": null,
+        "unavailable_until": null,
+        "room": {
+          "selection": "frontier",
+          "unit": "api_usd",
+          "capacity": 646.6,
+          "room": 77.59,
+          "left_pct": 12,
+          "heard_at": "2027-01-15T08:00:00Z",
+          "coverage": {
+            "counted": 3,
+            "empty": 0,
+            "learning": 0,
+            "not_quota": 0,
+            "stale": 1,
+            "unread": 0
+          },
+          "more_at": "2027-01-15T09:00:00Z",
+          "back_at": null
+        },
+        "asks": [],
+        "problems": []
+      }
+    },
+    {
+      "name": "an ask",
+      "model": "claude-frontier",
+      "reply": {
+        "v": 2,
+        "as_of": "2027-01-15T08:00:00Z",
+        "seen": true,
+        "class": "claude-frontier",
+        "model": {
+          "name": "opus 5.5"
+        },
+        "account": {
+          "name": "acct-b",
+          "provider": "anthropic",
+          "kind": "subscription"
+        },
+        "paying": null,
+        "unavailable_until": null,
+        "room": {
+          "selection": "frontier",
+          "unit": "api_usd",
+          "capacity": 0,
+          "room": 0,
+          "left_pct": null,
+          "heard_at": "2027-01-15T08:00:00Z",
+          "coverage": {
+            "counted": 0,
+            "empty": 2,
+            "learning": 4,
+            "not_quota": 0,
+            "stale": 0,
+            "unread": 1
+          },
+          "more_at": null,
+          "back_at": "2027-01-22T08:00:00Z"
+        },
+        "asks": [
+          "acct-c: login expired, log in again"
+        ],
+        "problems": []
+      }
+    },
+    {
+      "name": "paying pinned",
+      "model": "claude-frontier",
+      "reply": {
+        "v": 2,
+        "as_of": "2027-01-15T08:00:00Z",
+        "seen": true,
+        "class": "claude-frontier",
+        "model": {
+          "name": "opus 5.5"
+        },
+        "account": {
+          "name": "acct-a",
+          "provider": "anthropic",
+          "kind": "subscription"
+        },
+        "paying": {
+          "from": "Anthropic extra usage",
+          "left": null,
+          "unit": "usd",
+          "pinned": true
+        },
+        "unavailable_until": null,
+        "room": {
+          "selection": "frontier",
+          "unit": "api_usd",
+          "capacity": 0,
+          "room": 0,
+          "left_pct": null,
+          "heard_at": "2027-01-15T08:00:00Z",
+          "coverage": {
+            "counted": 0,
+            "empty": 2,
+            "learning": 4,
+            "not_quota": 0,
+            "stale": 0,
+            "unread": 1
+          },
+          "more_at": null,
+          "back_at": "2027-01-22T08:00:00Z"
+        },
+        "asks": [
+          "acct-c: login expired, log in again"
+        ],
+        "problems": []
+      }
+    },
+    {
+      "name": "unavailable",
+      "model": "claude-frontier",
+      "reply": {
+        "v": 2,
+        "as_of": "2027-01-15T08:00:00Z",
+        "seen": true,
+        "class": "claude-frontier",
+        "model": {
+          "name": "opus 5.5"
+        },
+        "account": {
+          "name": "acct-b",
+          "provider": "anthropic",
+          "kind": "subscription"
+        },
+        "paying": null,
+        "unavailable_until": "2027-01-15T11:00:00Z",
+        "room": {
+          "selection": "frontier",
+          "unit": "api_usd",
+          "capacity": 0,
+          "room": 0,
+          "left_pct": null,
+          "heard_at": "2027-01-15T08:00:00Z",
+          "coverage": {
+            "counted": 0,
+            "empty": 2,
+            "learning": 4,
+            "not_quota": 0,
+            "stale": 0,
+            "unread": 1
+          },
+          "more_at": null,
+          "back_at": "2027-01-22T08:00:00Z"
+        },
+        "asks": [
+          "acct-c: login expired, log in again"
+        ],
+        "problems": []
+      }
+    },
+    {
+      "name": "unseen",
+      "model": "claude-frontier",
+      "reply": {
+        "v": 2,
+        "as_of": "2027-01-15T08:00:00Z",
+        "seen": false,
+        "class": "claude-frontier",
+        "room": {
+          "selection": "frontier",
+          "unit": "api_usd",
+          "capacity": 0,
+          "room": 0,
+          "left_pct": null,
+          "heard_at": "2027-01-15T08:00:00Z",
+          "coverage": {
+            "counted": 0,
+            "empty": 2,
+            "learning": 4,
+            "not_quota": 0,
+            "stale": 0,
+            "unread": 1
+          },
+          "more_at": null,
+          "back_at": "2027-01-22T08:00:00Z"
+        },
+        "asks": [
+          "acct-c: login expired, log in again"
+        ],
+        "problems": []
+      }
+    },
+    {
+      "name": "no fleet",
+      "model": "claude-frontier",
+      "reply": {
+        "v": 2,
+        "as_of": "2027-01-15T08:00:00Z",
+        "seen": true,
+        "class": "claude-frontier",
+        "model": {
+          "name": "opus 5.5"
+        },
+        "account": {
+          "name": "acct-b",
+          "provider": "anthropic",
+          "kind": "subscription"
+        },
+        "paying": null,
+        "unavailable_until": null,
+        "room": null,
+        "asks": null,
+        "problems": [
+          "the brain publishes no room figure"
+        ]
+      }
+    },
+    {
+      "name": "no entry",
+      "model": "claude-frontier",
+      "reply": {
+        "v": 2,
+        "as_of": "2027-01-15T08:00:00Z",
+        "seen": true,
+        "class": "claude-frontier",
+        "model": {
+          "name": "opus 5.5"
+        },
+        "account": {
+          "name": "acct-b",
+          "provider": "anthropic",
+          "kind": "subscription"
+        },
+        "paying": null,
+        "unavailable_until": null,
+        "room": null,
+        "asks": null,
+        "problems": [
+          "the brain has no figure for frontier"
+        ]
+      }
+    },
+    {
+      "name": "brain unreachable",
+      "model": "claude-frontier",
+      "reply": {
+        "v": 2,
+        "as_of": "2027-01-15T08:00:00Z",
+        "seen": true,
+        "class": "claude-frontier",
+        "model": {
+          "name": "opus 5.5"
+        },
+        "account": {
+          "name": "acct-b",
+          "provider": "anthropic",
+          "kind": "subscription"
+        },
+        "paying": null,
+        "unavailable_until": null,
+        "room": null,
+        "asks": null,
+        "problems": [
+          "the proxy cannot reach the brain, so its facts may be old"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,2539 @@
+{
+ "now": 1800000000.0,
+ "preferred": {
+  "account": "acct-a@example.com",
+  "account_health": {
+   "accounts": [
+    {
+     "age_s": 0.0,
+     "consecutive_failures": 0,
+     "err": "",
+     "good_ts": 1800000000.0,
+     "health": "ok",
+     "last_error_kind": "none",
+     "name": "acct-a@example.com",
+     "next_retry_in_s": 0,
+     "poll_ok": 1,
+     "provider": "anthropic",
+     "stale": 0
+    },
+    {
+     "age_s": 2700.0,
+     "consecutive_failures": 0,
+     "err": "",
+     "good_ts": 1799997300.0,
+     "health": "degraded",
+     "last_error_kind": "none",
+     "name": "acct-b@example.com",
+     "next_retry_in_s": 0,
+     "poll_ok": 1,
+     "provider": "anthropic",
+     "stale": 1
+    },
+    {
+     "age_s": null,
+     "consecutive_failures": 0,
+     "err": "refresh refused (401)",
+     "good_ts": null,
+     "health": "auth_dead",
+     "last_error_kind": "auth",
+     "name": "acct-c@example.com",
+     "next_retry_in_s": 0,
+     "poll_ok": 0,
+     "provider": "anthropic",
+     "stale": 0
+    }
+   ],
+   "worst": "auth_dead"
+  },
+  "accounts": {
+   "acct-a@example.com": {
+    "allowance": {
+     "entitlement": {
+      "basis": "derived",
+      "state": "active"
+     },
+     "limits": {},
+     "open": null,
+     "open_basis": null,
+     "type": "allowance",
+     "windows": {
+      "five_hour": {
+       "aliases": null,
+       "as_of": 1800000000.0,
+       "basis": "exact",
+       "kind": "window",
+       "opens": "first_use",
+       "period": "5h",
+       "period_s": 18000,
+       "reset_basis": "exact",
+       "resets_at": 4088944800,
+       "scope": null,
+       "sources": [],
+       "used_pct": 10.0
+      },
+      "scoped:Opus": {
+       "aliases": null,
+       "as_of": 1800000000.0,
+       "basis": "exact",
+       "kind": "window",
+       "opens": "anchored",
+       "period": "7d",
+       "period_s": 604800,
+       "reset_basis": "exact",
+       "resets_at": 4089225600,
+       "scope": "Opus",
+       "sources": [
+        {
+         "group": "model_specific",
+         "is_active": false,
+         "kind": "weekly_scoped",
+         "percent": 100.0,
+         "resets_at": 4089225600.0,
+         "scope_model": "Opus",
+         "severity": "normal"
+        }
+       ],
+       "used_pct": 100.0
+      },
+      "seven_day": {
+       "aliases": null,
+       "as_of": 1800000000.0,
+       "basis": "exact",
+       "kind": "window",
+       "opens": "anchored",
+       "period": "7d",
+       "period_s": 604800,
+       "reset_basis": "exact",
+       "resets_at": 4089225600,
+       "scope": null,
+       "sources": [],
+       "used_pct": 10.0
+      }
+     }
+    },
+    "as_of": 1800000000.0,
+    "beside": [],
+    "kind": "subscription",
+    "models": {},
+    "money": {
+     "credits": {
+      "balance": null,
+      "disabled_reason": null,
+      "entitlement": {
+       "basis": "unknown",
+       "state": "unknown"
+      },
+      "limits": {
+       "balance": {
+        "amount": null,
+        "basis": "unknown",
+        "kind": "balance"
+       },
+       "monthly_limit": {
+        "basis": "exact",
+        "kind": "spend_cap",
+        "limit": 5000.0,
+        "setter": "owner@provider",
+        "unit": null,
+        "used": 0.0,
+        "used_pct": 0.0
+       }
+      },
+      "open": true,
+      "open_basis": "exact",
+      "type": "money",
+      "unit": "usd",
+      "unit_usd": 1.0
+     }
+    },
+    "next_poll_at": null,
+    "plan": {
+     "basis": "derived",
+     "label": "max"
+    },
+    "provider": "anthropic",
+    "recheck_epoch": null,
+    "source": "GET /api/oauth/usage"
+   },
+   "acct-b@example.com": {
+    "allowance": {
+     "entitlement": {
+      "basis": "derived",
+      "state": "active"
+     },
+     "limits": {},
+     "open": null,
+     "open_basis": null,
+     "type": "allowance",
+     "windows": {
+      "five_hour": {
+       "aliases": null,
+       "as_of": 1799997300.0,
+       "basis": "exact",
+       "kind": "window",
+       "opens": "first_use",
+       "period": "5h",
+       "period_s": 18000,
+       "reset_basis": null,
+       "resets_at": null,
+       "scope": null,
+       "sources": [],
+       "used_pct": 10.0
+      },
+      "seven_day": {
+       "aliases": null,
+       "as_of": 1799997300.0,
+       "basis": "exact",
+       "kind": "window",
+       "opens": "anchored",
+       "period": "7d",
+       "period_s": 604800,
+       "reset_basis": null,
+       "resets_at": null,
+       "scope": null,
+       "sources": [],
+       "used_pct": 20.0
+      }
+     }
+    },
+    "as_of": 1799997300.0,
+    "beside": [],
+    "kind": "subscription",
+    "models": {},
+    "money": {
+     "credits": {
+      "balance": null,
+      "disabled_reason": null,
+      "entitlement": {
+       "basis": "unknown",
+       "state": "unknown"
+      },
+      "limits": {
+       "balance": {
+        "amount": null,
+        "basis": "unknown",
+        "kind": "balance"
+       },
+       "monthly_limit": {
+        "basis": "exact",
+        "kind": "spend_cap",
+        "limit": 5000.0,
+        "setter": "owner@provider",
+        "unit": null,
+        "used": 0.0,
+        "used_pct": 0.0
+       }
+      },
+      "open": true,
+      "open_basis": "exact",
+      "type": "money",
+      "unit": "usd",
+      "unit_usd": 1.0
+     }
+    },
+    "next_poll_at": null,
+    "plan": {
+     "basis": "derived",
+     "label": "max"
+    },
+    "provider": "anthropic",
+    "recheck_epoch": null,
+    "source": "GET /api/oauth/usage"
+   },
+   "acct-c@example.com": {
+    "allowance": {
+     "limits": {},
+     "open": null,
+     "open_basis": null,
+     "windows": {}
+    },
+    "as_of": null,
+    "beside": [],
+    "kind": "subscription",
+    "models": {},
+    "money": {
+     "credits": {
+      "balance": null,
+      "open": null,
+      "unit": null
+     }
+    },
+    "next_poll_at": null,
+    "plan": null,
+    "provider": "anthropic",
+    "recheck_epoch": null,
+    "source": null
+   },
+   "gpt": {
+    "allowance": {
+     "entitlement": {
+      "basis": "derived",
+      "state": "active"
+     },
+     "limit_reached": false,
+     "limits": {},
+     "open": false,
+     "open_basis": "exact",
+     "reset_options": {
+      "basis": "exact",
+      "purchase_eligible": true,
+      "reset_credits": 0
+     },
+     "type": "allowance",
+     "windows": {
+      "five_hour": {
+       "aliases": null,
+       "as_of": 1800000000.0,
+       "basis": "exact",
+       "kind": "window",
+       "limit": 100.0,
+       "opens": "first_use",
+       "period": "5h",
+       "period_s": 18000,
+       "remaining": 50.0,
+       "reset_basis": "early_possible",
+       "resets_at": 1800009000,
+       "scope": null,
+       "used": 50.0,
+       "used_pct": 50.0
+      },
+      "seven_day": {
+       "aliases": null,
+       "as_of": 1800000000.0,
+       "basis": "exact",
+       "kind": "window",
+       "limit": 100.0,
+       "opens": "first_use",
+       "period": "7d",
+       "period_s": 604800,
+       "remaining": 40.0,
+       "reset_basis": "early_possible",
+       "resets_at": 1800604800,
+       "scope": null,
+       "used": 60.0,
+       "used_pct": 60.0
+      }
+     }
+    },
+    "as_of": 1800000000.0,
+    "beside": [],
+    "kind": "subscription",
+    "models": {
+     "gpt-test": {
+      "available": true,
+      "available_at": null,
+      "basis": "unknown_semantics",
+      "credits_would_enable": false
+     }
+    },
+    "money": {
+     "credits": {
+      "balance": 250.0,
+      "entitlement": {
+       "basis": "derived",
+       "state": "active"
+      },
+      "has_credits": true,
+      "limits": {
+       "balance": {
+        "advisory": true,
+        "amount": 250.0,
+        "basis": "exact",
+        "kind": "balance"
+       },
+       "spend_control": {
+        "basis": "exact",
+        "kind": "spend_cap",
+        "limit": null,
+        "reached": false,
+        "setter": "owner@provider"
+       },
+       "topup_cap": {
+        "basis": "derived",
+        "kind": "spend_cap",
+        "limit": null,
+        "reached": false,
+        "setter": "owner@provider"
+       }
+      },
+      "open": true,
+      "open_basis": "derived",
+      "type": "money",
+      "unit": "codex_credit",
+      "unit_usd": null,
+      "unlimited": false
+     }
+    },
+    "next_poll_at": null,
+    "plan": {
+     "basis": "exact",
+     "label": "pro"
+    },
+    "provider": "gpt",
+    "recheck_epoch": null,
+    "source": "GET wham/usage + GET wham/rate-limit-reset-credits"
+   },
+   "kimi": {
+    "allowance": {
+     "entitlement": {
+      "basis": "derived",
+      "state": "active"
+     },
+     "limits": {
+      "total_quota": {
+       "as_of": 1800000000.0,
+       "basis": "unknown_semantics",
+       "kind": "cycle_pool",
+       "limit": 100.0,
+       "period": "1mo",
+       "remaining": 99.0,
+       "reset_basis": "anniversary",
+       "resets_at": null,
+       "used": 1.0,
+       "used_pct": 1.0
+      }
+     },
+     "open": null,
+     "open_basis": null,
+     "type": "allowance",
+     "windows": {
+      "five_hour": {
+       "aliases": null,
+       "as_of": 1800000000.0,
+       "basis": "exact",
+       "kind": "window",
+       "limit": 100.0,
+       "opens": "first_use",
+       "period": "5h",
+       "period_s": 18000,
+       "remaining": 92.0,
+       "reset_basis": "exact",
+       "resets_at": 1800018000,
+       "scope": null,
+       "used": 8.0,
+       "used_pct": 8.0
+      },
+      "seven_day": {
+       "aliases": null,
+       "as_of": 1800000000.0,
+       "basis": "exact",
+       "kind": "window",
+       "limit": 100.0,
+       "opens": "anchored",
+       "period": "7d",
+       "period_s": 604800,
+       "remaining": 98.0,
+       "reset_basis": "exact",
+       "resets_at": 1800604800,
+       "scope": null,
+       "used": 2.0,
+       "used_pct": 2.0
+      }
+     }
+    },
+    "as_of": 1800000000.0,
+    "beside": [
+     {
+      "basis": "exact",
+      "kind": "concurrency",
+      "limit": 20.0,
+      "on_exceed": "refuse"
+     }
+    ],
+    "kind": "subscription",
+    "models": {},
+    "money": {
+     "credits": {
+      "balance": null,
+      "entitlement": {
+       "basis": "unknown",
+       "state": "unknown"
+      },
+      "limits": {
+       "balance": {
+        "amount": null,
+        "basis": "unknown",
+        "kind": "balance"
+       }
+      },
+      "open": null,
+      "open_basis": null,
+      "type": "money",
+      "unit": null,
+      "unit_usd": null
+     }
+    },
+    "next_poll_at": null,
+    "plan": {
+     "basis": "exact",
+     "label": "LEVEL_INTERMEDIATE"
+    },
+    "provider": "kimi",
+    "recheck_epoch": null,
+    "source": "GET /coding/v1/usages"
+   },
+   "runway": {
+    "allowance": {
+     "limits": {},
+     "open": null,
+     "open_basis": null,
+     "windows": {}
+    },
+    "as_of": 1800000000.0,
+    "beside": [
+     {
+      "basis": "exact",
+      "kind": "concurrency",
+      "limit": 2.0,
+      "on_exceed": "queue",
+      "scope": "gpt_image_2"
+     }
+    ],
+    "kind": "api",
+    "models": {},
+    "money": {
+     "balance": {
+      "balance": 500.0,
+      "entitlement": {
+       "basis": "derived",
+       "state": "active"
+      },
+      "limits": {
+       "balance": {
+        "amount": 500.0,
+        "as_of": 1800000000.0,
+        "basis": "exact",
+        "kind": "balance",
+        "unit": "runway_credit",
+        "unit_usd": 0.01
+       },
+       "refill_cap": {
+        "as_of": 1800000000.0,
+        "basis": "exact",
+        "kind": "refill_cap",
+        "limit": 10000.0,
+        "period": "30d"
+       },
+       "rolling_count:gpt_image_2": {
+        "as_of": 1800000000.0,
+        "basis": "exact",
+        "counts": "output",
+        "kind": "rolling_count",
+        "limit": 200.0,
+        "reset_basis": "rolling",
+        "resets_at": null,
+        "scope": "gpt_image_2",
+        "used": 3.0,
+        "window_s": 86400
+       }
+      },
+      "open": true,
+      "open_basis": "derived",
+      "type": "money",
+      "unit": "runway_credit",
+      "unit_usd": 0.01
+     }
+    },
+    "next_poll_at": null,
+    "plan": {
+     "basis": "unknown",
+     "label": null
+    },
+    "provider": "runway",
+    "recheck_epoch": null,
+    "source": "GET /v1/organization"
+   }
+  },
+  "classes": {
+   "frontier": {
+    "consumer": null,
+    "context_window": 200000,
+    "display": "Frontier (auto)",
+    "floor_member": "lane:opus",
+    "guidance": null,
+    "members": [
+     {
+      "anthropic_token_ratio": 1.0,
+      "check": {
+       "basis": "fresh",
+       "check": "paid",
+       "pot": "acct-a@example.com/credits",
+       "reason": null,
+       "until": null
+      },
+      "checks": {
+       "acct-a@example.com": {
+        "basis": "fresh",
+        "check": "paid",
+        "pot": "acct-a@example.com/credits",
+        "reason": null,
+        "until": null
+       },
+       "acct-b@example.com": {
+        "basis": "stale",
+        "check": "no",
+        "pot": null,
+        "reason": "unknown",
+        "until": null
+       },
+       "acct-c@example.com": {
+        "basis": "unknown",
+        "check": "no",
+        "pot": null,
+        "reason": "unknown",
+        "until": null
+       }
+      },
+      "context_window": 200000,
+      "effective": 100.0,
+      "effective_window": 200000,
+      "id": "lane:opus",
+      "incumbent": "acct-a@example.com",
+      "kind": "anthropic",
+      "lane": "opus",
+      "model": "claude-opus-4-8",
+      "pay": [
+       "acct-a@example.com/credits"
+      ],
+      "priority": 1,
+      "reserve_ceiling": null,
+      "reserved": false,
+      "route": "frontier/lane:opus",
+      "scope": "Opus",
+      "status": "ok",
+      "stop_at": null,
+      "targets": {
+       "acct-a@example.com": 100.0,
+       "acct-b@example.com": 20.0,
+       "acct-c@example.com": null
+      },
+      "usable": true
+     },
+     {
+      "anthropic_token_ratio": 0.6,
+      "calibrated_at": "2026-10-15",
+      "calibration_ref": "c1-run-7",
+      "check": {
+       "basis": "fresh",
+       "check": "no",
+       "pot": null,
+       "reason": "pay",
+       "until": 1800604800
+      },
+      "checks": {
+       "gpt": {
+        "basis": "fresh",
+        "check": "no",
+        "pot": null,
+        "reason": "pay",
+        "until": 1800604800
+       }
+      },
+      "context_window": 400000,
+      "effective": 100.0,
+      "effective_window": 666666,
+      "id": "gpt/gpt-5.6",
+      "incumbent": null,
+      "kind": "provider",
+      "model": "gpt-5.6",
+      "pay": [],
+      "priority": 2,
+      "provider": "gpt",
+      "reserve_ceiling": null,
+      "reserved": false,
+      "route": "frontier/gpt/gpt-5.6",
+      "scope": "gpt-5.6",
+      "status": "ok",
+      "stop_at": null,
+      "targets": {
+       "gpt": 100.0
+      },
+      "usable": true
+     },
+     {
+      "anthropic_token_ratio": 0.61,
+      "check": {
+       "basis": "fresh",
+       "check": "included",
+       "pot": null,
+       "reason": null,
+       "until": null
+      },
+      "checks": {
+       "kimi": {
+        "basis": "fresh",
+        "check": "included",
+        "pot": null,
+        "reason": null,
+        "until": null
+       }
+      },
+      "context_window": 256000,
+      "effective": 8.0,
+      "effective_window": 419672,
+      "id": "kimi/kimi-k3",
+      "incumbent": "kimi",
+      "kind": "provider",
+      "model": "kimi-k3",
+      "pay": [],
+      "priority": 3,
+      "provider": "kimi",
+      "reserve_ceiling": null,
+      "reserved": false,
+      "route": "frontier/kimi/kimi-k3",
+      "scope": "kimi-k3",
+      "status": "ok",
+      "stop_at": null,
+      "targets": {
+       "kimi": 8.0
+      },
+      "usable": true
+     }
+    ],
+    "pinned": "lane:opus",
+    "pointer": "kimi/kimi-k3",
+    "previous_context_window": null,
+    "request_kind": "chat",
+    "sessions": {},
+    "units": "anthropic",
+    "window_changed_at": null
+   },
+   "images": {
+    "consumer": null,
+    "context_window": null,
+    "display": "Images",
+    "floor_member": null,
+    "guidance": null,
+    "members": [
+     {
+      "anthropic_token_ratio": null,
+      "check": {
+       "basis": "fresh",
+       "check": "paid",
+       "pot": "gpt/credits",
+       "reason": null,
+       "until": null
+      },
+      "checks": {
+       "gpt": {
+        "basis": "fresh",
+        "check": "paid",
+        "pot": "gpt/credits",
+        "reason": null,
+        "until": null
+       }
+      },
+      "context_window": null,
+      "effective": 100.0,
+      "effective_window": null,
+      "id": "gpt/gpt-image-2",
+      "incumbent": null,
+      "kind": "provider",
+      "model": "gpt-image-2",
+      "pay": [
+       "gpt/credits"
+      ],
+      "priority": 1,
+      "provider": "gpt",
+      "reserve_ceiling": null,
+      "reserved": false,
+      "route": "images/gpt/gpt-image-2",
+      "scope": "gpt-image-2",
+      "status": "ok",
+      "stop_at": null,
+      "targets": {
+       "gpt": 100.0
+      },
+      "usable": true
+     },
+     {
+      "anthropic_token_ratio": null,
+      "check": {
+       "basis": "fresh",
+       "check": "no",
+       "pot": null,
+       "reason": "pay",
+       "until": "until_paid"
+      },
+      "checks": {
+       "runway": {
+        "basis": "fresh",
+        "check": "no",
+        "pot": null,
+        "reason": "pay",
+        "until": "until_paid"
+       }
+      },
+      "context_window": null,
+      "effective": null,
+      "effective_window": null,
+      "id": "runway/gpt_image_2",
+      "incumbent": null,
+      "kind": "provider",
+      "model": "gpt_image_2",
+      "pay": [],
+      "priority": 2,
+      "provider": "runway",
+      "reserve_ceiling": null,
+      "reserved": false,
+      "route": "images/runway/gpt_image_2",
+      "scope": "gpt_image_2",
+      "status": "no_quota_data",
+      "stop_at": null,
+      "targets": {
+       "runway": null
+      },
+      "usable": false
+     }
+    ],
+    "pinned": null,
+    "pointer": "gpt/gpt-image-2",
+    "previous_context_window": null,
+    "request_kind": "image",
+    "sessions": {},
+    "units": null,
+    "window_changed_at": null
+   }
+  },
+  "consumers": [],
+  "fleet": {
+   "accounts": {
+    "acct-a@example.com": {
+     "cap": 100.0,
+     "capacity": null,
+     "kind": "learning",
+     "left_pct": 90.0,
+     "limits": [],
+     "listed": "seven_day not sized yet (none)",
+     "main": "seven_day",
+     "reference": null,
+     "refused": null,
+     "resting_until": null,
+     "room": null,
+     "scoped": {
+      "scoped:Opus": {
+       "cap": 100.0,
+       "left_pct": 0.0,
+       "size_basis": "none",
+       "sizes": {},
+       "used": 100.0
+      }
+     },
+     "size_basis": "none",
+     "sizes": {},
+     "stale": false,
+     "steps": 0,
+     "used": 10.0
+    },
+    "acct-b@example.com": {
+     "cap": 100.0,
+     "capacity": null,
+     "kind": "learning",
+     "left_pct": 80.0,
+     "limits": [
+      {
+       "class": "not_entitled",
+       "limit": "model:claude-fable-5-1",
+       "until": 1800021600.0
+      }
+     ],
+     "listed": "seven_day not sized yet (none)",
+     "main": "seven_day",
+     "reference": null,
+     "refused": null,
+     "resting_until": null,
+     "room": null,
+     "scoped": {},
+     "size_basis": "none",
+     "sizes": {},
+     "stale": true,
+     "steps": 0,
+     "used": 20.0
+    },
+    "acct-c@example.com": {
+     "kind": "unread",
+     "limits": [],
+     "listed": "unmeasured",
+     "main": null,
+     "refused": null,
+     "resting_until": null
+    },
+    "gpt": {
+     "cap": 100.0,
+     "capacity": null,
+     "kind": "learning",
+     "left_pct": 40.0,
+     "limits": [],
+     "listed": "seven_day not sized yet (none)",
+     "main": "seven_day",
+     "reference": null,
+     "refused": {
+      "until": 1800604800,
+      "why": "spent"
+     },
+     "resting_until": null,
+     "room": null,
+     "scoped": {},
+     "size_basis": "none",
+     "sizes": {},
+     "stale": false,
+     "steps": 0,
+     "used": 60.0
+    },
+    "kimi": {
+     "cap": 100.0,
+     "capacity": null,
+     "kind": "learning",
+     "left_pct": 99.0,
+     "limits": [],
+     "listed": "total_quota not sized yet (none)",
+     "main": "total_quota",
+     "reference": null,
+     "refused": null,
+     "resting_until": null,
+     "room": null,
+     "scoped": {},
+     "size_basis": "none",
+     "sizes": {},
+     "stale": false,
+     "steps": 0,
+     "used": 1.0
+    },
+    "runway": {
+     "kind": "not_quota",
+     "limits": [],
+     "listed": "api account",
+     "main": null,
+     "refused": null,
+     "resting_until": null
+    }
+   },
+   "proxy": {
+    "asks": [
+     {
+      "account": "acct-c@example.com",
+      "kind": "auth",
+      "model": null,
+      "sign_in": "oauth",
+      "until": null
+     },
+     {
+      "account": "acct-b@example.com",
+      "kind": "not_entitled",
+      "model": "claude-fable-5-1",
+      "sign_in": "oauth",
+      "until": 1800021600
+     }
+    ],
+    "back_at": 1800604800,
+    "capacity": 0.0,
+    "coverage": {
+     "counted": 0,
+     "empty": 1,
+     "learning": 4,
+     "not_quota": 1,
+     "stale": 0,
+     "unread": 1
+    },
+    "left_pct": null,
+    "listed": [
+     {
+      "account": "acct-a@example.com",
+      "kind": "learning",
+      "left_pct": 90.0,
+      "refused": null,
+      "resting": false,
+      "resting_until": null,
+      "why": "seven_day not sized yet (none)",
+      "window": "seven_day"
+     },
+     {
+      "account": "acct-b@example.com",
+      "kind": "learning",
+      "left_pct": 80.0,
+      "refused": null,
+      "resting": false,
+      "resting_until": null,
+      "why": "seven_day not sized yet (none)",
+      "window": "seven_day"
+     },
+     {
+      "account": "acct-c@example.com",
+      "kind": "unread",
+      "left_pct": null,
+      "refused": null,
+      "resting": false,
+      "resting_until": null,
+      "why": "unmeasured",
+      "window": null
+     },
+     {
+      "account": "gpt",
+      "kind": "learning",
+      "left_pct": 40.0,
+      "refused": {
+       "until": 1800604800,
+       "why": "spent"
+      },
+      "resting": false,
+      "resting_until": null,
+      "why": "seven_day not sized yet (none)",
+      "window": "seven_day"
+     },
+     {
+      "account": "kimi",
+      "kind": "learning",
+      "left_pct": 99.0,
+      "refused": null,
+      "resting": false,
+      "resting_until": null,
+      "why": "total_quota not sized yet (none)",
+      "window": "total_quota"
+     },
+     {
+      "account": "runway",
+      "kind": "not_quota",
+      "left_pct": null,
+      "refused": null,
+      "resting": false,
+      "resting_until": null,
+      "why": "api account",
+      "window": null
+     }
+    ],
+    "more_at": null,
+    "resting": [],
+    "room": 0.0,
+    "stale": [],
+    "valued": "mix"
+   },
+   "selections": {
+    "frontier": {
+     "accounts": {},
+     "asks": [
+      {
+       "account": "acct-c@example.com",
+       "kind": "auth",
+       "model": null,
+       "sign_in": "oauth",
+       "until": null
+      }
+     ],
+     "back_at": 1800604800,
+     "capacity": 0.0,
+     "coverage": {
+      "counted": 0,
+      "empty": 2,
+      "learning": 4,
+      "not_quota": 0,
+      "stale": 0,
+      "unread": 1
+     },
+     "left_pct": null,
+     "listed": [
+      {
+       "account": "acct-a@example.com",
+       "kind": "learning",
+       "left_pct": 0.0,
+       "refused": {
+        "until": 4089225600,
+        "why": "spent"
+       },
+       "resting": false,
+       "resting_until": null,
+       "why": "seven_day not sized yet (none)",
+       "window": "scoped:Opus"
+      },
+      {
+       "account": "acct-b@example.com",
+       "kind": "learning",
+       "left_pct": 80.0,
+       "refused": null,
+       "resting": false,
+       "resting_until": null,
+       "why": "seven_day not sized yet (none)",
+       "window": "seven_day"
+      },
+      {
+       "account": "acct-c@example.com",
+       "kind": "unread",
+       "left_pct": null,
+       "refused": null,
+       "resting": false,
+       "resting_until": null,
+       "why": "unmeasured",
+       "window": null
+      },
+      {
+       "account": "gpt",
+       "kind": "learning",
+       "left_pct": 40.0,
+       "refused": {
+        "until": 1800604800,
+        "why": "spent"
+       },
+       "resting": false,
+       "resting_until": null,
+       "why": "seven_day not sized yet (none)",
+       "window": "seven_day"
+      },
+      {
+       "account": "kimi",
+       "kind": "learning",
+       "left_pct": 99.0,
+       "refused": null,
+       "resting": false,
+       "resting_until": null,
+       "why": "total_quota not sized yet (none)",
+       "window": "total_quota"
+      }
+     ],
+     "more_at": null,
+     "resting": [],
+     "room": 0.0,
+     "stale": []
+    },
+    "images": {
+     "accounts": {},
+     "asks": [],
+     "back_at": 1800604800,
+     "capacity": 0.0,
+     "coverage": {
+      "counted": 0,
+      "empty": 1,
+      "learning": 1,
+      "not_quota": 1,
+      "stale": 0,
+      "unread": 0
+     },
+     "left_pct": null,
+     "listed": [
+      {
+       "account": "gpt",
+       "kind": "learning",
+       "left_pct": 40.0,
+       "refused": {
+        "until": 1800604800,
+        "why": "spent"
+       },
+       "resting": false,
+       "resting_until": null,
+       "why": "seven_day not sized yet (none)",
+       "window": "seven_day"
+      },
+      {
+       "account": "runway",
+       "kind": "not_quota",
+       "left_pct": null,
+       "refused": null,
+       "resting": false,
+       "resting_until": null,
+       "why": "api account",
+       "window": null
+      }
+     ],
+     "more_at": null,
+     "resting": [],
+     "room": 0.0,
+     "stale": []
+    },
+    "lane:default": {
+     "accounts": {},
+     "asks": [
+      {
+       "account": "acct-c@example.com",
+       "kind": "auth",
+       "model": null,
+       "sign_in": "oauth",
+       "until": null
+      }
+     ],
+     "back_at": null,
+     "capacity": 0.0,
+     "coverage": {
+      "counted": 0,
+      "empty": 0,
+      "learning": 2,
+      "not_quota": 0,
+      "stale": 0,
+      "unread": 1
+     },
+     "left_pct": null,
+     "listed": [
+      {
+       "account": "acct-a@example.com",
+       "kind": "learning",
+       "left_pct": 90.0,
+       "refused": null,
+       "resting": false,
+       "resting_until": null,
+       "why": "seven_day not sized yet (none)",
+       "window": "seven_day"
+      },
+      {
+       "account": "acct-b@example.com",
+       "kind": "learning",
+       "left_pct": 80.0,
+       "refused": null,
+       "resting": false,
+       "resting_until": null,
+       "why": "seven_day not sized yet (none)",
+       "window": "seven_day"
+      },
+      {
+       "account": "acct-c@example.com",
+       "kind": "unread",
+       "left_pct": null,
+       "refused": null,
+       "resting": false,
+       "resting_until": null,
+       "why": "unmeasured",
+       "window": null
+      }
+     ],
+     "more_at": null,
+     "resting": [],
+     "room": 0.0,
+     "stale": []
+    },
+    "lane:fable": {
+     "accounts": {},
+     "asks": [
+      {
+       "account": "acct-c@example.com",
+       "kind": "auth",
+       "model": null,
+       "sign_in": "oauth",
+       "until": null
+      },
+      {
+       "account": "acct-b@example.com",
+       "kind": "not_entitled",
+       "model": "claude-fable-5-1",
+       "sign_in": "oauth",
+       "until": 1800021600
+      }
+     ],
+     "back_at": 1800021600,
+     "capacity": 0.0,
+     "coverage": {
+      "counted": 0,
+      "empty": 1,
+      "learning": 2,
+      "not_quota": 0,
+      "stale": 0,
+      "unread": 1
+     },
+     "left_pct": null,
+     "listed": [
+      {
+       "account": "acct-a@example.com",
+       "kind": "learning",
+       "left_pct": 90.0,
+       "refused": null,
+       "resting": false,
+       "resting_until": null,
+       "why": "seven_day not sized yet (none)",
+       "window": "seven_day"
+      },
+      {
+       "account": "acct-b@example.com",
+       "kind": "learning",
+       "left_pct": 80.0,
+       "refused": {
+        "limit": "model:claude-fable-5-1",
+        "until": 1800021600,
+        "why": "not_entitled"
+       },
+       "resting": false,
+       "resting_until": null,
+       "why": "seven_day not sized yet (none)",
+       "window": "seven_day"
+      },
+      {
+       "account": "acct-c@example.com",
+       "kind": "unread",
+       "left_pct": null,
+       "refused": null,
+       "resting": false,
+       "resting_until": null,
+       "why": "unmeasured",
+       "window": null
+      }
+     ],
+     "more_at": null,
+     "resting": [],
+     "room": 0.0,
+     "stale": []
+    },
+    "lane:haiku": {
+     "accounts": {},
+     "asks": [
+      {
+       "account": "acct-c@example.com",
+       "kind": "auth",
+       "model": null,
+       "sign_in": "oauth",
+       "until": null
+      }
+     ],
+     "back_at": null,
+     "capacity": 0.0,
+     "coverage": {
+      "counted": 0,
+      "empty": 0,
+      "learning": 2,
+      "not_quota": 0,
+      "stale": 0,
+      "unread": 1
+     },
+     "left_pct": null,
+     "listed": [
+      {
+       "account": "acct-a@example.com",
+       "kind": "learning",
+       "left_pct": 90.0,
+       "refused": null,
+       "resting": false,
+       "resting_until": null,
+       "why": "seven_day not sized yet (none)",
+       "window": "seven_day"
+      },
+      {
+       "account": "acct-b@example.com",
+       "kind": "learning",
+       "left_pct": 80.0,
+       "refused": null,
+       "resting": false,
+       "resting_until": null,
+       "why": "seven_day not sized yet (none)",
+       "window": "seven_day"
+      },
+      {
+       "account": "acct-c@example.com",
+       "kind": "unread",
+       "left_pct": null,
+       "refused": null,
+       "resting": false,
+       "resting_until": null,
+       "why": "unmeasured",
+       "window": null
+      }
+     ],
+     "more_at": null,
+     "resting": [],
+     "room": 0.0,
+     "stale": []
+    },
+    "lane:opus": {
+     "accounts": {},
+     "asks": [
+      {
+       "account": "acct-c@example.com",
+       "kind": "auth",
+       "model": null,
+       "sign_in": "oauth",
+       "until": null
+      }
+     ],
+     "back_at": 4089225600,
+     "capacity": 0.0,
+     "coverage": {
+      "counted": 0,
+      "empty": 1,
+      "learning": 2,
+      "not_quota": 0,
+      "stale": 0,
+      "unread": 1
+     },
+     "left_pct": null,
+     "listed": [
+      {
+       "account": "acct-a@example.com",
+       "kind": "learning",
+       "left_pct": 0.0,
+       "refused": {
+        "until": 4089225600,
+        "why": "spent"
+       },
+       "resting": false,
+       "resting_until": null,
+       "why": "seven_day not sized yet (none)",
+       "window": "scoped:Opus"
+      },
+      {
+       "account": "acct-b@example.com",
+       "kind": "learning",
+       "left_pct": 80.0,
+       "refused": null,
+       "resting": false,
+       "resting_until": null,
+       "why": "seven_day not sized yet (none)",
+       "window": "seven_day"
+      },
+      {
+       "account": "acct-c@example.com",
+       "kind": "unread",
+       "left_pct": null,
+       "refused": null,
+       "resting": false,
+       "resting_until": null,
+       "why": "unmeasured",
+       "window": null
+      }
+     ],
+     "more_at": null,
+     "resting": [],
+     "room": 0.0,
+     "stale": []
+    },
+    "lane:sonnet": {
+     "accounts": {},
+     "asks": [
+      {
+       "account": "acct-c@example.com",
+       "kind": "auth",
+       "model": null,
+       "sign_in": "oauth",
+       "until": null
+      }
+     ],
+     "back_at": null,
+     "capacity": 0.0,
+     "coverage": {
+      "counted": 0,
+      "empty": 2,
+      "learning": 2,
+      "not_quota": 0,
+      "stale": 0,
+      "unread": 1
+     },
+     "left_pct": null,
+     "listed": [
+      {
+       "account": "acct-a@example.com",
+       "kind": "learning",
+       "left_pct": 0.0,
+       "refused": {
+        "until": 4089225600,
+        "why": "stop_at"
+       },
+       "resting": false,
+       "resting_until": null,
+       "why": "seven_day not sized yet (none)",
+       "window": "seven_day"
+      },
+      {
+       "account": "acct-b@example.com",
+       "kind": "learning",
+       "left_pct": 0.0,
+       "refused": {
+        "until": null,
+        "why": "stop_at"
+       },
+       "resting": false,
+       "resting_until": null,
+       "why": "seven_day not sized yet (none)",
+       "window": "seven_day"
+      },
+      {
+       "account": "acct-c@example.com",
+       "kind": "unread",
+       "left_pct": null,
+       "refused": null,
+       "resting": false,
+       "resting_until": null,
+       "why": "unmeasured",
+       "window": null
+      }
+     ],
+     "more_at": null,
+     "resting": [],
+     "room": 0.0,
+     "stale": []
+    }
+   },
+   "unit": "api_usd"
+  },
+  "lane_rules": [
+   {
+    "lane": "fable",
+    "match": [
+     "fable"
+    ],
+    "scope": "Fable"
+   },
+   {
+    "lane": "opus",
+    "match": [
+     "opus"
+    ],
+    "scope": "Opus"
+   },
+   {
+    "lane": "sonnet",
+    "match": [
+     "sonnet"
+    ],
+    "scope": "Sonnet"
+   },
+   {
+    "lane": "haiku",
+    "match": [
+     "haiku"
+    ],
+    "scope": "Haiku"
+   },
+   {
+    "lane": "default",
+    "match": [],
+    "scope": null
+   }
+  ],
+  "lanes": {
+   "default": {
+    "account": "acct-a@example.com",
+    "consumer": null,
+    "effective": {
+     "acct-a@example.com": 10.0,
+     "acct-b@example.com": 20.0,
+     "acct-c@example.com": null
+    },
+    "last_switch": 0.0,
+    "pinned": null,
+    "reason": "bootstrap",
+    "since": 1800000000.0
+   },
+   "fable": {
+    "account": "acct-a@example.com",
+    "consumer": null,
+    "effective": {
+     "acct-a@example.com": 10.0,
+     "acct-b@example.com": 20.0,
+     "acct-c@example.com": null
+    },
+    "last_switch": 0.0,
+    "pinned": null,
+    "reason": "bootstrap",
+    "since": 1800000000.0
+   },
+   "haiku": {
+    "account": "acct-a@example.com",
+    "consumer": null,
+    "effective": {
+     "acct-a@example.com": 10.0,
+     "acct-b@example.com": 20.0,
+     "acct-c@example.com": null
+    },
+    "last_switch": 0.0,
+    "pinned": null,
+    "reason": "bootstrap",
+    "since": 1800000000.0
+   },
+   "opus": {
+    "account": null,
+    "consumer": null,
+    "effective": {
+     "acct-a@example.com": 100.0,
+     "acct-b@example.com": 20.0,
+     "acct-c@example.com": null
+    },
+    "last_switch": 0.0,
+    "pinned": null,
+    "reason": "init",
+    "since": 0.0
+   },
+   "sonnet": {
+    "account": null,
+    "consumer": null,
+    "effective": {
+     "acct-a@example.com": 10.0,
+     "acct-b@example.com": 20.0,
+     "acct-c@example.com": null
+    },
+    "last_switch": 0.0,
+    "pinned": null,
+    "reason": "init",
+    "since": 0.0
+   }
+  },
+  "last_switch": 0.0,
+  "ledger": {
+   "as_of": 1800000000.0,
+   "period": {
+    "end": 1801440000,
+    "start": 1798761600
+   },
+   "pots": {
+    "gpt/credits": {
+     "budget": 1000.0,
+     "period_spend": 12.5,
+     "reconciliation": null,
+     "route_budgets": {},
+     "routes": {
+      "frontier/gpt/gpt-5.6": 12.5
+     },
+     "uncounted": 1,
+     "unit": "codex_credit",
+     "unpriced": {}
+    },
+    "runway/balance": {
+     "budget": null,
+     "period_spend": 0,
+     "reconciliation": null,
+     "route_budgets": {},
+     "routes": {},
+     "uncounted": 0,
+     "unit": "runway_credit",
+     "unpriced": {}
+    }
+   },
+   "rate_tables": {
+    "codex_credit": [
+     "per_tokens",
+     "models",
+     "speed_weights",
+     "images"
+    ],
+    "elevenlabs_credit": [],
+    "runway_credit": [],
+    "typesafe_input_token": []
+   },
+   "rates": {
+    "codex_credit": {
+     "images": {
+      "gpt-image-2": {
+       "image": {
+        "cached": 50.0,
+        "input": 200.0,
+        "output": 750.0
+       },
+       "text": {
+        "cached": 31.25,
+        "input": 125.0,
+        "output": 250.0
+       }
+      }
+     },
+     "models": {
+      "gpt-6-astra": {
+       "cached": 25.0,
+       "input": 250.0,
+       "output": 1250.0
+      },
+      "gpt-6.1-sol": {
+       "cached": 2.5,
+       "input": 50.0,
+       "output": 250.0
+      }
+     },
+     "per_tokens": 1000000,
+     "speed_weights": {
+      "fast": 2.0,
+      "standard": 1.0,
+      "ultrafast": 6.0
+     }
+    }
+   },
+   "seq": 2,
+   "unreadable_lines": 0
+  },
+  "notices": {
+   "accounts": {
+    "runway": {
+     "billing_url": "https://dev.runway.com/",
+     "classes": [
+      {
+       "class": "images",
+       "covered_by": "gpt/gpt-image-2"
+      }
+     ],
+     "name": "Runway",
+     "pace": null,
+     "sent": [],
+     "serves": "image and video generation",
+     "since": null,
+     "state": "ok"
+    }
+   },
+   "enabled": false,
+   "why": "no bridge address"
+  },
+  "pay_order": [
+   "acct-a@example.com/credits"
+  ],
+  "pinned": null,
+  "pots": {
+   "acct-a@example.com/credits": {
+    "account": "acct-a@example.com",
+    "budget": null,
+    "countable": false,
+    "pay_rank": 0,
+    "pot": "credits",
+    "route_budgets": {},
+    "topup": "off",
+    "topup_basis": "declared",
+    "warnings": []
+   },
+   "acct-b@example.com/credits": {
+    "account": "acct-b@example.com",
+    "budget": null,
+    "countable": false,
+    "pay_rank": null,
+    "pot": "credits",
+    "route_budgets": {},
+    "topup": "off",
+    "topup_basis": "declared",
+    "warnings": []
+   },
+   "acct-c@example.com/credits": {
+    "account": "acct-c@example.com",
+    "budget": null,
+    "countable": false,
+    "pay_rank": null,
+    "pot": "credits",
+    "route_budgets": {},
+    "topup": "off",
+    "topup_basis": "declared",
+    "warnings": []
+   },
+   "gpt/credits": {
+    "account": "gpt",
+    "budget": 1000.0,
+    "countable": true,
+    "pay_rank": null,
+    "pot": "credits",
+    "route_budgets": {},
+    "topup": "off",
+    "topup_basis": "declared",
+    "warnings": []
+   },
+   "kimi/credits": {
+    "account": "kimi",
+    "budget": null,
+    "countable": false,
+    "pay_rank": null,
+    "pot": "credits",
+    "route_budgets": {},
+    "topup": "on",
+    "topup_basis": "declared",
+    "warnings": [
+     "pots['kimi/credits']: topup on, but Kimi documents no top-up for Extra Usage \u2014 an empty pot may stay empty"
+    ]
+   },
+   "runway/balance": {
+    "account": "runway",
+    "budget": null,
+    "countable": true,
+    "pay_rank": null,
+    "pot": "balance",
+    "route_budgets": {},
+    "topup": "off",
+    "topup_basis": "declared",
+    "warnings": []
+   }
+  },
+  "prices": {
+   "long_context": {
+    "claude-haiku-5-5": {
+     "over": 100000,
+     "speeds": {
+      "standard": {
+       "cache_read": 0.05,
+       "cache_write_1h": 1.0,
+       "cache_write_5m": 0.625,
+       "input": 0.5,
+       "output": 2.5
+      }
+     }
+    },
+    "gpt-6-astra": {
+     "over": 272000,
+     "speeds": {
+      "fast": {
+       "cache_read": 4.0,
+       "cache_write_12h": 100.0,
+       "cache_write_30m": 50.0,
+       "input": 40.0,
+       "output": 150.0
+      },
+      "standard": {
+       "cache_read": 2.0,
+       "cache_write_12h": 50.0,
+       "cache_write_30m": 25.0,
+       "input": 20.0,
+       "output": 75.0
+      },
+      "ultrafast": {
+       "cache_read": 12.0,
+       "cache_write_12h": 300.0,
+       "cache_write_30m": 150.0,
+       "input": 120.0,
+       "output": 450.0
+      }
+     }
+    },
+    "gpt-6.1-sol": {
+     "over": 272000,
+     "speeds": {
+      "fast": {
+       "cache_read": 0.4,
+       "cache_write_12h": 20.0,
+       "cache_write_30m": 10.0,
+       "input": 8.0,
+       "output": 30.0
+      },
+      "standard": {
+       "cache_read": 0.2,
+       "cache_write_12h": 10.0,
+       "cache_write_30m": 5.0,
+       "input": 4.0,
+       "output": 15.0
+      },
+      "ultrafast": {
+       "cache_read": 1.2,
+       "cache_write_12h": 60.0,
+       "cache_write_30m": 30.0,
+       "input": 24.0,
+       "output": 90.0
+      }
+     }
+    }
+   },
+   "models": {
+    "claude-fable-5": {
+     "standard": {
+      "cache_read": 1.0,
+      "cache_write_1h": 20.0,
+      "cache_write_5m": 12.5,
+      "input": 10.0,
+      "output": 50.0
+     }
+    },
+    "claude-fable-5-1": {
+     "standard": {
+      "cache_read": 0.25,
+      "cache_write_1h": 20.0,
+      "cache_write_5m": 12.5,
+      "input": 10.0,
+      "output": 50.0
+     }
+    },
+    "claude-fable-5-2": {
+     "fast": {
+      "cache_read": 0.4,
+      "cache_write_1h": 32.0,
+      "cache_write_5m": 20.0,
+      "input": 16.0,
+      "output": 80.0
+     },
+     "standard": {
+      "cache_read": 0.2,
+      "cache_write_1h": 16.0,
+      "cache_write_5m": 10.0,
+      "input": 8.0,
+      "output": 40.0
+     }
+    },
+    "claude-haiku-4-5": {
+     "standard": {
+      "cache_read": 0.1,
+      "cache_write_1h": 2.0,
+      "cache_write_5m": 1.25,
+      "input": 1.0,
+      "output": 5.0
+     }
+    },
+    "claude-haiku-4-5-20251001": {
+     "standard": {
+      "cache_read": 0.1,
+      "cache_write_1h": 2.0,
+      "cache_write_5m": 1.25,
+      "input": 1.0,
+      "output": 5.0
+     }
+    },
+    "claude-haiku-5-5": {
+     "standard": {
+      "cache_read": 0.01,
+      "cache_write_1h": 0.2,
+      "cache_write_5m": 0.125,
+      "input": 0.1,
+      "output": 0.5
+     }
+    },
+    "claude-mythos-5": {
+     "standard": {
+      "cache_read": 1.0,
+      "cache_write_1h": 20.0,
+      "cache_write_5m": 12.5,
+      "input": 10.0,
+      "output": 50.0
+     }
+    },
+    "claude-mythos-5-1": {
+     "standard": {
+      "cache_read": 0.25,
+      "cache_write_1h": 20.0,
+      "cache_write_5m": 12.5,
+      "input": 10.0,
+      "output": 50.0
+     }
+    },
+    "claude-mythos-5-2": {
+     "fast": {
+      "cache_read": 0.4,
+      "cache_write_1h": 32.0,
+      "cache_write_5m": 20.0,
+      "input": 16.0,
+      "output": 80.0
+     },
+     "standard": {
+      "cache_read": 0.2,
+      "cache_write_1h": 16.0,
+      "cache_write_5m": 10.0,
+      "input": 8.0,
+      "output": 40.0
+     }
+    },
+    "claude-opus-4-5": {
+     "standard": {
+      "cache_read": 0.5,
+      "cache_write_1h": 10.0,
+      "cache_write_5m": 6.25,
+      "input": 5.0,
+      "output": 25.0
+     }
+    },
+    "claude-opus-4-5-20251101": {
+     "standard": {
+      "cache_read": 0.5,
+      "cache_write_1h": 10.0,
+      "cache_write_5m": 6.25,
+      "input": 5.0,
+      "output": 25.0
+     }
+    },
+    "claude-opus-4-6": {
+     "standard": {
+      "cache_read": 0.5,
+      "cache_write_1h": 10.0,
+      "cache_write_5m": 6.25,
+      "input": 5.0,
+      "output": 25.0
+     }
+    },
+    "claude-opus-4-7": {
+     "standard": {
+      "cache_read": 0.5,
+      "cache_write_1h": 10.0,
+      "cache_write_5m": 6.25,
+      "input": 5.0,
+      "output": 25.0
+     }
+    },
+    "claude-opus-4-8": {
+     "fast": {
+      "cache_read": 1.0,
+      "cache_write_1h": 20.0,
+      "cache_write_5m": 12.5,
+      "input": 10.0,
+      "output": 50.0
+     },
+     "standard": {
+      "cache_read": 0.5,
+      "cache_write_1h": 10.0,
+      "cache_write_5m": 6.25,
+      "input": 5.0,
+      "output": 25.0
+     }
+    },
+    "claude-opus-5": {
+     "fast": {
+      "cache_read": 1.0,
+      "cache_write_1h": 20.0,
+      "cache_write_5m": 12.5,
+      "input": 10.0,
+      "output": 50.0
+     },
+     "standard": {
+      "cache_read": 0.5,
+      "cache_write_1h": 10.0,
+      "cache_write_5m": 6.25,
+      "input": 5.0,
+      "output": 25.0
+     }
+    },
+    "claude-opus-5-5": {
+     "fast": {
+      "cache_read": 0.4,
+      "cache_write_1h": 16.0,
+      "cache_write_5m": 10.0,
+      "input": 8.0,
+      "output": 40.0
+     },
+     "standard": {
+      "cache_read": 0.2,
+      "cache_write_1h": 8.0,
+      "cache_write_5m": 5.0,
+      "input": 4.0,
+      "output": 20.0
+     }
+    },
+    "claude-sonnet-4-5": {
+     "standard": {
+      "cache_read": 0.3,
+      "cache_write_1h": 6.0,
+      "cache_write_5m": 3.75,
+      "input": 3.0,
+      "output": 15.0
+     }
+    },
+    "claude-sonnet-4-5-20250929": {
+     "standard": {
+      "cache_read": 0.3,
+      "cache_write_1h": 6.0,
+      "cache_write_5m": 3.75,
+      "input": 3.0,
+      "output": 15.0
+     }
+    },
+    "claude-sonnet-4-6": {
+     "standard": {
+      "cache_read": 0.3,
+      "cache_write_1h": 6.0,
+      "cache_write_5m": 3.75,
+      "input": 3.0,
+      "output": 15.0
+     }
+    },
+    "claude-sonnet-5": {
+     "standard": {
+      "cache_read": 0.2,
+      "cache_write_1h": 4.0,
+      "cache_write_5m": 2.5,
+      "input": 2.0,
+      "output": 10.0
+     }
+    },
+    "claude-sonnet-5-5": {
+     "standard": {
+      "cache_read": 0.1,
+      "cache_write_1h": 4.0,
+      "cache_write_5m": 2.5,
+      "input": 2.0,
+      "output": 10.0
+     }
+    },
+    "gpt-6-astra": {
+     "fast": {
+      "cache_read": 2.0,
+      "cache_write_12h": 50.0,
+      "cache_write_30m": 25.0,
+      "input": 20.0,
+      "output": 100.0
+     },
+     "standard": {
+      "cache_read": 1.0,
+      "cache_write_12h": 25.0,
+      "cache_write_30m": 12.5,
+      "input": 10.0,
+      "output": 50.0
+     },
+     "ultrafast": {
+      "cache_read": 6.0,
+      "cache_write_12h": 150.0,
+      "cache_write_30m": 75.0,
+      "input": 60.0,
+      "output": 300.0
+     }
+    },
+    "gpt-6.1-sol": {
+     "fast": {
+      "cache_read": 0.2,
+      "cache_write_12h": 10.0,
+      "cache_write_30m": 5.0,
+      "input": 4.0,
+      "output": 20.0
+     },
+     "standard": {
+      "cache_read": 0.1,
+      "cache_write_12h": 5.0,
+      "cache_write_30m": 2.5,
+      "input": 2.0,
+      "output": 10.0
+     },
+     "ultrafast": {
+      "cache_read": 0.6,
+      "cache_write_12h": 30.0,
+      "cache_write_30m": 15.0,
+      "input": 12.0,
+      "output": 60.0
+     }
+    }
+   }
+  },
+  "providers": {
+   "kimi": {
+    "account": "kimi",
+    "last_switch": 0.0,
+    "pinned": null,
+    "pool": {
+     "kimi": 8.0
+    },
+    "reason": "bootstrap",
+    "since": 1800000000.0
+   }
+  },
+  "reason": "bootstrap",
+  "routes": {
+   "frontier/gpt/gpt-5.6": {
+    "accounts": [
+     "gpt"
+    ],
+    "check": {
+     "basis": "fresh",
+     "check": "no",
+     "pot": null,
+     "reason": "pay",
+     "until": 1800604800
+    },
+    "checks": {
+     "gpt": {
+      "basis": "fresh",
+      "check": "no",
+      "pot": null,
+      "reason": "pay",
+      "until": 1800604800
+     }
+    },
+    "class": "frontier",
+    "kind": "member",
+    "lane": null,
+    "member": "gpt/gpt-5.6",
+    "pay": [],
+    "priority": 2,
+    "provider": "gpt",
+    "request_kind": "chat",
+    "scope": "gpt-5.6",
+    "stop_at": null,
+    "warnings": []
+   },
+   "frontier/kimi/kimi-k3": {
+    "accounts": [
+     "kimi"
+    ],
+    "check": {
+     "basis": "fresh",
+     "check": "included",
+     "pot": null,
+     "reason": null,
+     "until": null
+    },
+    "checks": {
+     "kimi": {
+      "basis": "fresh",
+      "check": "included",
+      "pot": null,
+      "reason": null,
+      "until": null
+     }
+    },
+    "class": "frontier",
+    "kind": "member",
+    "lane": null,
+    "member": "kimi/kimi-k3",
+    "pay": [],
+    "priority": 3,
+    "provider": "kimi",
+    "request_kind": "chat",
+    "scope": "kimi-k3",
+    "stop_at": null,
+    "warnings": []
+   },
+   "frontier/lane:opus": {
+    "accounts": [
+     "acct-a@example.com",
+     "acct-b@example.com",
+     "acct-c@example.com"
+    ],
+    "check": {
+     "basis": "fresh",
+     "check": "paid",
+     "pot": "acct-a@example.com/credits",
+     "reason": null,
+     "until": null
+    },
+    "checks": {
+     "acct-a@example.com": {
+      "basis": "fresh",
+      "check": "paid",
+      "pot": "acct-a@example.com/credits",
+      "reason": null,
+      "until": null
+     },
+     "acct-b@example.com": {
+      "basis": "stale",
+      "check": "no",
+      "pot": null,
+      "reason": "unknown",
+      "until": null
+     },
+     "acct-c@example.com": {
+      "basis": "unknown",
+      "check": "no",
+      "pot": null,
+      "reason": "unknown",
+      "until": null
+     }
+    },
+    "class": "frontier",
+    "kind": "member",
+    "lane": "opus",
+    "member": "lane:opus",
+    "pay": [
+     "acct-a@example.com/credits"
+    ],
+    "priority": 1,
+    "provider": "anthropic",
+    "request_kind": "chat",
+    "scope": "Opus",
+    "stop_at": null,
+    "warnings": []
+   },
+   "images/gpt/gpt-image-2": {
+    "accounts": [
+     "gpt"
+    ],
+    "check": {
+     "basis": "fresh",
+     "check": "paid",
+     "pot": "gpt/credits",
+     "reason": null,
+     "until": null
+    },
+    "checks": {
+     "gpt": {
+      "basis": "fresh",
+      "check": "paid",
+      "pot": "gpt/credits",
+      "reason": null,
+      "until": null
+     }
+    },
+    "class": "images",
+    "kind": "member",
+    "lane": null,
+    "member": "gpt/gpt-image-2",
+    "pay": [
+     "gpt/credits"
+    ],
+    "priority": 1,
+    "provider": "gpt",
+    "request_kind": "image",
+    "scope": "gpt-image-2",
+    "stop_at": null,
+    "warnings": []
+   },
+   "images/runway/gpt_image_2": {
+    "accounts": [
+     "runway"
+    ],
+    "check": {
+     "basis": "fresh",
+     "check": "no",
+     "pot": null,
+     "reason": "pay",
+     "until": "until_paid"
+    },
+    "checks": {
+     "runway": {
+      "basis": "fresh",
+      "check": "no",
+      "pot": null,
+      "reason": "pay",
+      "until": "until_paid"
+     }
+    },
+    "class": "images",
+    "kind": "member",
+    "lane": null,
+    "member": "runway/gpt_image_2",
+    "pay": [],
+    "priority": 2,
+    "provider": "runway",
+    "request_kind": "image",
+    "scope": "gpt_image_2",
+    "stop_at": null,
+    "warnings": []
+   },
+   "lane:default": {
+    "accounts": [
+     "acct-a@example.com",
+     "acct-b@example.com",
+     "acct-c@example.com"
+    ],
+    "check": {
+     "basis": "fresh",
+     "check": "included",
+     "pot": null,
+     "reason": null,
+     "until": null
+    },
+    "checks": {
+     "acct-a@example.com": {
+      "basis": "fresh",
+      "check": "included",
+      "pot": null,
+      "reason": null,
+      "until": null
+     },
+     "acct-b@example.com": {
+      "basis": "stale",
+      "check": "no",
+      "pot": null,
+      "reason": "unknown",
+      "until": null
+     },
+     "acct-c@example.com": {
+      "basis": "unknown",
+      "check": "no",
+      "pot": null,
+      "reason": "unknown",
+      "until": null
+     }
+    },
+    "class": null,
+    "kind": "lane",
+    "lane": "default",
+    "member": null,
+    "pay": [],
+    "priority": null,
+    "provider": "anthropic",
+    "request_kind": "chat",
+    "scope": null,
+    "stop_at": null,
+    "warnings": []
+   },
+   "lane:fable": {
+    "accounts": [
+     "acct-a@example.com",
+     "acct-b@example.com",
+     "acct-c@example.com"
+    ],
+    "check": {
+     "basis": "fresh",
+     "check": "included",
+     "pot": null,
+     "reason": null,
+     "until": null
+    },
+    "checks": {
+     "acct-a@example.com": {
+      "basis": "fresh",
+      "check": "included",
+      "pot": null,
+      "reason": null,
+      "until": null
+     },
+     "acct-b@example.com": {
+      "basis": "stale",
+      "check": "no",
+      "pot": null,
+      "reason": "unknown",
+      "until": null
+     },
+     "acct-c@example.com": {
+      "basis": "unknown",
+      "check": "no",
+      "pot": null,
+      "reason": "unknown",
+      "until": null
+     }
+    },
+    "class": null,
+    "kind": "lane",
+    "lane": "fable",
+    "member": null,
+    "pay": [
+     "acct-a@example.com/credits"
+    ],
+    "priority": null,
+    "provider": "anthropic",
+    "request_kind": "chat",
+    "scope": "Fable",
+    "stop_at": null,
+    "warnings": []
+   },
+   "lane:haiku": {
+    "accounts": [
+     "acct-a@example.com",
+     "acct-b@example.com",
+     "acct-c@example.com"
+    ],
+    "check": {
+     "basis": "fresh",
+     "check": "included",
+     "pot": null,
+     "reason": null,
+     "until": null
+    },
+    "checks": {
+     "acct-a@example.com": {
+      "basis": "fresh",
+      "check": "included",
+      "pot": null,
+      "reason": null,
+      "until": null
+     },
+     "acct-b@example.com": {
+      "basis": "stale",
+      "check": "no",
+      "pot": null,
+      "reason": "unknown",
+      "until": null
+     },
+     "acct-c@example.com": {
+      "basis": "unknown",
+      "check": "no",
+      "pot": null,
+      "reason": "unknown",
+      "until": null
+     }
+    },
+    "class": null,
+    "kind": "lane",
+    "lane": "haiku",
+    "member": null,
+    "pay": [],
+    "priority": null,
+    "provider": "anthropic",
+    "request_kind": "chat",
+    "scope": "Haiku",
+    "stop_at": null,
+    "warnings": []
+   },
+   "lane:opus": {
+    "accounts": [
+     "acct-a@example.com",
+     "acct-b@example.com",
+     "acct-c@example.com"
+    ],
+    "check": {
+     "basis": "fresh",
+     "check": "no",
+     "pot": null,
+     "reason": "pay",
+     "until": 4089225600
+    },
+    "checks": {
+     "acct-a@example.com": {
+      "basis": "fresh",
+      "check": "no",
+      "pot": null,
+      "reason": "pay",
+      "until": 4089225600
+     },
+     "acct-b@example.com": {
+      "basis": "stale",
+      "check": "no",
+      "pot": null,
+      "reason": "unknown",
+      "until": null
+     },
+     "acct-c@example.com": {
+      "basis": "unknown",
+      "check": "no",
+      "pot": null,
+      "reason": "unknown",
+      "until": null
+     }
+    },
+    "class": null,
+    "kind": "lane",
+    "lane": "opus",
+    "member": null,
+    "pay": [],
+    "priority": null,
+    "provider": "anthropic",
+    "request_kind": "chat",
+    "scope": "Opus",
+    "stop_at": null,
+    "warnings": []
+   },
+   "lane:sonnet": {
+    "accounts": [
+     "acct-a@example.com",
+     "acct-b@example.com",
+     "acct-c@example.com"
+    ],
+    "check": {
+     "basis": "fresh",
+     "check": "no",
+     "pot": null,
+     "reason": "stop_at",
+     "until": 4089225600
+    },
+    "checks": {
+     "acct-a@example.com": {
+      "basis": "fresh",
+      "check": "no",
+      "pot": null,
+      "reason": "stop_at",
+      "until": 4089225600
+     },
+     "acct-b@example.com": {
+      "basis": "stale",
+      "check": "no",
+      "pot": null,
+      "reason": "unknown",
+      "until": null
+     },
+     "acct-c@example.com": {
+      "basis": "unknown",
+      "check": "no",
+      "pot": null,
+      "reason": "unknown",
+      "until": null
+     }
+    },
+    "class": null,
+    "kind": "lane",
+    "lane": "sonnet",
+    "member": null,
+    "pay": [],
+    "priority": null,
+    "provider": "anthropic",
+    "request_kind": "chat",
+    "scope": "Sonnet",
+    "stop_at": {
+     "level": 5.0,
+     "window": "7d"
+    },
+    "warnings": []
+   }
+  },
+  "settings": {
+   "classes": "be7b95eec61cd47e",
+   "consumers": "6517fc63f54dc0d0",
+   "money": "44136fa355b3678a",
+   "stale_max": 1800
+  },
+  "settings_warnings": [
+   "money: pots['kimi/credits']: topup on, but Kimi documents no top-up for Extra Usage \u2014 an empty pot may stay empty"
+  ],
+  "since": 1800000000.0,
+  "thresholds": {
+   "dwell_s": 900,
+   "hard": 95.0,
+   "high": 80.0,
+   "margin": 15.0
+  },
+  "weekly": {
+   "acct-a@example.com": 10.0,
+   "acct-b@example.com": 20.0,
+   "acct-c@example.com": null
+  }
+ }
+}

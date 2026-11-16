@@ -1,0 +1,81 @@
+[
+  {
+    "class": "fast",
+    "display": "Fast",
+    "members": [
+      {
+        "priority": 1,
+        "kind": "anthropic",
+        "lane": "sonnet",
+        "model": "claude-sonnet-5-5",
+        "context_window": 200000
+      },
+      {
+        "priority": 2,
+        "kind": "anthropic",
+        "lane": "haiku",
+        "model": "claude-haiku-4-5-20251001",
+        "context_window": 200000
+      },
+      {
+        "priority": 3,
+        "kind": "provider",
+        "provider": "kimi",
+        "model": "kimi-k3",
+        "context_window": 256000,
+        "anthropic_token_ratio": 0.61,
+        "calibrated_at": "2026-08-12",
+        "calibration_ref": "Kimi's token count of a body over Anthropic's, on synthetic text, code and JSON"
+      }
+    ],
+    "guidance": "Small, fast tier. Find, read and make mechanical changes: search, extraction, running a command and reporting what it said, edits that need no judgment."
+  },
+  {
+    "class": "capable",
+    "display": "Capable",
+    "members": [
+      {
+        "priority": 1,
+        "kind": "anthropic",
+        "lane": "opus",
+        "model": "claude-opus-5-5",
+        "context_window": 1000000
+      },
+      {
+        "priority": 2,
+        "kind": "provider",
+        "provider": "kimi",
+        "model": "kimi-k3",
+        "context_window": 256000,
+        "anthropic_token_ratio": 0.61,
+        "calibrated_at": "2026-08-12",
+        "calibration_ref": "Kimi's token count of a body over Anthropic's, on synthetic text, code and JSON"
+      }
+    ],
+    "guidance": "Main tier. Carry out a clear brief or a complete workflow; implement, verify and finish work that needs judgment."
+  },
+  {
+    "class": "frontier",
+    "display": "Frontier",
+    "members": [
+      {
+        "priority": 1,
+        "kind": "anthropic",
+        "lane": "fable",
+        "model": "claude-fable-5-1",
+        "context_window": 1000000
+      },
+      {
+        "priority": 2,
+        "kind": "provider",
+        "provider": "kimi",
+        "model": "kimi-k3",
+        "context_window": 256000,
+        "anthropic_token_ratio": 0.61,
+        "calibrated_at": "2026-08-12",
+        "calibration_ref": "Kimi's token count of a body over Anthropic's, on synthetic text, code and JSON"
+      }
+    ],
+    "guidance": "Top tier. Hard reasoning and judgment: open design, decisions costly to reverse, or causes not yet found."
+  }
+]
