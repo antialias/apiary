@@ -244,7 +244,7 @@ H2: Four ways in
 
 ## Footer
 
-Honey hexagon + "apiary" (→ `/`) · right: "apiary.wtf" · "Back to the waggle list" (→ `/#join`)
+Honey hexagon + "apiary" (→ `/`) · right: "apiary.wtf" · "The code" (→ `https://github.com/antialias/apiary`) · "Back to the waggle list" (→ `/#join`)
 
 ## Home page (`site/static/index.html`) changes
 

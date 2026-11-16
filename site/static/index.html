@@ -47,6 +47,11 @@ a{color:var(--honey)}
 
 /* ---------- hero ---------- */
 header{padding:9vh 0 6vh;position:relative}
+.top-links{position:absolute;top:1.05rem;right:0;display:flex;gap:2.3rem}
+.top-links a{color:var(--cream);text-decoration:none;font-size:.9rem;letter-spacing:.06em;padding:.6rem 0;white-space:nowrap}
+.top-links a:hover{color:var(--honey)}
+@media(max-width:640px){.top-links{gap:1.4rem}}
+@media(max-width:400px){.top-links{gap:1rem}.top-links a{font-size:.8rem}}
 .kicker{
   display:inline-flex;align-items:center;gap:.6em;
   font-size:.78rem;letter-spacing:.22em;text-transform:uppercase;color:var(--honey);
@@ -160,6 +165,10 @@ footer p+p{margin-top:.8em}
 <body>
 <main>
   <header>
+    <nav class="top-links reveal d1" aria-label="Site">
+      <a href="/plan/">Business plan</a>
+      <a href="https://github.com/antialias/apiary">Code on GitHub</a>
+    </nav>
     <div class="kicker reveal d1">apiary · a capacity pool</div>
     <h1 class="reveal d2">Your idle LLM hours are someone else's <em>crunch</em>.</h1>
     <p class="sub reveal d3">
@@ -309,6 +318,7 @@ footer p+p{margin-top:.8em}
     designed, it will happen with real legal counsel — not vibes.</p>
     <p>This form stores exactly what you type plus a timestamp. No analytics,
     no cookies, no trackers.</p>
+    <p><a href="/plan/">Read the business plan</a> · <a href="https://github.com/antialias/apiary">The code is on GitHub</a>, under Apache-2.0.</p>
   </footer>
 </main>
 

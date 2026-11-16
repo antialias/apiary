@@ -442,7 +442,8 @@ h1 em{font-weight:750}
 .site-foot{display:flex;align-items:center;justify-content:space-between;gap:1rem 2rem;flex-wrap:wrap;border-top:1px solid var(--line);padding:2.2rem 3.6rem 2.6rem 3.3rem}
 .site-foot .wordmark svg{width:2.4rem;height:2.6rem}
 .site-foot .wordmark span{font-size:2.6rem}
-.foot-right{display:flex;align-items:center;gap:1.8rem;font-size:1.05rem;letter-spacing:.06em;color:var(--cream)}
+.foot-right{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem 1.8rem;font-size:1.05rem;letter-spacing:.06em;color:var(--cream)}
+.foot-right>*{white-space:nowrap}
 .foot-right a{text-decoration:none}
 .foot-right a:hover{text-decoration:underline}
 .foot-dot{color:var(--honey)}
@@ -479,6 +480,7 @@ h1 em{font-weight:750}
 
 /* ---------- phone: the rail becomes a slim sticky bar ---------- */
 @media (max-width:860px){
+  .foot-right{column-gap:1.2rem}
   .layout{display:block}
   .rail{display:none}
   .phonebar{display:block;position:sticky;top:0;z-index:20;background:rgba(22,19,13,.94);
@@ -625,7 +627,8 @@ h1 em{font-weight:750}
   .sources ol{columns:1}
   .site-foot{padding:1.8rem 1.25rem 2.2rem}
   .site-foot .wordmark span{font-size:2rem}
-  .foot-right{gap:1rem;font-size:.92rem}
+  .foot-right{flex-direction:column;align-items:flex-start;gap:.55rem;font-size:.92rem}
+  .foot-dot{display:none}
 }
 @media (max-width:360px){
   .ways{grid-template-columns:1fr}
