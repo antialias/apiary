@@ -1,0 +1,46 @@
+<!doctype html>
+<!-- One page's link-preview card, 1200x630. render.sh screenshots it once per page: card.html?page=<name>. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..900,50,1&family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&display=block" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT,WONK@1,9..144,400..900,50,1&display=block" rel="stylesheet">
+<style>
+:root{--wax:#16130d;--honey:#eda72c;--cream:#f3e8cf;--mono:"IBM Plex Mono",ui-monospace,monospace;--serif:"Fraunces",Georgia,serif}
+html,body{margin:0;width:1200px;height:630px;overflow:hidden;background:var(--wax)}
+.art{position:absolute;inset:0;background:var(--wax) right center/cover no-repeat}
+.scrim{position:absolute;inset:0;background:linear-gradient(90deg,rgba(22,19,13,.94) 0%,rgba(22,19,13,.8) 36%,rgba(22,19,13,0) 64%)}
+.kicker{position:absolute;left:68px;top:64px;margin:0;font:500 17px/1 var(--mono);letter-spacing:.22em;text-transform:uppercase;color:var(--honey)}
+h1{position:absolute;left:64px;top:108px;margin:0;color:var(--cream);font-family:var(--serif);font-weight:680;
+  line-height:1;letter-spacing:-.008em;font-variation-settings:"SOFT" 50,"WONK" 1;text-shadow:0 2px 28px rgba(0,0,0,.55)}
+h1 em{font-style:italic;font-weight:750;color:var(--honey)}
+.wordmark{position:absolute;left:68px;bottom:50px;display:flex;align-items:center;gap:16px;color:var(--cream)}
+.wordmark svg{width:44px;height:47px;color:var(--honey)}
+.wordmark span{font:700 48px/1 var(--serif);letter-spacing:-.01em;font-variation-settings:"SOFT" 50,"WONK" 1;margin-top:-6px}
+.url{position:absolute;right:64px;bottom:58px;margin:0;font:500 17px/1 var(--mono);letter-spacing:.2em;color:var(--honey)}
+</style>
+</head>
+<body>
+<div class="art" id="art"></div>
+<div class="scrim"></div>
+<p class="kicker" id="kicker"></p>
+<h1 id="headline"></h1>
+<div class="wordmark"><svg viewBox="0 0 100 100" aria-hidden="true"><polygon points="50 3 93 27 93 73 50 97 7 73 7 27" fill="currentColor"/></svg><span>apiary</span></div>
+<p class="url">apiary.wtf</p>
+<script>
+// Each page's card: its art (art/<name>.jpg), kicker and headline. A new page adds a row here and its art.
+const PAGES = {
+  home: {kicker: "Pooled LLM capacity · owned by the hive", size: 92,
+         headline: "Your idle LLM<br>hours are<br>someone else’s<br><em>crunch</em>."},
+  plan: {kicker: "Business plan · November 2026", size: 108,
+         headline: "Share the idle.<br>Survive the<br><em>crunch</em>."},
+};
+const name = new URLSearchParams(location.search).get("page") || "home";
+const p = PAGES[name];
+document.getElementById("art").style.backgroundImage = `url(art/${name}.jpg)`;
+document.getElementById("kicker").textContent = p.kicker;
+const h = document.getElementById("headline");
+h.innerHTML = p.headline; h.style.fontSize = p.size + "px";
+</script>
+</body>
+</html>

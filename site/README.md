@@ -32,6 +32,13 @@ docker run -d --name apiary-site -p 8080:8080 -v apiary_signups:/data apiary-sit
 Behind a reverse proxy, keep `X-Forwarded-For` flowing (the throttle and IP
 hash use it).
 
+## Link-preview cards
+
+Each page's preview card is `static/og/<page>.jpg` (1200x630), named by the page's `og:image`.
+`og/card.html` lays out a card: the page's art from `og/art/<page>.jpg`, its kicker and its headline,
+in the site's own fonts. `og/render.sh [page ...]` screenshots it with Google Chrome into
+`static/og/`. A new page adds a row to `PAGES` in `card.html`, its art, and its `og:*` tags.
+
 ## Deploy (prod: https://apiary.wtf)
 
 The `site` workflow (`.github/workflows/site.yml`) vets and builds on every PR

@@ -27,6 +27,9 @@ as such on the page.
 - `<title>`: Apiary — business plan
 - meta description: A member-owned pool of LLM capacity: lend idle GPUs running open models, burst past your own limits, earn credit for what you deliver.
 - URL: `/plan/` (file `site/static/plan/index.html`).
+- Link preview: canonical and `og:url` `https://apiary.wtf/plan/`; `og:image` `/og/plan.jpg` (1200x630, made by
+  `site/og/render.sh` from `site/og/card.html`), alt “Share the idle. Survive the crunch.” Apiary’s business plan,
+  over honey running through a dark honeycomb; `twitter:card` summary_large_image.
 
 ## Header (scrolls away)
 
