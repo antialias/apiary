@@ -30,6 +30,7 @@ as such on the page.
 - Link preview: canonical and `og:url` `https://apiary.wtf/plan/`; `og:image` `/og/plan.jpg` (1200x630, made by
   `site/og/render.sh` from `site/og/card.html`), alt “Share the idle. Survive the crunch.” Apiary’s business plan,
   over honey running through a dark honeycomb; `twitter:card` summary_large_image.
+- Animated preview: Slack and Discord get `/og/plan.gif` at the same address (`site/og.go`, `site/og/animate.sh`).
 
 ## Header (scrolls away)
 

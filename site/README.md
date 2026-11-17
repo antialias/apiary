@@ -39,6 +39,11 @@ Each page's preview card is `static/og/<page>.jpg` (1200x630), named by the page
 in the site's own fonts. `og/render.sh [page ...]` screenshots it with Google Chrome into
 `static/og/`. A new page adds a row to `PAGES` in `card.html`, its art, and its `og:*` tags.
 
+Apps that play an animated preview (Slack and Discord, told apart by User-Agent in `og.go`) get
+`static/og/<page>.gif` instead, when the page has one; everyone else gets the JPEG. The GIF is made
+by `og/animate.sh <page>` from `og/motion/<page>.mp4`, a five-second image-to-video clip of the
+page's art, so its first frame is the still card; it fades back into that frame to loop.
+
 ## Deploy (prod: https://apiary.wtf)
 
 The `site` workflow (`.github/workflows/site.yml`) vets and builds on every PR

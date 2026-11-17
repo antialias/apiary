@@ -1,5 +1,6 @@
 <!doctype html>
-<!-- One page's link-preview card, 1200x630. render.sh screenshots it once per page: card.html?page=<name>. -->
+<!-- One page's link-preview card, 1200x630. render.sh screenshots it once per page: card.html?page=<name>.
+     With &layer=words it draws everything but the art on a transparent page, for animate.sh to lay over the moving art. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -35,9 +36,15 @@ const PAGES = {
   plan: {kicker: "Business plan · November 2026", size: 108,
          headline: "Share the idle.<br>Survive the<br><em>crunch</em>."},
 };
-const name = new URLSearchParams(location.search).get("page") || "home";
+const q = new URLSearchParams(location.search);
+const name = q.get("page") || "home";
+if (q.get("layer") === "words") {
+  document.getElementById("art").remove();
+  document.documentElement.style.background = document.body.style.background = "transparent";
+}
 const p = PAGES[name];
-document.getElementById("art").style.backgroundImage = `url(art/${name}.jpg)`;
+const art = document.getElementById("art");
+if (art) art.style.backgroundImage = `url(art/${name}.jpg)`;
 document.getElementById("kicker").textContent = p.kicker;
 const h = document.getElementById("headline");
 h.innerHTML = p.headline; h.style.fontSize = p.size + "px";

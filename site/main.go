@@ -172,6 +172,7 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/", http.FileServer(http.FS(pages)))
+	mux.Handle("/og/", ogCards(pages))
 	mux.HandleFunc("/signup", handleSignup(file))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
 
