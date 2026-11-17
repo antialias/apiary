@@ -88,6 +88,7 @@ KINDS = ("low", "dry", "reminder")
 ALERTNAMES = {"low": "PrepaidAccountLow", "dry": "PrepaidAccountDry",
               "reminder": "PrepaidAccountDryReminder"}
 NO_BRIDGE = "no bridge address"
+NOT_LAN = "not a LAN tenant: the bridge is the household's"
 
 # The bridge address when SWITCH_BRIDGE_URL is not in the environment: none
 # here. An edition that has a bridge declares it (set_bridge_default). The
@@ -274,12 +275,17 @@ class Notices:
     what is due, quickly, in the caller's path; deliver() posts what is due,
     on the worker thread (start(), kick()), never in the caller's path.
     payload() reads. post(url, body) -> (status, reply bytes) is the bridge (a
-    test's fake); log(msg) the brain's log."""
+    test's fake); log(msg) the brain's log. bridged says whether this
+    tenant's notices reach the bridge at all (the LAN tenant's do; another
+    tenant's are recorded and never posted). store, when given, reads and
+    writes the file (the core's sealed store); else plain JSON."""
 
-    def __init__(self, path, post=None, log=print):
+    def __init__(self, path, post=None, log=print, bridged=True, store=None):
         self.path = path
         self.post = post or _http_post
         self.log = log
+        self.bridged = bridged
+        self.store = store
         self._lock = threading.Lock()          # the state, held briefly
         self._deliver_lock = threading.Lock()  # one delivery pass at a time
         self._wake = threading.Event()
@@ -295,12 +301,13 @@ class Notices:
             return
         self._accounts, self._seq = {}, 0
         try:
-            with open(self.path) as f:
-                doc = json.load(f)
+            doc = self._read()
         except FileNotFoundError:
             return
-        except (OSError, ValueError) as e:
+        except Exception as e:  # noqa: BLE001 — OSError, ValueError, CredStoreError
             self.log(f"WARN notices: cannot read {self.path} ({e}); starting with nothing sent")
+            return
+        if doc is None:
             return
         if not isinstance(doc, dict) or not isinstance(doc.get("accounts"), dict):
             self.log(f"WARN notices: {self.path} is not a notices file; starting with nothing sent")
@@ -310,15 +317,29 @@ class Notices:
             if isinstance(rec, dict):
                 self._accounts[acct] = dict(_new_record(), **rec)
 
+    def _read(self):
+        if self.store is not None:
+            return self.store.read_json(self.path)
+        with open(self.path) as f:
+            return json.load(f)
+
     def _save_locked(self):
         doc = {"version": 1, "seq": self._seq, "accounts": self._accounts}
         try:
+            if self.store is not None:
+                self.store.write_json(self.path, doc, sort_keys=True)
+                return
             tmp = self.path + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(doc, f, sort_keys=True)
             os.replace(tmp, self.path)
         except OSError as e:
             self.log(f"WARN notices: could not write {self.path}: {e}")
+
+    def url(self):
+        """The bridge this tenant's notices post to: the edition's, when the
+        tenant is bridged; "" otherwise."""
+        return bridge_url() if self.bridged else ""
 
     def load(self):
         """Read the file now (main(); otherwise the first use reads it)."""
@@ -444,7 +465,7 @@ class Notices:
         due, with its words; the worker delivers it (kick()). views is
         {account: view} for every prepaid account now (core._notices_views).
         -> True when anything changed."""
-        url = bridge_url()
+        url = self.url()
         with self._lock:
             self._load_locked()
             changed = False
@@ -484,7 +505,7 @@ class Notices:
         tried again under the same id after _retry_after. -> the number
         posted. Runs on the worker; a pass already running makes this one a
         no-op."""
-        url = bridge_url()
+        url = self.url()
         if not url or not self._deliver_lock.acquire(blocking=False):
             return 0
         try:
@@ -587,7 +608,7 @@ class Notices:
 
     def payload(self, views):
         """/preferred `notices`: every prepaid account, ok ones too."""
-        url = bridge_url()
+        url = self.url()
         with self._lock:
             self._load_locked()
             accounts = {}
@@ -600,26 +621,29 @@ class Notices:
                     "pace": pace(rec["samples"], v.get("balance"), v.get("unit")),
                     "classes": [dict(c) for c in v.get("classes") or []],
                     "sent": [dict(e) for e in rec["sent"]]}
-        return {"enabled": bool(url), "why": None if url else NO_BRIDGE, "accounts": accounts}
+        why = None if url else (NO_BRIDGE if self.bridged else NOT_LAN)
+        return {"enabled": bool(url), "why": why, "accounts": accounts}
 
 
 # ---- the owner's test message --------------------------------------------------
 
-def send_test(account, preferred_url=None, post=None):
+def send_test(account, preferred_url=None, post=None, tenant=None):
     """Send one "[test]"-marked ran-dry message for `account` through the
     bridge, so the owner sees the real format once. Run in a one-off process
     beside the brain, with its environment (it reads the running brain's
-    /preferred and records nothing):
+    /t/<tenant>/preferred and records nothing):
 
         docker exec <the brain's container> python3 -c \\
-            "import notices; print(notices.send_test('<account>'))"
+            "import notices; print(notices.send_test('<account>', tenant='<tenant>'))"
 
     An edition that declares its bridge in code (set_bridge_default) imports
     that module before notices. -> {ok, telegram, ha, channels, detail}."""
     url = bridge_url()
     if not url:
         return {"ok": False, "telegram": None, "ha": None, "channels": {}, "detail": NO_BRIDGE}
-    src = preferred_url or f"http://127.0.0.1:{os.environ.get('PORT', '9115')}/preferred"
+    if not preferred_url and not tenant:
+        raise ValueError("a tenant is required without preferred_url")
+    src = preferred_url or f"http://127.0.0.1:{os.environ.get('PORT', '9115')}/t/{tenant}/preferred"
     with urllib.request.urlopen(src, timeout=POST_TIMEOUT_S) as resp:
         doc = json.loads(resp.read().decode("utf-8"))
     n = ((doc.get("notices") or {}).get("accounts") or {}).get(account)

@@ -45,7 +45,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -103,12 +102,8 @@ func (r refusalRecord) live(now time.Time) bool { return r.until.IsZero() || now
 // only deranks.
 func (r refusalRecord) closes() bool { return r.kind != recThrottled }
 
-var (
-	recMu   sync.Mutex
-	records = map[recKey]refusalRecord{}
-	// readings is each account's latest per-response partial reading.
-	readings = map[string]headerReading{}
-)
+// Per tenant: tenant.recMu, tenant.records, and tenant.readings (each
+// account's latest per-response partial reading).
 
 // clampedUntil is an unattributed record's end: the upstream's own reset
 // inside [now+floor, now+quotaCooldownCap], so a missing, stale or absurd
@@ -132,7 +127,7 @@ func clampedUntil(kind string, resets, now time.Time) time.Time {
 // writeRecord stores one record. An attributed record ends at the reset the
 // refusal named when it is still ahead, else by reading (until zero); an
 // unattributed one at its clamp.
-func writeRecord(account, limit string, rec refusalRecord) refusalRecord {
+func (tn *tenant) writeRecord(account, limit string, rec refusalRecord) refusalRecord {
 	rec.resets = clampReset(rec.resets, rec.refusedAt)
 	switch {
 	case !rec.attributed:
@@ -143,15 +138,15 @@ func writeRecord(account, limit string, rec refusalRecord) refusalRecord {
 	if account == "" || limit == "" {
 		return rec
 	}
-	recMu.Lock()
-	records[recKey{account, limit}] = rec
-	recMu.Unlock()
+	tn.recMu.Lock()
+	tn.records[recKey{account, limit}] = rec
+	tn.recMu.Unlock()
 	return rec
 }
 
 // recordThrottle writes a throttle: Retry-After when the upstream sent one,
 // else forcedCooldown (SWITCH_429_COOLDOWN).
-func recordThrottle(account string, status int, detail string, h http.Header) refusalRecord {
+func (tn *tenant) recordThrottle(account string, status int, detail string, h http.Header) refusalRecord {
 	now := nowFn()
 	until := now.Add(forcedCooldown)
 	if h != nil {
@@ -166,9 +161,9 @@ func recordThrottle(account string, status int, detail string, h http.Header) re
 	if account == "" {
 		return rec
 	}
-	recMu.Lock()
-	records[recKey{account, limitThrottle}] = rec
-	recMu.Unlock()
+	tn.recMu.Lock()
+	tn.records[recKey{account, limitThrottle}] = rec
+	tn.recMu.Unlock()
 	return rec
 }
 
@@ -179,7 +174,7 @@ func recordThrottle(account string, status int, detail string, h http.Header) re
 // what that reading said, for "open and changed". It returns the kind
 // recorded and the limits, for the caller's log line ("" when nothing is);
 // /_switch/status shows how each ends.
-func recordRefusal(account string, ref refusal, resp *http.Response) (kind, what string) {
+func (tn *tenant) recordRefusal(account string, ref refusal, resp *http.Response) (kind, what string) {
 	if account == "" || !ref.records() {
 		return "", ""
 	}
@@ -189,12 +184,12 @@ func recordRefusal(account string, ref refusal, resp *http.Response) (kind, what
 	if resp != nil {
 		status, h = resp.StatusCode, resp.Header
 	}
-	noteHeaderReading(account, h, now)
+	tn.noteHeaderReading(account, h, now)
 	if ref.class == refThrottled {
-		r := recordThrottle(account, status, ref.detail, h)
+		r := tn.recordThrottle(account, status, ref.detail, h)
 		return recThrottled, "throttle until " + r.until.UTC().Format(time.RFC3339)
 	}
-	st := standingRead(account, now)
+	st := tn.standingRead(account, now)
 	var parts []string
 	for _, l := range ref.limits {
 		rec := refusalRecord{kind: ref.class, limKind: l.kind, refusedAt: now, resets: l.resets,
@@ -220,10 +215,10 @@ func recordRefusal(account string, ref refusal, resp *http.Response) (kind, what
 				}
 			}
 		}
-		rec = writeRecord(account, l.name, rec)
-		reportRecord(account, l.name, rec, false, time.Time{}) // a spent window's, a model's or a pool's goes to the brain (reports.go)
-		if pot := apiMoneyPot(account); ref.class == refUnpaid && l.kind == limPot && pot == l.name {
-			reportPotShut(account, pot, now) // an api account's pot, through the class walk: the prepaid notices
+		rec = tn.writeRecord(account, l.name, rec)
+		tn.reportRecord(account, l.name, rec, false, time.Time{}) // a spent window's, a model's or a pool's goes to the brain (reports.go)
+		if pot := tn.apiMoneyPot(account); ref.class == refUnpaid && l.kind == limPot && pot == l.name {
+			tn.reportPotShut(account, pot, now) // an api account's pot, through the class walk: the prepaid notices
 		}
 		parts = append(parts, l.name)
 	}
@@ -231,9 +226,9 @@ func recordRefusal(account string, ref refusal, resp *http.Response) (kind, what
 }
 
 // liveRecordsLocked is every live record on account, by limit. Caller holds recMu.
-func liveRecordsLocked(account string, now time.Time) map[string]refusalRecord {
+func (tn *tenant) liveRecordsLocked(account string, now time.Time) map[string]refusalRecord {
 	var out map[string]refusalRecord
-	for k, r := range records {
+	for k, r := range tn.records {
 		if k.account != account || !r.live(now) {
 			continue
 		}
@@ -246,10 +241,10 @@ func liveRecordsLocked(account string, now time.Time) map[string]refusalRecord {
 }
 
 // throttledUntil is the end of a live throttle on account (zero when none).
-func throttledUntil(account string, now time.Time) time.Time {
-	recMu.Lock()
-	defer recMu.Unlock()
-	if r, ok := records[recKey{account, limitThrottle}]; ok && r.live(now) {
+func (tn *tenant) throttledUntil(account string, now time.Time) time.Time {
+	tn.recMu.Lock()
+	defer tn.recMu.Unlock()
+	if r, ok := tn.records[recKey{account, limitThrottle}]; ok && r.live(now) {
 		return r.until
 	}
 	return time.Time{}
@@ -258,9 +253,9 @@ func throttledUntil(account string, now time.Time) time.Time {
 // spentRecordOf is account's live closing record that ends last (one that
 // ends only by reading outlasts any time): the refusal that keeps it out
 // longest, for a message that quotes the upstream.
-func spentRecordOf(account string, now time.Time) (refusalRecord, bool) {
-	recMu.Lock()
-	defer recMu.Unlock()
+func (tn *tenant) spentRecordOf(account string, now time.Time) (refusalRecord, bool) {
+	tn.recMu.Lock()
+	defer tn.recMu.Unlock()
 	var best refusalRecord
 	found := false
 	later := func(a, b refusalRecord) bool {
@@ -269,7 +264,7 @@ func spentRecordOf(account string, now time.Time) (refusalRecord, bool) {
 		}
 		return a.until.After(b.until)
 	}
-	for k, r := range records {
+	for k, r := range tn.records {
 		if k.account == account && r.closes() && r.live(now) && (!found || later(r, best)) {
 			best, found = r, true
 		}
@@ -283,7 +278,7 @@ func spentRecordOf(account string, now time.Time) (refusalRecord, bool) {
 // served request was sent: a record written at or after it stands, since the
 // upstream may have answered that refusal after the success. Another scope's
 // record stays in force.
-func noteServed(account, scope, model string, at time.Time) {
+func (tn *tenant) noteServed(account, scope, model string, at time.Time) {
 	ends := map[string]bool{limitThrottle: true, "five_hour": true, "seven_day": true, limitEntitlement: true}
 	if scope != "" {
 		ends["scoped:"+scope] = true
@@ -291,37 +286,37 @@ func noteServed(account, scope, model string, at time.Time) {
 	if model != "" {
 		ends[modelLimit(model)] = true
 	}
-	endRecords(account, ends, at, "served")
+	tn.endRecords(account, ends, at, "served")
 }
 
 // notePaidServed ends what a 2xx a money pot paid for disproves: that pot's
 // unpaid record, and the throttle.
-func notePaidServed(account, pot string, at time.Time) {
-	endRecords(account, map[string]bool{pot: true, limitThrottle: true}, at, "served on "+pot)
+func (tn *tenant) notePaidServed(account, pot string, at time.Time) {
+	tn.endRecords(account, map[string]bool{pot: true, limitThrottle: true}, at, "served on "+pot)
 }
 
 // endRecords ends the records on account that ends names, written before at.
 // The end of a record the brain takes (a spent window's, a model's or a
 // pool's, reportedAs) goes to it as its refusal with ended, at at.
-func endRecords(account string, ends map[string]bool, at time.Time, why string) {
+func (tn *tenant) endRecords(account string, ends map[string]bool, at time.Time, why string) {
 	if account == "" {
 		return
 	}
 	var ended []string
 	gone := map[string]refusalRecord{}
-	recMu.Lock()
-	for k, r := range records {
+	tn.recMu.Lock()
+	for k, r := range tn.records {
 		if k.account == account && ends[k.limit] && r.refusedAt.Before(at) {
-			delete(records, k)
+			delete(tn.records, k)
 			if r.closes() {
 				ended = append(ended, k.limit)
 			}
 			gone[k.limit] = r
 		}
 	}
-	recMu.Unlock()
+	tn.recMu.Unlock()
 	for limit, r := range gone {
-		reportRecord(account, limit, r, true, at)
+		tn.reportRecord(account, limit, r, true, at)
 	}
 	if len(ended) > 0 {
 		sort.Strings(ended)
@@ -335,13 +330,13 @@ func endRecords(account string, ends map[string]bool, at time.Time, why string) 
 // recheck_epoch goes (the owner's re-check); and an attributed record ends,
 // or learns its end, from the first reading of its limit newer than the
 // refusal (recordEnds).
-func pruneRecords(accounts map[string]acctStanding) {
+func (tn *tenant) pruneRecords(accounts map[string]acctStanding) {
 	now := nowFn()
 	var cleared []string
-	recMu.Lock()
-	for k, r := range records {
+	tn.recMu.Lock()
+	for k, r := range tn.records {
 		if !r.live(now) {
-			delete(records, k)
+			delete(tn.records, k)
 			continue
 		}
 		st, ok := accounts[k.account]
@@ -349,7 +344,7 @@ func pruneRecords(accounts map[string]acctStanding) {
 			continue
 		}
 		if e := st.RecheckEpoch; e != nil && unixSeconds(r.refusedAt) < *e {
-			delete(records, k)
+			delete(tn.records, k)
 			cleared = append(cleared, k.account+"/"+k.limit+" (re-check)")
 			continue
 		}
@@ -358,7 +353,7 @@ func pruneRecords(accounts map[string]acctStanding) {
 		}
 		end, until := recordEnds(r, k.limit, &st, now)
 		if end {
-			delete(records, k)
+			delete(tn.records, k)
 			cleared = append(cleared, k.account+"/"+k.limit)
 			continue
 		}
@@ -366,9 +361,9 @@ func pruneRecords(accounts map[string]acctStanding) {
 			r.until = until
 		}
 		r.seen = recordSeen(r, k.limit, &st)
-		records[k] = r
+		tn.records[k] = r
 	}
-	recMu.Unlock()
+	tn.recMu.Unlock()
 	if len(cleared) > 0 {
 		sort.Strings(cleared)
 		log.Printf("🔋 a reading ends the record on %s", strings.Join(cleared, ", "))
@@ -534,43 +529,43 @@ type headerReading struct {
 // event (noteServedHop): the event's readings are this parse's windows that
 // carry a use (servedReadings), named as the reading reports name them, with
 // the same use and reset.
-func parseHeaderReading(h http.Header, at time.Time) (headerReading, bool) {
+func (tn *tenant) parseHeaderReading(h http.Header, at time.Time) (headerReading, bool) {
 	if h == nil {
 		return headerReading{}, false
 	}
 	hr, ok := parseCodexHeaders(h, at)
 	if !ok {
-		hr, ok = parseAnthropicHeaders(h, at, currentScopes())
+		hr, ok = parseAnthropicHeaders(h, at, tn.currentScopes())
 	}
 	return hr, ok
 }
 
 // noteHeaderReading keeps account's reading from a response, when it carries
 // one (parseHeaderReading, keepHeaderReading).
-func noteHeaderReading(account string, h http.Header, at time.Time) {
+func (tn *tenant) noteHeaderReading(account string, h http.Header, at time.Time) {
 	if account == "" || h == nil {
 		return
 	}
-	if hr, ok := parseHeaderReading(h, at); ok {
-		keepHeaderReading(account, hr)
+	if hr, ok := tn.parseHeaderReading(h, at); ok {
+		tn.keepHeaderReading(account, hr)
 	}
 }
 
 // keepHeaderReading keeps account's parsed reading from a response. A reading
 // older than the one on file is dropped; one kept goes to the brain where it
 // is news (reportHeaderReading).
-func keepHeaderReading(account string, hr headerReading) {
+func (tn *tenant) keepHeaderReading(account string, hr headerReading) {
 	if account == "" {
 		return
 	}
-	recMu.Lock()
+	tn.recMu.Lock()
 	kept := false
-	if prev, had := readings[account]; !had || !prev.asOf.After(hr.asOf) {
-		readings[account], kept = hr, true
+	if prev, had := tn.readings[account]; !had || !prev.asOf.After(hr.asOf) {
+		tn.readings[account], kept = hr, true
 	}
-	recMu.Unlock()
+	tn.recMu.Unlock()
 	if kept {
-		reportHeaderReading(account, hr)
+		tn.reportHeaderReading(account, hr)
 	}
 }
 
@@ -717,14 +712,14 @@ func recordBasis(r refusalRecord) string {
 // and the live records closing what they name. nil = an account the brain
 // does not serve; one never measured is the brain's entry as it stands (as_of
 // null), so its check waits for the brain's next poll, as the brain's does.
-func standingFor(account string, now time.Time) *acctStanding {
-	st := standingRead(account, now)
+func (tn *tenant) standingFor(account string, now time.Time) *acctStanding {
+	st := tn.standingRead(account, now)
 	if st == nil || st.AsOf == nil {
 		return st
 	}
-	recMu.Lock()
-	recs := liveRecordsLocked(account, now)
-	recMu.Unlock()
+	tn.recMu.Lock()
+	recs := tn.liveRecordsLocked(account, now)
+	tn.recMu.Unlock()
 	for limit, r := range recs {
 		if !r.closes() || strings.HasPrefix(limit, "model:") {
 			continue // a model's record binds one dial, not the account: routeCheck applies it
@@ -795,10 +790,10 @@ func recordLimitWindow(limit string) checkWindow {
 // standingRead is the account's standing before records: the brain's
 // reading, and the newer per-response reading over it field by field. It is
 // also what a refusal is recorded against (recordRefusal).
-func standingRead(account string, now time.Time) *acctStanding {
-	pref.mu.RLock()
-	b, ok := pref.accounts[account]
-	pref.mu.RUnlock()
+func (tn *tenant) standingRead(account string, now time.Time) *acctStanding {
+	tn.pref.mu.RLock()
+	b, ok := tn.pref.accounts[account]
+	tn.pref.mu.RUnlock()
 	if !ok {
 		return nil
 	}
@@ -814,9 +809,9 @@ func standingRead(account string, now time.Time) *acctStanding {
 	if b.AsOf == nil {
 		return &st
 	}
-	recMu.Lock()
-	hr, hasHR := readings[account]
-	recMu.Unlock()
+	tn.recMu.Lock()
+	hr, hasHR := tn.readings[account]
+	tn.recMu.Unlock()
 	if !hasHR {
 		return &st
 	}
@@ -898,18 +893,18 @@ func mergeStandings(prev, next map[string]acctStanding) map[string]acctStanding 
 }
 
 // staleMax is the brain's stale limit, seconds (settings.stale_max).
-func staleMax() float64 {
-	pref.mu.RLock()
-	defer pref.mu.RUnlock()
-	return pref.staleMax
+func (tn *tenant) staleMax() float64 {
+	tn.pref.mu.RLock()
+	defer tn.pref.mu.RUnlock()
+	return tn.pref.staleMax
 }
 
 // routeOf is the brain's route, the pots and pay_order, snapshotted.
-func routeOf(routeID string) (routePref, map[string]potSettings, []string, bool) {
-	pref.mu.RLock()
-	defer pref.mu.RUnlock()
-	r, ok := pref.routes[routeID]
-	return r, pref.pots, pref.payOrder, ok
+func (tn *tenant) routeOf(routeID string) (routePref, map[string]potSettings, []string, bool) {
+	tn.pref.mu.RLock()
+	defer tn.pref.mu.RUnlock()
+	r, ok := tn.pref.routes[routeID]
+	return r, tn.pref.pots, tn.pref.payOrder, ok
 }
 
 // routeCheck is the dial check for one (route, account) on this proxy's facts
@@ -925,8 +920,8 @@ func routeOf(routeID string) (routePref, map[string]potSettings, []string, bool)
 // upstream may bill. It is the check with no request (the brain's own:
 // unknown cost, one output); a dial that knows its request asks
 // routeCheckStanding.
-func routeCheck(routeID, account, model string, now time.Time) (c dialCheck, held bool) {
-	c, _, held = routeCheckStanding(routeID, account, model, checkRequest{}, now)
+func (tn *tenant) routeCheck(routeID, account, model string, now time.Time) (c dialCheck, held bool) {
+	c, _, held = tn.routeCheckStanding(routeID, account, model, checkRequest{}, now)
 	return c, held
 }
 
@@ -934,34 +929,34 @@ func routeCheck(routeID, account, model string, now time.Time) (c dialCheck, hel
 // task's max_cost and output count are, §1.6), with the standing the check
 // read, a model record's window included: the unavailable reply names the
 // window and the basis of the time it reports from it.
-func routeCheckStanding(routeID, account, model string, req checkRequest, now time.Time) (c dialCheck, st *acctStanding, held bool) {
-	return routeCheckOn(routeID, account, model, req, ledgerView(unixSeconds(now)), now)
+func (tn *tenant) routeCheckStanding(routeID, account, model string, req checkRequest, now time.Time) (c dialCheck, st *acctStanding, held bool) {
+	return tn.routeCheckOn(routeID, account, model, req, tn.ledgerView(unixSeconds(now)), now)
 }
 
 // routeCheckOn is routeCheckStanding on a ledger view the caller holds: the
 // reservation (ledgerReserve) checks and reserves under one ledgerMu.
-func routeCheckOn(routeID, account, model string, req checkRequest, ledger *checkLedger, now time.Time) (c dialCheck, st *acctStanding, held bool) {
-	r, pots, _, ok := routeOf(routeID)
+func (tn *tenant) routeCheckOn(routeID, account, model string, req checkRequest, ledger *checkLedger, now time.Time) (c dialCheck, st *acctStanding, held bool) {
+	r, pots, _, ok := tn.routeOf(routeID)
 	if !ok {
 		return dialCheck{Check: checkNo, Reason: "unknown", Basis: "unknown"}, nil, false
 	}
-	return policyCheckOn(routeID, r.routePolicy, pots, account, model, req, ledger, now)
+	return tn.policyCheckOn(routeID, r.routePolicy, pots, account, model, req, ledger, now)
 }
 
 // policyCheckOn is routeCheckOn for a route policy in hand: the brain's
 // (routeCheckOn), or one this proxy holds itself (the video door's,
 // video_api.go, whose pay is this proxy's own configuration).
-func policyCheckOn(routeID string, r routePolicy, pots map[string]potSettings, account, model string, req checkRequest, ledger *checkLedger, now time.Time) (c dialCheck, st *acctStanding, held bool) {
-	st = standingFor(account, now)
-	c = evalDialCheck(r, account, st, pots, ledger, staleMax(), unixSeconds(now), req)
+func (tn *tenant) policyCheckOn(routeID string, r routePolicy, pots map[string]potSettings, account, model string, req checkRequest, ledger *checkLedger, now time.Time) (c dialCheck, st *acctStanding, held bool) {
+	st = tn.standingFor(account, now)
+	c = evalDialCheck(r, account, st, pots, ledger, tn.staleMax(), unixSeconds(now), req)
 	c.route = routeID
 	if model == "" {
 		return c, st, false
 	}
 	limit := modelLimit(model)
-	recMu.Lock()
-	rec, has := records[recKey{account, limit}]
-	recMu.Unlock()
+	tn.recMu.Lock()
+	rec, has := tn.records[recKey{account, limit}]
+	tn.recMu.Unlock()
 	if !has || !rec.closes() || rec.kind == recUnpaid || !rec.live(now) {
 		return c, st, false
 	}
@@ -981,7 +976,7 @@ func policyCheckOn(routeID string, r routePolicy, pots map[string]potSettings, a
 	// binds this dial, and no stop_at names it.
 	st.Allowance.Windows[limit] = recordWindow(rec, checkWindow{}, now)
 	was := c
-	c = evalDialCheck(r, account, st, pots, ledger, staleMax(), unixSeconds(now), req)
+	c = evalDialCheck(r, account, st, pots, ledger, tn.staleMax(), unixSeconds(now), req)
 	c.route = routeID
 	// Only a spent record holds: a model the plan does not include would
 	// refuse a re-admission the same way.
@@ -1018,20 +1013,20 @@ func (p acctPick) tier() int {
 // with an unknown use after every known one (it is not 0), and paid accounts
 // in pay_order. The rest come back as refused, soonest back first. req is the
 // request the dial is for (zero: none known, the brain's own check).
-func rankRouteAccounts(routeID, model string, req checkRequest, incumbent string, accounts []string, pct func(string) *float64, now time.Time) (ok, refused []acctPick) {
-	_, _, payOrder, _ := routeOf(routeID)
-	hard := hardPct()
+func (tn *tenant) rankRouteAccounts(routeID, model string, req checkRequest, incumbent string, accounts []string, pct func(string) *float64, now time.Time) (ok, refused []acctPick) {
+	_, _, payOrder, _ := tn.routeOf(routeID)
+	hard := tn.hardPct()
 	for _, a := range accounts {
 		if a == "" {
 			continue
 		}
-		c, _, held := routeCheckStanding(routeID, a, model, req, now)
+		c, _, held := tn.routeCheckStanding(routeID, a, model, req, now)
 		p := acctPick{account: a, check: c, held: held}
 		if c.no() {
 			refused = append(refused, p)
 			continue
 		}
-		p.throttled = !throttledUntil(a, now).IsZero()
+		p.throttled = !tn.throttledUntil(a, now).IsZero()
 		ok = append(ok, p)
 	}
 	sort.SliceStable(ok, func(i, j int) bool {
@@ -1070,8 +1065,8 @@ func rankRouteAccounts(routeID, model string, req checkRequest, incumbent string
 }
 
 // routeAccounts is the route's backing accounts as the brain registered them.
-func routeAccounts(routeID string) []string {
-	r, _, _, ok := routeOf(routeID)
+func (tn *tenant) routeAccounts(routeID string) []string {
+	r, _, _, ok := tn.routeOf(routeID)
 	if !ok {
 		return nil
 	}
@@ -1094,11 +1089,11 @@ func renderPicks(ps []acctPick) string {
 }
 
 // recordsStatus is /_switch/status's view of the store.
-func recordsStatus(now time.Time) map[string]any {
-	recMu.Lock()
-	defer recMu.Unlock()
+func (tn *tenant) recordsStatus(now time.Time) map[string]any {
+	tn.recMu.Lock()
+	defer tn.recMu.Unlock()
 	out := map[string]any{}
-	for k, r := range records {
+	for k, r := range tn.records {
 		if !r.live(now) {
 			continue
 		}

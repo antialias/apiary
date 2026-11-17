@@ -194,7 +194,7 @@ func (t *failoverTransport) tripFirstEvent(req *http.Request, info reqInfo) (*ht
 	if shape == "no_head" || shape == "head_no_event" {
 		out := classify(cc.member, ctx, nil, context.Cause(ctx))
 		out.lease = cc.leaseFor(cc.member.ID)
-		recordHopHead(cc, cc.member, out)
+		cc.tenant.recordHopHead(cc, cc.member, out)
 	}
 	// §2.2 row 18: the resend is a dial, re-checked on the newest overlay; a
 	// `no` hands the request to the walk instead of resending.
@@ -202,13 +202,13 @@ func (t *failoverTransport) tripFirstEvent(req *http.Request, info reqInfo) (*ht
 	// §1.7: the abandoned hop was sent, may be billed, and returned no usage.
 	// On a counted pot it is entered uncounted.
 	if info, ok := req.Context().Value(infoKey).(reqInfo); ok {
-		armLedger(req.Context(), servedCheck(req, info), sv.model).abandon("abandoned by the first-event resend (" + shape + ")")
+		cc.tenant.armLedger(req.Context(), servedCheck(req, info), sv.model).abandon("abandoned by the first-event resend (" + shape + ")")
 	}
 	want := ""
 	if len(cc.member.Targets) > 0 {
 		want = sv.account
 	}
-	_, chk, ok := providerMemberDial(cc.member, want, false, false, nowFn())
+	_, chk, ok := cc.tenant.providerMemberDial(cc.member, want, false, false, nowFn())
 	if !ok {
 		log.Printf("⏱️  first-event resend on class %s member %s account %s refused by its check — walking",
 			cc.class, cc.member.ID, sv.account)

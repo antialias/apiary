@@ -57,7 +57,9 @@ func (h *histo) observe(bounds []float64, v float64) {
 	h.n++
 }
 
-type reqCode struct{ lane, code string }
+// reqCode keys requests_total: the lane, the tenant served ("" before one
+// is known, e.g. a refused login) and the status code.
+type reqCode struct{ lane, tenant, code string }
 
 type reqMetricsT struct {
 	mu       sync.Mutex
@@ -102,11 +104,11 @@ func (rm *reqMetricsT) inFlightCount() int {
 
 // end retires a request: it counts the request, observes its full duration
 // and (if any byte reached the client) its time to first byte.
-func (rm *reqMetricsT) end(id uint64, lane string, status int, start time.Time, firstByte int64, now time.Time) {
+func (rm *reqMetricsT) end(id uint64, lane, tenant string, status int, start time.Time, firstByte int64, now time.Time) {
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 	delete(rm.inflight, id)
-	rm.totals[reqCode{lane, strconv.Itoa(status)}]++
+	rm.totals[reqCode{lane, tenant, strconv.Itoa(status)}]++
 	d := rm.dur[lane]
 	if d == nil {
 		d = &histo{}
@@ -161,6 +163,9 @@ func (rm *reqMetricsT) render(now time.Time) string {
 		if codes[i].lane != codes[j].lane {
 			return codes[i].lane < codes[j].lane
 		}
+		if codes[i].tenant != codes[j].tenant {
+			return codes[i].tenant < codes[j].tenant
+		}
 		return codes[i].code < codes[j].code
 	})
 	m := newMetricsBufPrefix(reqMetricPrefix)
@@ -172,9 +177,9 @@ func (rm *reqMetricsT) render(now time.Time) string {
 	}
 	m.help("oldest_in_flight_seconds", "gauge", "Age of the oldest in-flight request; 0 when none.")
 	m.add("oldest_in_flight_seconds", age)
-	m.help("requests_total", "counter", "Completed requests by lane and HTTP status code.")
+	m.help("requests_total", "counter", "Completed requests by lane, tenant and HTTP status code.")
 	for _, c := range codes {
-		m.add("requests_total", float64(totals[c]), "lane", c.lane, "code", c.code)
+		m.add("requests_total", float64(totals[c]), "lane", c.lane, "tenant", c.tenant, "code", c.code)
 	}
 	writeHist := func(name, help string, bounds []float64, hs []hcopy) {
 		m.help(name, "histogram", help)

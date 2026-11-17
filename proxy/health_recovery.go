@@ -23,9 +23,10 @@ const recoveryInterval = time.Minute
 const recoveryDeadline = 20 * time.Second
 const recoveryMaxBytes = 64 << 10
 
-var healthRecovery *recoveryRunner
-
+// One runner per tenant (tenant.healthRecovery): it probes the tenant's own
+// fast members on the tenant's own credentials.
 type recoveryRunner struct {
+	tenant    *tenant
 	transport *failoverTransport
 	deadline  time.Duration
 	mu        sync.Mutex
@@ -65,7 +66,8 @@ func (r *recoveryRunner) run(ctx context.Context) {
 }
 
 func (r *recoveryRunner) pass(ctx context.Context) {
-	if ctx.Err() != nil || !healthEnforcedClass(recoveryClass) {
+	tn := r.tenant
+	if ctx.Err() != nil || tn.health == nil || !healthEnforcedClass(recoveryClass) {
 		return
 	}
 	r.mu.Lock()
@@ -77,9 +79,9 @@ func (r *recoveryRunner) pass(ctx context.Context) {
 	last := r.lastKey
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); r.busy = false; r.mu.Unlock() }()
-	pref.mu.RLock()
-	members := append([]classMemberPref(nil), pref.classes[recoveryClass].Members...)
-	pref.mu.RUnlock()
+	tn.pref.mu.RLock()
+	members := append([]classMemberPref(nil), tn.pref.classes[recoveryClass].Members...)
+	tn.pref.mu.RUnlock()
 	// Round robin prevents a repeatedly abandoned member starving another.
 	sort.Slice(members, func(i, j int) bool { return members[i].ID < members[j].ID })
 	cut := sort.Search(len(members), func(i int) bool { return members[i].ID > last })
@@ -88,7 +90,7 @@ func (r *recoveryRunner) pass(ctx context.Context) {
 	// included check is chosen, read from the check itself so no tier
 	// renumbering can open a paid probe; the probe dials only on its own
 	// dial-time check (probe).
-	for _, rc := range rankCandidates(members, "", rankOpt{est: 32, health: true}) {
+	for _, rc := range tn.rankCandidates(members, "", rankOpt{est: 32, health: true, ctx: ctx}) {
 		p := providerByName(rc.m.Provider)
 		if rc.m.Kind != "provider" || p == nil || rc.health != hsHalfOpen || !rc.check.included() {
 			continue
@@ -97,7 +99,7 @@ func (r *recoveryRunner) pass(ctx context.Context) {
 			continue
 		}
 		id := "recovery-" + nextDecisionID()
-		lease := health.claimProbe(rc.m.ID, recoveryClass, rc.m.ID, id, 32)
+		lease := tn.health.claimProbe(rc.m.ID, recoveryClass, rc.m.ID, id, 32)
 		if lease == nil {
 			continue
 		}
@@ -107,7 +109,7 @@ func (r *recoveryRunner) pass(ctx context.Context) {
 		r.mu.Unlock()
 		out, result := r.probe(ctx, rc.m)
 		out.key, out.lease = rc.m.ID, lease
-		healthRecord(out, recoveryClass, id, 0, false)
+		healthRecord(tn.health, out, recoveryClass, id, 0, false)
 		r.mu.Lock()
 		r.result, r.duration = result, time.Since(started)
 		if r.totals == nil {
@@ -120,13 +122,13 @@ func (r *recoveryRunner) pass(ctx context.Context) {
 }
 
 func (r *recoveryRunner) probe(parent context.Context, member classMemberPref) (hopOutcome, string) {
-	ctx, cancel := context.WithTimeout(parent, r.deadline)
+	ctx, cancel := context.WithTimeout(withTenant(parent, r.tenant), r.deadline)
 	defer cancel()
 	body := []byte(`{"model":"claude-fast","max_tokens":256,"stream":false,"messages":[{"role":"user","content":"Health check. Reply with exactly OK, no explanation."}]}`)
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://recovery.invalid/v1/messages", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Anthropic-Version", "2023-06-01")
-	cc := &classRoute{classReq: classReq{origBody: body, inPath: "/v1/messages", ctx: req.Context()}, origHeader: req.Header, scale: newScaleMark("", 1)}
+	cc := &classRoute{classReq: classReq{origBody: body, inPath: "/v1/messages", ctx: req.Context()}, tenant: r.tenant, origHeader: req.Header, scale: newScaleMark("", 1)}
 	// The dial-time check decides (§2.2 row 13): the standing may have moved
 	// since ranking chose this member, and a probe never spends money.
 	req, _, c, ok := r.transport.rebuildForMember(req, cc, member, "", false)

@@ -100,7 +100,7 @@ func TestDecisionSurvivesResponseAbortOnce(t *testing.T) {
 				t.Error("abort was swallowed")
 			}
 		}()
-		handler.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+		handler.ServeHTTP(rec, lanRequest("GET", "/", nil))
 	}()
 	d := awaitDecision(t, rec.Header().Get("X-Switch-Decision"))
 	if d.Outcome != "deg" || valueOrEmpty(d.Cause) != "stream_truncated" {
@@ -122,7 +122,7 @@ func TestDecisionDirectEarlyDenyAndPinContract(t *testing.T) {
 	evTest(t)
 	evArm()
 	rec := httptest.NewRecorder()
-	requestHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("denial forwarded") })).ServeHTTP(rec, httptest.NewRequest("POST", "/v1/not-an-api", nil))
+	requestHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("denial forwarded") })).ServeHTTP(rec, lanRequest("POST", "/v1/not-an-api", nil))
 	d := awaitDecision(t, rec.Header().Get("X-Switch-Decision"))
 	if d.HopKind != "direct" || d.HealthState != "n/a" || d.Outcome != "client_error" || d.Attempts != 0 || d.Class != nil {
 		t.Fatalf("denial: %+v", d)
@@ -130,15 +130,15 @@ func TestDecisionDirectEarlyDenyAndPinContract(t *testing.T) {
 	if rec.Header().Get("X-Switch-Health") != "" {
 		t.Fatal("direct health header")
 	}
-	old := bindCache
-	bindCache = map[string]classBind{}
-	defer func() { bindCache = old }()
+	old := lan.bindCache
+	lan.bindCache = map[string]classBind{}
+	defer func() { lan.bindCache = old }()
 	no := false
-	bindCache["c\x00s"] = classBind{pinned: &no}
-	if pin, source := pinForBinding("c", "s", "bind: pinned to x"); pin || source != "bind_payload" {
+	lan.bindCache["c\x00s"] = classBind{pinned: &no}
+	if pin, source := lan.pinForBinding("c", "s", "bind: pinned to x"); pin || source != "bind_payload" {
 		t.Fatal("explicit false lost to stale reason")
 	}
-	if pin, source := pinForBinding("c", "legacy", "bind: pinned to x"); !pin || source != "reason_prefix" {
+	if pin, source := lan.pinForBinding("c", "legacy", "bind: pinned to x"); !pin || source != "reason_prefix" {
 		t.Fatal("legacy pin missing")
 	}
 }
@@ -162,7 +162,7 @@ func TestHealthWireFixture(t *testing.T) {
 	h.noteBinding("frontier", "lane:fable", false)
 	h.noteBinding("frontier", "lane:fable", false)
 	h.noteAuthFailure("lane:fable")
-	metrics := h.renderMetrics()
+	metrics := renderHealthMetrics(h)
 	for _, s := range []string{`switch_health_auth_failures_total{key="lane:fable"} 1`, `switch_health_pointer_fighting_health{class="frontier"} 1`, `switch_health_ramp_pending{class="frontier"} 0`} {
 		if !strings.Contains(metrics, s) {
 			t.Errorf("missing %s", s)
@@ -197,7 +197,7 @@ func TestHealthWireFixture(t *testing.T) {
 	d.outcome(hopOutcome{final: true, sig: sigDegraded, cause: "stream_truncated"})
 	d.finish(context.Background(), 200)
 	d.record.ElapsedMS = 12
-	status := healthStatus()
+	status := lan.healthStatus()
 	// Process-global note counters depend on earlier tests, unlike this store's state.
 	status["notes"].(map[string]any)["emitted_total"] = int64(0)
 	status["notes"].(map[string]any)["stripped_total"] = int64(0)

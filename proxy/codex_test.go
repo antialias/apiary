@@ -573,7 +573,7 @@ func (n *nopBody) Close() error { return nil }
 func TestGetCodexTokenCacheStaleAndFail(t *testing.T) {
 	var dispenses atomic.Int64
 	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/openai-token" || r.Header.Get("X-Switch-Key") != "unit-key" {
+		if r.URL.Path != tpath("/openai-token") || r.Header.Get("X-Switch-Key") != "unit-key" {
 			w.WriteHeader(401)
 			return
 		}
@@ -585,42 +585,42 @@ func TestGetCodexTokenCacheStaleAndFail(t *testing.T) {
 		})
 	}))
 
-	oldBrain, oldKey := brainURL, switchKey
-	codexTokMu.Lock()
-	oldToks := codexToks
-	codexToks = map[string]codexTokEntry{}
-	codexTokMu.Unlock()
-	brainURL, switchKey = brain.URL, "unit-key"
+	oldBrain, oldKey := brainBase, switchKey
+	lan.codexTokMu.Lock()
+	oldToks := lan.codexToks
+	lan.codexToks = map[string]codexTokEntry{}
+	lan.codexTokMu.Unlock()
+	brainBase, switchKey = brain.URL, "unit-key"
 	defer func() {
 		brain.Close()
-		brainURL, switchKey = oldBrain, oldKey
-		codexTokMu.Lock()
-		codexToks = oldToks
-		codexTokMu.Unlock()
+		brainBase, switchKey = oldBrain, oldKey
+		lan.codexTokMu.Lock()
+		lan.codexToks = oldToks
+		lan.codexTokMu.Unlock()
 	}()
 
-	tok, acct, _, ok := getCodexToken("")
+	tok, acct, _, ok := lan.getCodexToken("")
 	if !ok || tok != "tok-1" || acct != "acct-unit" {
 		t.Fatalf("first fetch = %q/%q/%v", tok, acct, ok)
 	}
-	if tok2, _, _, _ := getCodexToken(""); tok2 != "tok-1" || dispenses.Load() != 1 {
+	if tok2, _, _, _ := lan.getCodexToken(""); tok2 != "tok-1" || dispenses.Load() != 1 {
 		t.Fatalf("second call must ride the fresh cache (tok=%q dispenses=%d)", tok2, dispenses.Load())
 	}
 
 	// Brain dies + cache aged past codexTokenFresh but bearer unexpired: STALE ride.
 	brain.Close()
-	codexTokMu.Lock()
-	e := codexToks[""]
+	lan.codexTokMu.Lock()
+	e := lan.codexToks[""]
 	e.fetched = time.Now().Add(-2 * codexTokenFresh)
-	codexToks[""] = e
-	codexTokMu.Unlock()
-	if tok3, _, _, ok3 := getCodexToken(""); !ok3 || tok3 != "tok-1" {
+	lan.codexToks[""] = e
+	lan.codexTokMu.Unlock()
+	if tok3, _, _, ok3 := lan.getCodexToken(""); !ok3 || tok3 != "tok-1" {
 		t.Fatalf("stale ride = %q/%v, want the cached bearer", tok3, ok3)
 	}
 
 	// Nothing cached + brain dead: refuse.
-	dropCodexToken("")
-	if _, _, _, ok4 := getCodexToken(""); ok4 {
+	lan.dropCodexToken("")
+	if _, _, _, ok4 := lan.getCodexToken(""); ok4 {
 		t.Fatal("no cache + dead brain must refuse")
 	}
 }
@@ -631,7 +631,7 @@ func TestGetCodexTokenCacheStaleAndFail(t *testing.T) {
 func TestGetCodexTokenPerAccountPool(t *testing.T) {
 	var dispenses atomic.Int64
 	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/openai-token" || r.Header.Get("X-Switch-Key") != "unit-key" {
+		if r.URL.Path != tpath("/openai-token") || r.Header.Get("X-Switch-Key") != "unit-key" {
 			w.WriteHeader(401)
 			return
 		}
@@ -649,39 +649,39 @@ func TestGetCodexTokenPerAccountPool(t *testing.T) {
 	}))
 	defer brain.Close()
 
-	oldBrain, oldKey := brainURL, switchKey
-	codexTokMu.Lock()
-	oldToks := codexToks
-	codexToks = map[string]codexTokEntry{}
-	codexTokMu.Unlock()
-	brainURL, switchKey = brain.URL, "unit-key"
+	oldBrain, oldKey := brainBase, switchKey
+	lan.codexTokMu.Lock()
+	oldToks := lan.codexToks
+	lan.codexToks = map[string]codexTokEntry{}
+	lan.codexTokMu.Unlock()
+	brainBase, switchKey = brain.URL, "unit-key"
 	defer func() {
-		brainURL, switchKey = oldBrain, oldKey
-		codexTokMu.Lock()
-		codexToks = oldToks
-		codexTokMu.Unlock()
+		brainBase, switchKey = oldBrain, oldKey
+		lan.codexTokMu.Lock()
+		lan.codexToks = oldToks
+		lan.codexTokMu.Unlock()
 	}()
 
-	tok, acct, name, ok := getCodexToken("gpt-b")
+	tok, acct, name, ok := lan.getCodexToken("gpt-b")
 	if !ok || tok != "tok-gpt-b" || acct != "uuid-gpt-b" || name != "gpt-b" {
 		t.Fatalf("named fetch = %q/%q/%q/%v", tok, acct, name, ok)
 	}
-	tok, _, name, ok = getCodexToken("")
+	tok, _, name, ok = lan.getCodexToken("")
 	if !ok || tok != "tok-gpt-a" || name != "gpt-a" {
 		t.Fatalf("incumbent fetch = %q name=%q ok=%v — the brain resolves the pool pick", tok, name, ok)
 	}
 	if dispenses.Load() != 2 {
 		t.Fatalf("dispenses = %d, want 2 (separate cache slots)", dispenses.Load())
 	}
-	if tok2, _, _, _ := getCodexToken("gpt-b"); tok2 != "tok-gpt-b" || dispenses.Load() != 2 {
+	if tok2, _, _, _ := lan.getCodexToken("gpt-b"); tok2 != "tok-gpt-b" || dispenses.Load() != 2 {
 		t.Fatalf("named re-fetch must ride its own cache slot (tok=%q dispenses=%d)", tok2, dispenses.Load())
 	}
 	// Dropping gpt-b must not evict the incumbent slot.
-	dropCodexToken("gpt-b")
-	if tok3, _, _, _ := getCodexToken(""); tok3 != "tok-gpt-a" || dispenses.Load() != 2 {
+	lan.dropCodexToken("gpt-b")
+	if tok3, _, _, _ := lan.getCodexToken(""); tok3 != "tok-gpt-a" || dispenses.Load() != 2 {
 		t.Fatalf("sibling drop evicted the incumbent slot (tok=%q dispenses=%d)", tok3, dispenses.Load())
 	}
-	if tok4, _, _, ok4 := getCodexToken("gpt-b"); !ok4 || tok4 != "tok-gpt-b" || dispenses.Load() != 3 {
+	if tok4, _, _, ok4 := lan.getCodexToken("gpt-b"); !ok4 || tok4 != "tok-gpt-b" || dispenses.Load() != 3 {
 		t.Fatalf("dropped slot must re-fetch (tok=%q dispenses=%d ok=%v)", tok4, dispenses.Load(), ok4)
 	}
 }

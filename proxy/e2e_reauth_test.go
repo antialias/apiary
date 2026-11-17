@@ -45,16 +45,11 @@ func wantRefetch(t *testing.T, env *e2eEnv, refused string) {
 // tokens_cached_ttl kept its record<string,string> shape.
 func statusTokens(t *testing.T, env *e2eEnv) map[string]map[string]any {
 	t.Helper()
-	resp, err := http.Get(env.proxy.URL + "/_switch/status")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
 	var st struct {
 		Cached map[string]string         `json:"tokens_cached_ttl"`
 		Tokens map[string]map[string]any `json:"anthropic_tokens"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+	if err := json.Unmarshal(statusMine(t, env.proxy.URL), &st); err != nil {
 		t.Fatalf("status: %v (tokens_cached_ttl must stay record<string,string>)", err)
 	}
 	if len(st.Cached) == 0 {
@@ -402,15 +397,15 @@ func TestE2EReauthStuckBrainAnswers403AndQuiets(t *testing.T) {
 		t.Fatalf("log lacks the quiet line:\n%s", logs.String())
 	}
 
-	tokMu.Lock()
-	e := tokens[other]
+	lan.tokMu.Lock()
+	e := lan.tokens[other]
 	if e.token != dead {
-		tokMu.Unlock()
+		lan.tokMu.Unlock()
 		t.Fatalf("cached copy = %q, want the refused one kept (never emptied)", e.token)
 	}
 	e.quietUntil = time.Now().Add(-time.Second) // the 30s are up
-	tokens[other] = e
-	tokMu.Unlock()
+	lan.tokens[other] = e
+	lan.tokMu.Unlock()
 	post()
 	if n := env.refusedCalls.Load(); n != 2 {
 		t.Fatalf("refused_fp calls = %d after the quiet, want 2", n)
@@ -440,19 +435,19 @@ func TestE2EReauthFailedFetchQuietsBriefly(t *testing.T) {
 	if !strings.Contains(logs.String(), reauthLine(other, old)) || !strings.Contains(logs.String(), "— re-fetch failed (") {
 		t.Fatalf("log lacks the failed re-fetch line:\n%s", logs.String())
 	}
-	tokMu.Lock()
-	e := tokens[other]
-	tokMu.Unlock()
+	lan.tokMu.Lock()
+	e := lan.tokens[other]
+	lan.tokMu.Unlock()
 	if left := time.Until(e.quietUntil); e.quietFor != reauthFailQuiet || left <= 0 || left > reauthFailQuiet {
 		t.Fatalf("quiet = %v (%v left), want reauthFailQuiet (%v), not reauthQuiet", e.quietFor, left, reauthFailQuiet)
 	}
 
 	env.tokFail.Store(false) // the brain is back
-	tokMu.Lock()
-	e = tokens[other]
+	lan.tokMu.Lock()
+	e = lan.tokens[other]
 	e.quietUntil = time.Now().Add(-time.Millisecond) // the short quiet is up
-	tokens[other] = e
-	tokMu.Unlock()
+	lan.tokens[other] = e
+	lan.tokMu.Unlock()
 	resp = env.post(t, "claude-fable-5", "CLIENT")
 	if b := readAll(t, resp); resp.StatusCode != 200 {
 		t.Fatalf("status %d: %s, want 200 once the brain answers again", resp.StatusCode, b)

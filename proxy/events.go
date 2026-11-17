@@ -112,7 +112,11 @@ type evEnvelope struct {
 	Seq  int64  `json:"seq"`
 	TS   string `json:"ts"`
 	Type string `json:"type"`
-	Data any    `json:"data"`
+	// Tenant is the member the event is about (MEMBERS-PLAN 1b): "" for the
+	// proxy's own events (an alert batch's delivery, the inject queue's
+	// resets). Readers that follow one tenant filter on it.
+	Tenant string `json:"tenant,omitempty"`
+	Data   any    `json:"data"`
 }
 
 // The hub is a package-level singleton, sibling to `st`. Required, not stylistic:
@@ -158,12 +162,12 @@ func eventsArmed() bool {
 
 // publish fans one event out to every current subscriber and appends it to the replay
 // ring. It NEVER blocks. Safe to call from any goroutine, including the request path.
-func publish(kind string, data any) {
+func publish(tenantID, kind string, data any) {
 	if !eventsArmed() {
 		return
 	}
 	seq := atomic.AddInt64(&evSeq, 1)
-	hub.append(&evFrame{seq: seq, b: renderFrame(seq, kind, data)}) // marshal is lock-free
+	hub.append(&evFrame{seq: seq, b: renderFrame(seq, tenantID, kind, data)}) // marshal is lock-free
 }
 
 func evID(seq int64) string { return evEpoch + "-" + strconv.FormatInt(seq, 10) }
@@ -184,14 +188,15 @@ func evSanitizeKind(kind string) string {
 // renderFrame builds the complete wire frame. json.Marshal escapes newlines inside
 // strings and emits none at top level, so "data:" is always exactly one line — no
 // multi-line data handling is needed anywhere.
-func renderFrame(seq int64, kind string, data any) []byte {
+func renderFrame(seq int64, tenantID, kind string, data any) []byte {
 	kind = evSanitizeKind(kind)
 	ev := evEnvelope{
-		ID:   evID(seq),
-		Seq:  seq,
-		TS:   time.Now().UTC().Format(time.RFC3339Nano),
-		Type: kind,
-		Data: data,
+		ID:     evID(seq),
+		Seq:    seq,
+		TS:     time.Now().UTC().Format(time.RFC3339Nano),
+		Type:   kind,
+		Tenant: tenantID,
+		Data:   data,
 	}
 	b, err := json.Marshal(ev)
 	if err != nil || len(b) > evMaxEventBytes {
@@ -492,7 +497,9 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	if gap.Reason != "" {
 		healthGap = timeValue(nowFn())
 	}
-	publishHealthSnapshot(healthGap)
+	for _, tn := range allTenants() {
+		tn.publishHealthSnapshot(healthGap)
+	}
 
 	// First time.Ticker in this package — the existing background loops are
 	// `for { ...; time.Sleep(d) }` and uncancellable. This timer must die with the

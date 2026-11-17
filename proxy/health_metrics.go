@@ -35,7 +35,14 @@ type metricsBuf struct {
 	prefix  string
 	pending map[string]string
 	written map[string]bool
+	// fixed is a label pair every sample carries first: the tenant label
+	// (MEMBERS-PLAN 1b), set per tenant while one buffer renders them all,
+	// so each family's HELP and TYPE appear once.
+	fixed []string
 }
+
+// forTenant makes every sample from here on carry tenant="id".
+func (m *metricsBuf) forTenant(id string) { m.fixed = []string{"tenant", id} }
 
 func newMetricsBuf() *metricsBuf { return newMetricsBufPrefix(metricPrefix) }
 
@@ -81,6 +88,9 @@ func (m *metricsBuf) addSuffixed(name, suffix string, v float64, labels ...strin
 	m.b.WriteString(m.prefix)
 	m.b.WriteString(name)
 	m.b.WriteString(suffix)
+	if len(m.fixed) > 0 {
+		labels = append(append([]string{}, m.fixed...), labels...)
+	}
 	if len(labels) > 1 {
 		m.b.WriteByte('{')
 		for i := 0; i+1 < len(labels); i += 2 {
@@ -114,10 +124,19 @@ func boolF(b bool) float64 {
 }
 
 // renderMetrics is the whole of GET /_switch/metrics.
-func (h *healthStore) renderMetrics() string {
-	m := newMetricsBuf()
+// renderMetrics writes the tenant's store into m under its tenant label.
+// One buffer renders every tenant (main.go's /_switch/metrics), so a family's
+// header appears once.
+// renderMetrics writes the store's series into m, each under tn's tenant
+// label; nil tn (a store on its own, in tests) writes them bare.
+func (h *healthStore) renderMetrics(m *metricsBuf, tn *tenant) {
+	var rec *recoveryRunner
+	if tn != nil {
+		m.forTenant(tn.id)
+		rec = tn.healthRecovery
+	}
 	now := nowFn()
-	if r := healthRecovery; r != nil {
+	if r := rec; r != nil {
 		r.mu.Lock()
 		m.help("recovery_in_flight", "gauge", "Synthetic static-bearer recovery attempt in progress.")
 		m.add("recovery_in_flight", boolF(r.busy))
@@ -387,9 +406,10 @@ func (h *healthStore) renderMetrics() string {
 	// cannot see any other way.
 	m.help("last_tick_timestamp_seconds", "gauge", "When the tick loop last ran.")
 	m.ts("last_tick_timestamp_seconds", h.lastTick)
-
-	return m.b.String()
 }
+
+// String is the exposition text so far.
+func (m *metricsBuf) String() string { return m.b.String() }
 
 func sortedKeys(m map[string]int64) []string {
 	out := make([]string, 0, len(m))

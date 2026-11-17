@@ -167,9 +167,9 @@ func TestE2ENoteEmissionOffAndLane(t *testing.T) {
 			// A pinned half-open ride meets the predicate without walking or
 			// changing the class binding, even when enforcement is disabled.
 			h.bindReason.Store("bind: pinned by operator")
-			health.mu.Lock()
-			health.keys["kimi/kimi-k3"] = &epState{state: hsHalfOpen}
-			health.mu.Unlock()
+			lan.health.mu.Lock()
+			lan.health.keys["kimi/kimi-k3"] = &epState{state: hsHalfOpen}
+			lan.health.mu.Unlock()
 			request := noteE2EBody(false)
 			switch mode {
 			case "off":

@@ -282,7 +282,7 @@ func TestE2EEventsNeverReadingSubscriberDoesNotStallRequests(t *testing.T) {
 	go func() {
 		defer close(flooded)
 		for i := 0; i < 1500; i++ {
-			publish("flood", map[string]any{"i": i, "fill": filler})
+			publish("", "flood", map[string]any{"i": i, "fill": filler})
 		}
 	}()
 	select {
@@ -347,14 +347,14 @@ func TestE2EEventsReconnectReplaysTheGap(t *testing.T) {
 	evHello(t, frames)
 	evWaitFor(t, "the subscriber to register", 3*time.Second, func() bool { return evSubsNow() == 1 })
 
-	publish("marker", map[string]any{"n": 0})
+	publish("", "marker", map[string]any{"n": 0})
 	first := evAwait(t, frames, "marker", 3*time.Second)
 	closeStream()
 	evWaitFor(t, "the subscriber to detach", 3*time.Second, func() bool { return evSubsNow() == 0 })
 
 	// Published into the gap — the hub is still armed by the replay grace.
 	for i := 1; i <= 3; i++ {
-		publish("marker", map[string]any{"n": i})
+		publish("", "marker", map[string]any{"n": i})
 	}
 
 	_, frames2, closeStream2 := evStream(t, env, "", first.id)
@@ -452,7 +452,7 @@ func TestE2EEventsWriteDeadlineReapsAWedgedPeer(t *testing.T) {
 
 	blob := strings.Repeat("x", 60<<10)
 	for i := 0; i < 200; i++ {
-		publish("fat", map[string]any{"blob": blob})
+		publish("", "fat", map[string]any{"blob": blob})
 	}
 
 	evWaitFor(t, "the wedged peer to be reaped by the write deadline", 15*time.Second, func() bool {

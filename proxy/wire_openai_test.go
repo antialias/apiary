@@ -121,9 +121,9 @@ func TestOAContentBlocks(t *testing.T) {
 func TestWireTake(t *testing.T) {
 	oldRPM, oldBurst, oldNow := wireRPM, wireBurst, wireNow
 	reset := func() {
-		wireMu.Lock()
-		wireBuckets = map[string]*wireBucket{}
-		wireMu.Unlock()
+		lan.wireMu.Lock()
+		lan.wireBuckets = map[string]*wireBucket{}
+		lan.wireMu.Unlock()
 	}
 	defer func() {
 		wireRPM, wireBurst, wireNow = oldRPM, oldBurst, oldNow
@@ -134,24 +134,24 @@ func TestWireTake(t *testing.T) {
 	wireNow = func() time.Time { return now }
 	wireRPM, wireBurst = 60, 2 // 1 token/sec refill, depth 2
 
-	if !wireTake("tutor") || !wireTake("tutor") {
+	if !lan.wireTake("tutor") || !lan.wireTake("tutor") {
 		t.Fatal("burst of 2 should allow two takes")
 	}
-	if wireTake("tutor") {
+	if lan.wireTake("tutor") {
 		t.Fatal("third take should be denied")
 	}
-	if !wireTake("other") {
+	if !lan.wireTake("other") {
 		t.Fatal("classes have independent buckets")
 	}
 	now = now.Add(1500 * time.Millisecond)
-	if !wireTake("tutor") {
+	if !lan.wireTake("tutor") {
 		t.Fatal("refill should allow a take")
 	}
-	if wireTake("tutor") {
+	if lan.wireTake("tutor") {
 		t.Fatal("only ~half a token remains after the refill take")
 	}
 	wireRPM = 0
-	if !wireTake("tutor") {
+	if !lan.wireTake("tutor") {
 		t.Fatal("rpm<=0 disables the limiter")
 	}
 }

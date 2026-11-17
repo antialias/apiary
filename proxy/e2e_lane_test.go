@@ -9,6 +9,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -371,7 +372,7 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 
 	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case strings.HasPrefix(r.URL.Path, "/preferred"):
+		case strings.HasPrefix(r.URL.Path, tpath("/preferred")):
 			env.brainMu.Lock()
 			payload := map[string]any{
 				"account": native, "reason": "incumbent", "since": 0, "last_switch": 0,
@@ -433,7 +434,7 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 			env.quotaBlocks(payload) // last: it reads the lane rules and weekly above
 			env.brainMu.Unlock()
 			_ = json.NewEncoder(w).Encode(payload)
-		case strings.HasPrefix(r.URL.Path, "/class-bind"):
+		case strings.HasPrefix(r.URL.Path, tpath("/class-bind")):
 			env.bindCalls.Add(1)
 			if r.Header.Get("X-Switch-Key") != "e2e-key" {
 				w.WriteHeader(401)
@@ -512,7 +513,7 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 				"route":  withRoute(name, member)["route"],
 				"reason": reason, "since": 0, "created": created,
 			})
-		case r.URL.Path == "/reports" && r.Method == http.MethodPost:
+		case r.URL.Path == tpath("/reports") && r.Method == http.MethodPost:
 			if r.Header.Get("X-Switch-Key") != "e2e-key" {
 				w.WriteHeader(401)
 				return
@@ -553,7 +554,7 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 			seq := len(env.ledgerPosts)
 			env.brainMu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"results": results, "seq": seq})
-		case r.URL.Path == "/api-key":
+		case r.URL.Path == tpath("/api-key"):
 			if r.Header.Get("X-Switch-Key") != "e2e-key" {
 				w.WriteHeader(401)
 				return
@@ -570,7 +571,7 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"account": acct, "api_key": key})
-		case strings.HasPrefix(r.URL.Path, "/openai-token"):
+		case strings.HasPrefix(r.URL.Path, tpath("/openai-token")):
 			if r.Header.Get("X-Switch-Key") != "e2e-key" {
 				w.WriteHeader(401)
 				return
@@ -606,7 +607,7 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 				"access_token": fmt.Sprintf("codex-tok-%d", n),
 				"expires_at":   float64(time.Now().Add(240 * time.Hour).Unix()),
 			})
-		case strings.HasPrefix(r.URL.Path, "/token"):
+		case strings.HasPrefix(r.URL.Path, tpath("/token")):
 			env.tokenCalls.Add(1)
 			a := r.URL.Query().Get("account")
 			if rf := r.URL.Query().Get("refused_fp"); rf != "" {
@@ -642,35 +643,35 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 	}))
 
 	// install globals; snapshot the old world
-	oldUpstream, oldBrain := upstream, brainURL
+	oldUpstream, oldBrain := upstream, brainBase
 	oldKey, oldInject, oldCoalesce := switchKey, injectFile, alertCoalesce
-	upstream, brainURL = env.upstream.URL, brain.URL
+	upstream, brainBase = env.upstream.URL, brain.URL
 	oldBridge := swapBridgeURL(bridgeSrv.URL)
 	switchKey, injectFile, alertCoalesce = "e2e-key", "", 10*time.Millisecond
 
-	pref.mu.Lock()
-	oldAcct, oldReason, oldWeekly := pref.account, pref.reason, pref.weekly
-	oldRules, oldLanes, oldOK := pref.laneRules, pref.lanes, pref.ok
-	oldClasses, oldHard := pref.classes, pref.hardPct
-	pref.account, pref.reason, pref.weekly, pref.laneRules, pref.lanes, pref.ok =
+	lan.pref.mu.Lock()
+	oldAcct, oldReason, oldWeekly := lan.pref.account, lan.pref.reason, lan.pref.weekly
+	oldRules, oldLanes, oldOK := lan.pref.laneRules, lan.pref.lanes, lan.pref.ok
+	oldClasses, oldHard := lan.pref.classes, lan.pref.hardPct
+	lan.pref.account, lan.pref.reason, lan.pref.weekly, lan.pref.laneRules, lan.pref.lanes, lan.pref.ok =
 		"", "", nil, nil, nil, false
-	pref.classes, pref.hardPct = nil, 0
-	pref.mu.Unlock()
+	lan.pref.classes, lan.pref.hardPct = nil, 0
+	lan.pref.mu.Unlock()
 	// The quota model's view and the record store are global: a prior test's
 	// standing or refusal must not steer THIS test's routing.
 	restoreQuota := resetQuotaState()
-	tokMu.Lock()
-	oldTokens := tokens
-	tokens = map[string]tokEntry{}
-	tokMu.Unlock()
-	effMu.Lock()
-	oldEff := lastEffective
-	lastEffective = map[string]string{}
-	effMu.Unlock()
-	bindMu.Lock()
-	oldBinds, oldFundings := bindCache, sessionFundings
-	bindCache, sessionFundings = map[string]classBind{}, map[string]sessionFunding{}
-	bindMu.Unlock()
+	lan.tokMu.Lock()
+	oldTokens := lan.tokens
+	lan.tokens = map[string]tokEntry{}
+	lan.tokMu.Unlock()
+	lan.effMu.Lock()
+	oldEff := lan.lastEffective
+	lan.lastEffective = map[string]string{}
+	lan.effMu.Unlock()
+	lan.bindMu.Lock()
+	oldBinds, oldFundings := lan.bindCache, lan.sessionFundings
+	lan.bindCache, lan.sessionFundings = map[string]classBind{}, map[string]sessionFunding{}
+	lan.bindMu.Unlock()
 	// derived class-row store (#93): global — a prior test's derived rows or
 	// tombstones must not advertise (or refuse) into THIS test's picker
 	classRowsMu.Lock()
@@ -679,10 +680,10 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 	classRowsMu.Unlock()
 	// codex bearer cache (#33/#71): global — a prior test's dispensed bearer
 	// must not serve THIS test's first request (dispense counting depends on it)
-	codexTokMu.Lock()
-	oldCodexToks := codexToks
-	codexToks = map[string]codexTokEntry{}
-	codexTokMu.Unlock()
+	lan.codexTokMu.Lock()
+	oldCodexToks := lan.codexToks
+	lan.codexToks = map[string]codexTokEntry{}
+	lan.codexTokMu.Unlock()
 	// the coalescer queue is global: a prior test's queued flips must not flush
 	// into THIS test's bridge (and vice versa on restore). Both async publishers
 	// are joined too, as evTest does: a flush already running and a response
@@ -699,11 +700,12 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 	// the event hub (#59) and live injection queue (#66) are package-level singletons:
 	// prior tests must not leak subscribers, replay frames, or queued work into this one.
 	evReset()
-	injectReset()
+	lan.injectReset()
 
 	// The reporter runs beside the proxy, as in production (reports.go),
 	// posting to this fake brain; restore stops it before the globals go.
-	startReporter(brain.URL, "e2e-key")
+	switchKey = "e2e-key"
+	lan.startReporter()
 
 	fetchPreferredSync()
 	// Both halves (#126 C0): `gated` is :8787 exactly as before, and `core` is
@@ -717,36 +719,36 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 	restore := func() {
 		drainAlertQueue()
 		evReset()
-		injectReset()
-		stopReporterNow()
+		lan.injectReset()
+		lan.stopReporterNow(context.Background())
 		env.proxy.Close()
 		env.upstream.Close()
 		brain.Close()
 		bridgeSrv.Close()
-		upstream, brainURL = oldUpstream, oldBrain
+		upstream, brainBase = oldUpstream, oldBrain
 		swapBridgeURL(oldBridge)
 		switchKey, injectFile, alertCoalesce = oldKey, oldInject, oldCoalesce
-		pref.mu.Lock()
-		pref.account, pref.reason, pref.weekly = oldAcct, oldReason, oldWeekly
-		pref.laneRules, pref.lanes, pref.ok = oldRules, oldLanes, oldOK
-		pref.classes, pref.hardPct = oldClasses, oldHard
-		pref.mu.Unlock()
-		tokMu.Lock()
-		tokens = oldTokens
-		tokMu.Unlock()
+		lan.pref.mu.Lock()
+		lan.pref.account, lan.pref.reason, lan.pref.weekly = oldAcct, oldReason, oldWeekly
+		lan.pref.laneRules, lan.pref.lanes, lan.pref.ok = oldRules, oldLanes, oldOK
+		lan.pref.classes, lan.pref.hardPct = oldClasses, oldHard
+		lan.pref.mu.Unlock()
+		lan.tokMu.Lock()
+		lan.tokens = oldTokens
+		lan.tokMu.Unlock()
 		restoreQuota()
-		effMu.Lock()
-		lastEffective = oldEff
-		effMu.Unlock()
-		bindMu.Lock()
-		bindCache, sessionFundings = oldBinds, oldFundings
-		bindMu.Unlock()
+		lan.effMu.Lock()
+		lan.lastEffective = oldEff
+		lan.effMu.Unlock()
+		lan.bindMu.Lock()
+		lan.bindCache, lan.sessionFundings = oldBinds, oldFundings
+		lan.bindMu.Unlock()
 		classRowsMu.Lock()
 		classRowsSet, classRowsSource = oldClassRows, oldClassSrc
 		classRowsMu.Unlock()
-		codexTokMu.Lock()
-		codexToks = oldCodexToks
-		codexTokMu.Unlock()
+		lan.codexTokMu.Lock()
+		lan.codexToks = oldCodexToks
+		lan.codexTokMu.Unlock()
 	}
 	return env, restore
 }
@@ -1072,13 +1074,9 @@ func TestE2EStatusShape(t *testing.T) {
 	env.post(t, "claude-fable-5", "CLIENT").Body.Close()
 	env.hit(t)
 
-	resp, err := http.Get(env.proxy.URL + "/_switch/status")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
+	// The lane world is the household's: under members.<lan_tenant>.
 	var s map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+	if err := json.Unmarshal(statusMine(t, env.proxy.URL), &s); err != nil {
 		t.Fatalf("status not JSON: %v", err)
 	}
 	if s["lane_mode"] != "lanes" {
@@ -1093,8 +1091,14 @@ func TestE2EStatusShape(t *testing.T) {
 	if effs["fable"] != other {
 		t.Errorf("effective_by_lane.fable must be %s after a fable request, got %v", other, effs["fable"])
 	}
-	if _, ok := s["lane_parse_failures"]; !ok {
-		t.Error("status must expose lane_parse_failures")
+	// lane_parse_failures is the proxy's one counter: at the top, beside
+	// lan_tenant, not under a member.
+	top := statusTop(t, env.proxy.URL)
+	if _, ok := top["lane_parse_failures"]; !ok {
+		t.Error("status must expose lane_parse_failures at the top")
+	}
+	if top["lan_tenant"] != testLanTenant {
+		t.Errorf("status lan_tenant = %v, want the household", top["lan_tenant"])
 	}
 	if s["brain_reachable"] != true {
 		t.Errorf("brain_reachable must be true, got %v", s["brain_reachable"])

@@ -12,13 +12,13 @@ import (
 func TestUnavailableResponseRetryableUntimed(t *testing.T) {
 	yes := true
 	why := "unknown"
-	u := &unavailable{Retryable: &yes, Options: []unavailOption{},
+	u := &unavailable{tenant: lan, Retryable: &yes, Options: []unavailOption{},
 		Members: []unavailMember{{Route: "frontier/gpt/gpt-5.6", Accounts: []unavailAccount{
 			{Account: "gpt", Check: "no", Why: &why, Basis: "unknown"}}}}}
 	for _, openai := range []bool{false, true} {
-		cc := &classRoute{class: "frontier", session: "untimed-test", origHeader: http.Header{}, unavail: u}
+		cc := &classRoute{tenant: lan, class: "frontier", session: "untimed-test", origHeader: http.Header{}, unavail: u}
 		cc.wireOpenAI = openai
-		resp := unavailableResponse(cc)
+		resp := lan.unavailableResponse(cc)
 		if resp.Header.Get("Retry-After") != "" || resp.Header.Get("X-Switch-Available-At") != "unknown" {
 			t.Fatalf("openai=%v: Retry-After %q, X-Switch-Available-At %q, want none and unknown",
 				openai, resp.Header.Get("Retry-After"), resp.Header.Get("X-Switch-Available-At"))

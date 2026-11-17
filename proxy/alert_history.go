@@ -71,6 +71,7 @@ type alertRecord struct {
 	// (evID = "<evEpoch>-<seq>", events.go).
 	id        string
 	alertname string
+	tenant    string // the tenant whose lane flipped (events carry it)
 	lane      string // switch lane ("opus", "fable", …) or "class:"+class for class alerts
 	from, to  string // account emails on the switch path, member ids on the class path
 	tier      string // FINAL post-demotion delivery tier ("critical"/"telegram")
@@ -143,6 +144,7 @@ func buildDispatch(rec *alertRecord, reason, outcome string, out *gateOutcome, t
 		"id":        rec.id,
 		"at":        rec.at.UnixMilli(),
 		"alertname": rec.alertname,
+		"tenant":    rec.tenant,
 		"lane":      rec.lane,
 		"from":      rec.from,
 		"to":        rec.to,
@@ -199,7 +201,7 @@ func gateAndEnqueue(rec *alertRecord, entry map[string]any, reason string, tierI
 	rec.candTier = rec.tier // rec.tier at entry IS the candidate tier
 	candTier := tierRank(rec.candTier)
 	for _, h := range alertHistory {
-		if h.alertname == rec.alertname && h.lane == rec.lane && h.from == rec.from && h.to == rec.to &&
+		if h.alertname == rec.alertname && h.tenant == rec.tenant && h.lane == rec.lane && h.from == rec.from && h.to == rec.to &&
 			now.Sub(h.at) < alertRepeatWindow && tierRank(h.candTier) >= candTier {
 			out := gateOutcome{
 				gate: "repeat_window",
@@ -219,7 +221,7 @@ func gateAndEnqueue(rec *alertRecord, entry map[string]any, reason string, tierI
 	if rec.tier == "critical" && demoteIfCritRecent != nil {
 		var lastCrit *alertRecord
 		for _, h := range alertHistory {
-			if h.lane == rec.lane && h.tier == "critical" && now.Sub(h.at) < alertCritCooldown {
+			if h.tenant == rec.tenant && h.lane == rec.lane && h.tier == "critical" && now.Sub(h.at) < alertCritCooldown {
 				if lastCrit == nil || h.at.After(lastCrit.at) {
 					lastCrit = h
 				}

@@ -127,7 +127,7 @@ func TestRepro132ClassRouteGetsErrorAndNoEvidence(t *testing.T) {
 				t.Fatalf("status %d: %s; want 500 naming the refusal", resp.StatusCode, b)
 			}
 			h.codexHitOrFail(t)
-			if m := hs.renderMetrics(); strings.Contains(m, `outcome="deg"`) {
+			if m := renderHealthMetrics(hs); strings.Contains(m, `outcome="deg"`) {
 				t.Fatalf("the refusal scored against the member:\n%s", m)
 			}
 
@@ -137,7 +137,7 @@ func TestRepro132ClassRouteGetsErrorAndNoEvidence(t *testing.T) {
 			_, _ = io.ReadAll(resp2.Body)
 			resp2.Body.Close()
 			h.codexHitOrFail(t)
-			if m := hs.renderMetrics(); !strings.Contains(m, `outcome="deg"`) {
+			if m := renderHealthMetrics(hs); !strings.Contains(m, `outcome="deg"`) {
 				t.Fatalf("control: a truncated stream wrote no deg sample, so the check above proves nothing:\n%s", m)
 			}
 		})

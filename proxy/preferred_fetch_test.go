@@ -7,18 +7,18 @@ import "net/http"
 // the brain's /events (brain_stream.go). Both go through applyPreferred, and a
 // failed read flips the view as a dropped stream does.
 func fetchPreferred() {
-	req, _ := http.NewRequest("GET", brainURL+"/preferred", nil)
+	req, _ := http.NewRequest("GET", lan.brainURL()+"/preferred", nil)
 	resp, err := brainClient.Do(req)
 	if err != nil {
-		brainFail("fetch", err)
+		lan.brainFail("fetch", err)
 		return
 	}
 	defer resp.Body.Close()
-	applyPreferred(resp.Body)
+	lan.applyPreferred(resp.Body)
 }
 
 // stopPrewarmTimers empties the warm set and stops every prewarm timer, so
 // none fires during a later test (prewarmWG's -race lesson, main.go).
 func stopPrewarmTimers() {
-	setWarmSet(map[string]bool{})
+	lan.setWarmSet(map[string]bool{})
 }

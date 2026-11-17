@@ -19,14 +19,14 @@ import (
 // resetAPIKeys empties the key cache and its states for one test.
 func resetAPIKeys(t *testing.T) {
 	t.Helper()
-	apiKeyMu.Lock()
-	oldKeys, oldStates := apiKeys, apiKeyStates
-	apiKeys, apiKeyStates = map[string]apiKeyEntry{}, map[string]string{}
-	apiKeyMu.Unlock()
+	lan.apiKeyMu.Lock()
+	oldKeys, oldStates := lan.apiKeys, lan.apiKeyStates
+	lan.apiKeys, lan.apiKeyStates = map[string]apiKeyEntry{}, map[string]string{}
+	lan.apiKeyMu.Unlock()
 	t.Cleanup(func() {
-		apiKeyMu.Lock()
-		apiKeys, apiKeyStates = oldKeys, oldStates
-		apiKeyMu.Unlock()
+		lan.apiKeyMu.Lock()
+		lan.apiKeys, lan.apiKeyStates = oldKeys, oldStates
+		lan.apiKeyMu.Unlock()
 	})
 }
 
@@ -42,7 +42,7 @@ func newAPIKeyBrain(t *testing.T, keys map[string]string) *apiKeyBrain {
 	t.Helper()
 	b := &apiKeyBrain{keys: keys}
 	b.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api-key" || r.Header.Get("X-Switch-Key") != "unit-key" {
+		if r.URL.Path != tpath("/api-key") || r.Header.Get("X-Switch-Key") != "unit-key" {
 			w.WriteHeader(401)
 			return
 		}
@@ -59,11 +59,11 @@ func newAPIKeyBrain(t *testing.T, keys map[string]string) *apiKeyBrain {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"account": acct, "api_key": k})
 	}))
-	oldBrain, oldKey, oldFresh := brainURL, switchKey, apiKeyFresh
-	brainURL, switchKey = b.srv.URL, "unit-key"
+	oldBrain, oldKey, oldFresh := brainBase, switchKey, apiKeyFresh
+	brainBase, switchKey = b.srv.URL, "unit-key"
 	t.Cleanup(func() {
 		b.srv.Close()
-		brainURL, switchKey, apiKeyFresh = oldBrain, oldKey, oldFresh
+		brainBase, switchKey, apiKeyFresh = oldBrain, oldKey, oldFresh
 	})
 	resetAPIKeys(t)
 	return b
@@ -83,7 +83,7 @@ func (b *apiKeyBrain) set(acct, key string) {
 func TestAPIKeyIsCachedAndARotationAdopted(t *testing.T) {
 	b := newAPIKeyBrain(t, map[string]string{"runway": "key-one"})
 	for i := 0; i < 3; i++ {
-		if k, err := getAPIKey(context.Background(), "runway"); err != nil || k != "key-one" {
+		if k, err := lan.getAPIKey(context.Background(), "runway"); err != nil || k != "key-one" {
 			t.Fatalf("key = %q %v", k, err)
 		}
 	}
@@ -92,7 +92,7 @@ func TestAPIKeyIsCachedAndARotationAdopted(t *testing.T) {
 	}
 	b.set("runway", "key-two")
 	apiKeyFresh = 0
-	if k, _ := getAPIKey(context.Background(), "runway"); k != "key-two" {
+	if k, _ := lan.getAPIKey(context.Background(), "runway"); k != "key-two" {
 		t.Fatalf("after the rotation key = %q", k)
 	}
 }
@@ -105,7 +105,7 @@ func TestAPIKeyMissingIsANamedStateLoggedOncePerChange(t *testing.T) {
 	logs := captureLog(t)
 	apiKeyFresh = 0
 	for i := 0; i < 3; i++ {
-		_, err := getAPIKey(context.Background(), "runway")
+		_, err := lan.getAPIKey(context.Background(), "runway")
 		if err == nil || !strings.Contains(err.Error(), "the brain has no key for api account 'runway'") {
 			t.Fatalf("err = %v", err)
 		}
@@ -113,18 +113,18 @@ func TestAPIKeyMissingIsANamedStateLoggedOncePerChange(t *testing.T) {
 	if n := strings.Count(logs.String(), "api key for runway: none"); n != 1 {
 		t.Fatalf("logged %d times, want once:\n%s", n, logs)
 	}
-	st := apiKeyStatus()
+	st := lan.apiKeyStatus()
 	if len(st) != 1 || st[0]["state"] != "missing" || !strings.Contains(st[0]["reason"].(string), "no key") {
 		t.Fatalf("status = %v", st)
 	}
 	b.set("runway", "key-placed")
-	if k, err := getAPIKey(context.Background(), "runway"); err != nil || k != "key-placed" {
+	if k, err := lan.getAPIKey(context.Background(), "runway"); err != nil || k != "key-placed" {
 		t.Fatalf("after the key was placed: %q %v", k, err)
 	}
 	if !strings.Contains(logs.String(), "api key for runway: dispensed") {
 		t.Fatalf("the change back was not logged:\n%s", logs)
 	}
-	st = apiKeyStatus()
+	st = lan.apiKeyStatus()
 	if st[0]["state"] != "ok" || st[0]["reason"] != nil {
 		t.Fatalf("status = %v", st)
 	}
@@ -137,12 +137,12 @@ func TestAPIKeyMissingIsANamedStateLoggedOncePerChange(t *testing.T) {
 // after the brain said it has none.
 func TestAPIKeyWithdrawnByTheBrainIsNotServedStale(t *testing.T) {
 	b := newAPIKeyBrain(t, map[string]string{"runway": "key-one"})
-	if _, err := getAPIKey(context.Background(), "runway"); err != nil {
+	if _, err := lan.getAPIKey(context.Background(), "runway"); err != nil {
 		t.Fatal(err)
 	}
 	b.set("runway", "")
 	apiKeyFresh = 0
-	if k, err := getAPIKey(context.Background(), "runway"); err == nil || k != "" {
+	if k, err := lan.getAPIKey(context.Background(), "runway"); err == nil || k != "" {
 		t.Fatalf("a withdrawn key was served: %q", k)
 	}
 }
@@ -151,19 +151,19 @@ func TestAPIKeyWithdrawnByTheBrainIsNotServedStale(t *testing.T) {
 // the state names the unreachable dispenser.
 func TestAPIKeyBrainUnreachable(t *testing.T) {
 	b := newAPIKeyBrain(t, map[string]string{"runway": "key-one"})
-	if _, err := getAPIKey(context.Background(), "runway"); err != nil {
+	if _, err := lan.getAPIKey(context.Background(), "runway"); err != nil {
 		t.Fatal(err)
 	}
 	b.srv.Close()
 	apiKeyFresh = 0
-	if k, err := getAPIKey(context.Background(), "runway"); err != nil || k != "key-one" {
+	if k, err := lan.getAPIKey(context.Background(), "runway"); err != nil || k != "key-one" {
 		t.Fatalf("stale: %q %v, want the cached key", k, err)
 	}
-	_, err := getAPIKey(context.Background(), "other")
+	_, err := lan.getAPIKey(context.Background(), "other")
 	if err == nil || !strings.Contains(err.Error(), "the brain's /api-key is unreachable and no key is cached") {
 		t.Fatalf("err = %v", err)
 	}
-	if st := apiKeyStatus(); len(st) != 2 || st[0]["account"] != "other" || st[0]["state"] != "missing" {
+	if st := lan.apiKeyStatus(); len(st) != 2 || st[0]["account"] != "other" || st[0]["state"] != "missing" {
 		t.Fatalf("status = %v", st)
 	}
 }
@@ -171,9 +171,9 @@ func TestAPIKeyBrainUnreachable(t *testing.T) {
 // dropAPIKey (Runway refused the key) makes the next call ask the brain.
 func TestAPIKeyDroppedIsFetchedAgain(t *testing.T) {
 	b := newAPIKeyBrain(t, map[string]string{"runway": "key-one"})
-	_, _ = getAPIKey(context.Background(), "runway")
-	dropAPIKey("runway")
-	_, _ = getAPIKey(context.Background(), "runway")
+	_, _ = lan.getAPIKey(context.Background(), "runway")
+	lan.dropAPIKey("runway")
+	_, _ = lan.getAPIKey(context.Background(), "runway")
 	if b.calls != 2 {
 		t.Fatalf("%d brain calls, want 2", b.calls)
 	}
@@ -200,22 +200,22 @@ func TestAPIKeyAskEndsWithItsCaller(t *testing.T) {
 		}
 	}))
 	t.Cleanup(func() { close(release); srv.Close() })
-	oldBrain, oldKey := brainURL, switchKey
-	brainURL, switchKey = srv.URL, "unit-key"
-	t.Cleanup(func() { brainURL, switchKey = oldBrain, oldKey })
+	oldBrain, oldKey := brainBase, switchKey
+	brainBase, switchKey = srv.URL, "unit-key"
+	t.Cleanup(func() { brainBase, switchKey = oldBrain, oldKey })
 	resetAPIKeys(t)
 	logs := captureLog(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	t0 := time.Now()
-	_, err := getAPIKey(ctx, "runway")
+	_, err := lan.getAPIKey(ctx, "runway")
 	if took := time.Since(t0); took > time.Second {
 		t.Fatalf("the ask took %s after its caller ended", took)
 	}
 	if err == nil || !strings.Contains(err.Error(), "cut short") {
 		t.Fatalf("err = %v", err)
 	}
-	if st := apiKeyStatus(); len(st) != 0 {
+	if st := lan.apiKeyStatus(); len(st) != 0 {
 		t.Fatalf("status = %v, want nothing from an ask cut short", st)
 	}
 	if strings.Contains(logs.String(), "api key for runway") {

@@ -59,7 +59,7 @@ func TestTripFirstEventUnsetIsPassthrough(t *testing.T) {
 	rt := &captureRT{}
 	req, _ := http.NewRequest("POST", "http://codex.invalid/backend-api/codex/responses", strings.NewReader("{}"))
 	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(strings.NewReader("{}")), nil }
-	cc := &classRoute{class: "vision-app", member: classMemberPref{ID: "gpt/gpt-6.1-sol"}}
+	cc := &classRoute{tenant: lan, class: "vision-app", member: classMemberPref{ID: "gpt/gpt-6.1-sol"}}
 	resp, err := (&failoverTransport{base: rt}).tripFirstEvent(req, reqInfo{classCtx: cc})
 	if err != nil || resp.StatusCode != 200 {
 		t.Fatalf("trip = %v, %v", resp, err)
@@ -77,10 +77,10 @@ func armFirstEvent(t *testing.T, m map[string]time.Duration) {
 }
 
 func firstEventSamples() int64 {
-	health.mu.Lock()
-	defer health.mu.Unlock()
+	lan.health.mu.Lock()
+	defer lan.health.mu.Unlock()
 	var n int64
-	for k, v := range health.samples {
+	for k, v := range lan.health.samples {
 		if k.cause == "first_event_timeout" {
 			n += v
 		}

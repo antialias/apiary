@@ -156,13 +156,13 @@ func TestE2ERouteBudgetClosesTheRouteThroughFetchPreferred(t *testing.T) {
 		"unit": "codex_credit", "period_spend": 60.0, "routes": map[string]any{gptRoute: 60.0}}})
 	h.brainMu.Unlock()
 	fetchPreferredSync()
-	pref.mu.RLock()
-	id := pref.routes[gptRoute].ID
-	pref.mu.RUnlock()
+	lan.pref.mu.RLock()
+	id := lan.pref.routes[gptRoute].ID
+	lan.pref.mu.RUnlock()
 	if id != gptRoute {
 		t.Fatalf("decoded route id %q, want %q", id, gptRoute)
 	}
-	if c, _ := routeCheck(gptRoute, "gpt", "", time.Now()); !c.no() || c.Reason != "budget" {
+	if c, _ := lan.routeCheck(gptRoute, "gpt", "", time.Now()); !c.no() || c.Reason != "budget" {
 		t.Fatalf("route budget 50 with 60 spent: %s, want no(budget)", c)
 	}
 	cc, _, _ := threeWires(t, h, "sess-route-budget")
@@ -337,21 +337,21 @@ func TestE2EClassFundingIsTheLastRequest(t *testing.T) {
 // A session's funding lives as long as its binding would at the brain
 // (SESSION_IDLE): /_switch/status does not grow with every session ever seen.
 func TestSessionFundingDropsSessionsIdlePastTheBindingLifetime(t *testing.T) {
-	oldF, oldNow := sessionFundings, nowFn
-	t.Cleanup(func() { sessionFundings, nowFn = oldF, oldNow })
-	sessionFundings = map[string]sessionFunding{}
+	oldF, oldNow := lan.sessionFundings, nowFn
+	t.Cleanup(func() { lan.sessionFundings, nowFn = oldF, oldNow })
+	lan.sessionFundings = map[string]sessionFunding{}
 	t0 := time.Now()
 	nowFn = func() time.Time { return t0 }
-	noteSessionFunding(&classRoute{classReq: classReq{inPath: "/v1/messages"}, class: "frontier", session: "old"}, sessionFunding{Tier: "included"})
+	lan.noteSessionFunding(&classRoute{tenant: lan, classReq: classReq{inPath: "/v1/messages"}, class: "frontier", session: "old"}, sessionFunding{Tier: "included"})
 	nowFn = func() time.Time { return t0.Add(fundingIdle) }
-	noteSessionFunding(&classRoute{classReq: classReq{inPath: "/v1/messages"}, class: "frontier", session: "mid"}, sessionFunding{Tier: "included"})
-	if len(sessionFundings) != 2 {
-		t.Fatalf("at exactly the lifetime: %v, want both kept", sessionFundings)
+	lan.noteSessionFunding(&classRoute{tenant: lan, classReq: classReq{inPath: "/v1/messages"}, class: "frontier", session: "mid"}, sessionFunding{Tier: "included"})
+	if len(lan.sessionFundings) != 2 {
+		t.Fatalf("at exactly the lifetime: %v, want both kept", lan.sessionFundings)
 	}
 	nowFn = func() time.Time { return t0.Add(fundingIdle + time.Second) }
-	noteSessionFunding(&classRoute{classReq: classReq{inPath: "/v1/messages"}, class: "frontier", session: "new"}, sessionFunding{Unavailable: true})
-	if _, ok := sessionFundings[bindKey("frontier", "old")]; ok || len(sessionFundings) != 2 {
-		t.Fatalf("past the lifetime: %v, want old dropped, mid and new kept", sessionFundings)
+	lan.noteSessionFunding(&classRoute{tenant: lan, classReq: classReq{inPath: "/v1/messages"}, class: "frontier", session: "new"}, sessionFunding{Unavailable: true})
+	if _, ok := lan.sessionFundings[bindKey("frontier", "old")]; ok || len(lan.sessionFundings) != 2 {
+		t.Fatalf("past the lifetime: %v, want old dropped, mid and new kept", lan.sessionFundings)
 	}
 }
 

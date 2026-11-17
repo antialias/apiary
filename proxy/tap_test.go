@@ -51,10 +51,10 @@ func tapTest(t *testing.T) {
 }
 
 func tapClear() {
-	tapMu.Lock()
-	tapConvs = map[string]*tapConv{}
-	tapAnchors = map[string]tapAnchor{}
-	tapMu.Unlock()
+	lan.tapMu.Lock()
+	lan.tapConvs = map[string]*tapConv{}
+	lan.tapAnchors = map[string]tapAnchor{}
+	lan.tapMu.Unlock()
 }
 
 // tapFrame is one captured turn: the decoded payload plus its raw JSON, because the
@@ -122,7 +122,7 @@ func tapPostCtx(ctx context.Context, session, body, model, tag string) {
 	if session != "" {
 		r.Header.Set("x-claude-code-session-id", session)
 	}
-	tapTurn(ctx, r, []byte(body), model, tag, "acct", "deadbeef")
+	lan.tapTurn(ctx, r, []byte(body), model, tag, "acct", "deadbeef")
 }
 
 func tapLaneCtx(lane string) context.Context {
@@ -481,7 +481,7 @@ const tapCreate = `{"type":"create"}`
 func tapTurnIdent(session, body string) tapRespIdent {
 	r := httptest.NewRequest("POST", "/v1/messages", nil)
 	r.Header.Set("x-claude-code-session-id", session)
-	return tapTurn(tapLaneCtx("default"), r, []byte(body), "claude-fable-1", " ROUTED [acct] lane=default", "acct", "deadbeef")
+	return lan.tapTurn(tapLaneCtx("default"), r, []byte(body), "claude-fable-1", " ROUTED [acct] lane=default", "acct", "deadbeef")
 }
 
 // tapReply runs the reply to id through the real response tap, its message_start
@@ -672,11 +672,11 @@ func TestTapThreadAnchorsAreBounded(t *testing.T) {
 	tapMaxAnchors = 8
 	id := tapTurnIdent("sess-B", tapThreadBody(tapCreate, tapUserMsg("hello")))
 	for i := 0; i < 50; i++ {
-		tapRememberReply(fmt.Sprintf("msg_%d", i), &id, time.Now())
+		lan.tapRememberReply(fmt.Sprintf("msg_%d", i), &id, time.Now())
 	}
-	tapMu.Lock()
-	n := len(tapAnchors)
-	tapMu.Unlock()
+	lan.tapMu.Lock()
+	n := len(lan.tapAnchors)
+	lan.tapMu.Unlock()
 	if n > tapMaxAnchors {
 		t.Fatalf("remembering %d replies with a cap of %d", n, tapMaxAnchors)
 	}
@@ -693,14 +693,14 @@ func TestTapColdPathNoAlloc(t *testing.T) {
 	r.Header.Set("x-claude-code-session-id", "sess-cold")
 
 	n := testing.AllocsPerRun(1000, func() {
-		tapTurn(ctx, r, body, "claude-fable-1", " ROUTED [acct] lane=default", "acct", "deadbeef")
+		lan.tapTurn(ctx, r, body, "claude-fable-1", " ROUTED [acct] lane=default", "acct", "deadbeef")
 	})
 	if n != 0 {
 		t.Fatalf("cold tap allocated %.1f times per request — the inference path must pay nothing when nobody is listening", n)
 	}
-	tapMu.Lock()
-	tracked := len(tapConvs)
-	tapMu.Unlock()
+	lan.tapMu.Lock()
+	tracked := len(lan.tapConvs)
+	lan.tapMu.Unlock()
 	if tracked != 0 {
 		t.Fatalf("cold tap recorded %d conversations — it must not even reach the cursor store", tracked)
 	}
@@ -716,7 +716,7 @@ func TestTapIgnoresCountTokensAndNonMessages(t *testing.T) {
 
 	for _, path := range []string{"/v1/messages/count_tokens", "/v1/models", "/v1/messages/", "/_switch/status"} {
 		r := httptest.NewRequest("POST", path, nil)
-		tapTurn(ctx, r, body, "m", "", "acct", "fp")
+		lan.tapTurn(ctx, r, body, "m", "", "acct", "fp")
 	}
 	if got := drain(); len(got) != 0 {
 		t.Fatalf("%d events from non-/v1/messages paths, want 0", len(got))
@@ -893,9 +893,9 @@ func TestTapConversationStoreIsBounded(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		tapPost(fmt.Sprintf("sess-%d", i), tapConvo(fmt.Sprintf("conversation %d", i), 1))
 	}
-	tapMu.Lock()
-	n := len(tapConvs)
-	tapMu.Unlock()
+	lan.tapMu.Lock()
+	n := len(lan.tapConvs)
+	lan.tapMu.Unlock()
 	if n > tapMaxConvs { // the sweep runs before the insert, so the cap is the steady state
 		t.Fatalf("tracking %d conversations with a cap of %d", n, tapMaxConvs)
 	}
@@ -907,15 +907,15 @@ func TestTapEvictionPrefersExpiredThenOldest(t *testing.T) {
 	tapConvTTL = time.Minute
 	now := time.Now()
 
-	tapMu.Lock()
-	tapConvs["stale"] = &tapConv{seen: now.Add(-2 * time.Hour)}
-	tapConvs["old"] = &tapConv{seen: now.Add(-30 * time.Second)}
-	tapConvs["fresh"] = &tapConv{seen: now}
-	tapEvictLocked(now)
-	_, hasStale := tapConvs["stale"]
-	_, hasOld := tapConvs["old"]
-	_, hasFresh := tapConvs["fresh"]
-	tapMu.Unlock()
+	lan.tapMu.Lock()
+	lan.tapConvs["stale"] = &tapConv{seen: now.Add(-2 * time.Hour)}
+	lan.tapConvs["old"] = &tapConv{seen: now.Add(-30 * time.Second)}
+	lan.tapConvs["fresh"] = &tapConv{seen: now}
+	lan.tapEvictLocked(now)
+	_, hasStale := lan.tapConvs["stale"]
+	_, hasOld := lan.tapConvs["old"]
+	_, hasFresh := lan.tapConvs["fresh"]
+	lan.tapMu.Unlock()
 
 	if hasStale {
 		t.Fatal("an expired conversation survived the sweep")
@@ -947,9 +947,9 @@ func TestTapConcurrentRequestsShareOneCursor(t *testing.T) {
 		<-done
 	}
 
-	tapMu.Lock()
-	shared := tapConvs["sess-shared\x00"+tapFP("you are a proxy", "hello")]
-	tapMu.Unlock()
+	lan.tapMu.Lock()
+	shared := lan.tapConvs["sess-shared\x00"+tapFP("you are a proxy", "hello")]
+	lan.tapMu.Unlock()
 	if shared == nil {
 		t.Fatal("the contended conversation was never recorded")
 	}
@@ -968,7 +968,7 @@ func TestTapCarriesTheRoutingDecision(t *testing.T) {
 
 	class := context.WithValue(context.Background(), infoKey, reqInfo{
 		lane: "class:frontier", eff: "opus-native@a@example.org", state: stateStale,
-		classCtx: &classRoute{class: "frontier", member: classMemberPref{ID: "opus-native", Model: "claude-opus-4-6"}},
+		classCtx: &classRoute{tenant: lan, class: "frontier", member: classMemberPref{ID: "opus-native", Model: "claude-opus-4-6"}},
 	})
 	tapPostCtx(class, "sess-class", tapConvo("hello", 1), "claude-frontier", " CLASS[frontier→opus-native] STALE")
 	ev := tapOnly(t, drain())
@@ -1029,7 +1029,7 @@ func TestTapFiveMegabyteBodyLatency(t *testing.T) {
 			r := httptest.NewRequest("POST", "/v1/messages", nil)
 			r.Header.Set("x-claude-code-session-id", fmt.Sprintf("sess-perf-%s-%d", tag, i))
 			start := time.Now()
-			tapTurn(ctx, r, body, "claude-fable-1", " ROUTED", "acct", "fp")
+			lan.tapTurn(ctx, r, body, "claude-fable-1", " ROUTED", "acct", "fp")
 			if d := time.Since(start); d < best {
 				best = d
 			}

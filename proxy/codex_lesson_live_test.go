@@ -22,13 +22,13 @@ import (
 // Explicit opt-in probe. Run in an isolated container with the proxy's existing
 // read-only key mount; it neither refreshes credentials nor changes routing.
 func TestLiveLessonToolContract(t *testing.T) {
-	brainURL = "http://192.0.2.10:9115"
+	brainBase = "http://192.0.2.10:9115"
 	key, err := os.ReadFile("/app/switch_key")
 	if err != nil {
 		t.Fatal(err)
 	}
 	switchKey = strings.TrimSpace(string(key))
-	tok, acct, _, ok := getCodexToken("")
+	tok, acct, _, ok := lan.getCodexToken("")
 	if !ok {
 		t.Fatal("brain did not supply a bearer")
 	}

@@ -316,7 +316,7 @@ func TestE2ERespTapKillSwitch(t *testing.T) {
 	}
 	// No response event may follow — bound the wait by publishing a sentinel we
 	// KNOW arrives after anything the (nonexistent) aggregator could have sent.
-	publish("resp_test_sentinel", map[string]any{})
+	publish("", "resp_test_sentinel", map[string]any{})
 	for {
 		p := evParseFrame(t, []byte(evNext(t, frames, 3*time.Second)))
 		if p.event == "resp_test_sentinel" {

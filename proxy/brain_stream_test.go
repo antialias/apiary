@@ -32,7 +32,7 @@ func streamBrainWith(t *testing.T, silence, backoffMin time.Duration, other http
 	t.Helper()
 	var conns atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/events" {
+		if r.URL.Path != tpath("/events") {
 			if other != nil {
 				other(w, r)
 				return
@@ -43,23 +43,23 @@ func streamBrainWith(t *testing.T, silence, backoffMin time.Duration, other http
 		events(w, r, int(conns.Add(1)))
 	}))
 	t.Cleanup(resetQuotaState())
-	oldBrain, oldPref := brainURL, pref
+	oldBrain, oldPref := brainBase, lan.pref
 	oldSilence, oldMin, oldMax := brainSilence, brainBackoffMin, brainBackoffMax
-	brainURL, pref = srv.URL, &decision{}
+	brainBase, lan.pref = srv.URL, &decision{}
 	brainSilence, brainBackoffMin, brainBackoffMax = silence, backoffMin, 4*backoffMin
 	classRowsMu.Lock()
 	oldRows, oldSource := classRowsSet, classRowsSource
 	classRowsMu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); runBrainStream(ctx) }()
+	go func() { defer close(done); lan.runBrainStream(ctx) }()
 	t.Cleanup(func() {
 		cancel()
 		<-done
 		srv.Close()
 		prewarmWG.Wait()
 		stopPrewarmTimers()
-		brainURL, pref = oldBrain, oldPref
+		brainBase, lan.pref = oldBrain, oldPref
 		brainSilence, brainBackoffMin, brainBackoffMax = oldSilence, oldMin, oldMax
 		classRowsMu.Lock()
 		classRowsSet, classRowsSource = oldRows, oldSource
@@ -88,9 +88,9 @@ func ssePreferred(t *testing.T, w http.ResponseWriter, seq int, doc map[string]a
 }
 
 func prefState() (ok bool, account string, heard time.Time) {
-	pref.mu.RLock()
-	defer pref.mu.RUnlock()
-	return pref.ok, pref.account, pref.heardAt
+	lan.pref.mu.RLock()
+	defer lan.pref.mu.RUnlock()
+	return lan.pref.ok, lan.pref.account, lan.pref.heardAt
 }
 
 // waitUntil polls cond (a test-side check, not a production wait) for up to 5 s.
@@ -126,9 +126,9 @@ func TestBrainStreamDecodesEachEvent(t *testing.T) {
 	waitUntil(t, "the first document", func() bool { ok, a, _ := prefState(); return ok && a == "first" })
 	close(second)
 	waitUntil(t, "the second document", func() bool { ok, a, _ := prefState(); return ok && a == "second" })
-	pref.mu.RLock()
-	routes, accounts, ledger := len(pref.routes), len(pref.accounts), pref.ledger
-	pref.mu.RUnlock()
+	lan.pref.mu.RLock()
+	routes, accounts, ledger := len(lan.pref.routes), len(lan.pref.accounts), lan.pref.ledger
+	lan.pref.mu.RUnlock()
 	if routes == 0 || accounts == 0 || ledger == nil {
 		t.Fatalf("the event's document was not decoded in full: routes=%d accounts=%d ledger=%v", routes, accounts, ledger)
 	}
@@ -191,11 +191,11 @@ func TestBrainStreamSilenceMakesViewStale(t *testing.T) {
 		t.Fatalf("stale after %s, want about brainSilence (%s)", el, silence)
 	}
 	waitUntil(t, "the proxy to close the silent stream", closedBySilence.Load)
-	problems := proxyProblems()
+	problems := lan.proxyProblems()
 	if len(problems) != 1 || !strings.Contains(problems[0], "cannot reach the brain") {
 		t.Fatalf("problems = %q, want the cannot-reach-the-brain problem", problems)
 	}
-	if _, known := routerDry(); known {
+	if _, known := lan.routerDry(); known {
 		t.Fatal("routerDry claims to know the fleet on a stale view")
 	}
 	waitUntil(t, "a reconnect", func() bool { return conns.Load() >= 2 })
@@ -357,10 +357,10 @@ func TestBrainStreamBadDocumentMarksNotOK(t *testing.T) {
 		t.Fatalf("account = %q, want the last good state kept", a)
 	}
 	// Unparseable JSON is a decode failure too.
-	pref.mu.Lock()
-	pref.ok = true
-	pref.mu.Unlock()
-	applyPreferred(strings.NewReader("{not json"))
+	lan.pref.mu.Lock()
+	lan.pref.ok = true
+	lan.pref.mu.Unlock()
+	lan.applyPreferred(strings.NewReader("{not json"))
 	if ok, a, _ := prefState(); ok || a != "good" {
 		t.Fatalf("after unparseable JSON: ok=%v account=%q, want not ok on the last good state", ok, a)
 	}
@@ -436,7 +436,7 @@ func TestBrainStreamReportPostDoesNotBlockReader(t *testing.T) {
 	var posts atomic.Int32
 	release := make(chan struct{})
 	streamBrainWith(t, silence, 10*time.Millisecond, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/reports" {
+		if r.URL.Path != tpath("/reports") {
 			http.NotFound(w, r)
 			return
 		}
@@ -449,10 +449,10 @@ func TestBrainStreamReportPostDoesNotBlockReader(t *testing.T) {
 	}, keepaliveEvents(t, silence/3))
 	t.Cleanup(func() { close(release) }) // runs before streamBrain's cleanup closes the server
 	// One entry the brain has not accepted, so the sender has work.
-	ledgerMu.Lock()
-	ledgerOwn = append(ledgerOwn, &ownEntry{e: ledgerEntry{ID: "proxy-hang", At: unixSeconds(time.Now())}})
-	ledgerMu.Unlock()
-	runReporterFor(t, brainURL, "k") // stopped first: its hung post is cancelled
+	lan.ledgerMu.Lock()
+	lan.ledgerOwn = append(lan.ledgerOwn, &ownEntry{e: ledgerEntry{ID: "proxy-hang", At: unixSeconds(time.Now())}})
+	lan.ledgerMu.Unlock()
+	runReporterFor(t, brainBase, "k") // stopped first: its hung post is cancelled
 	waitUntil(t, "the document and the report post", func() bool { ok, _, _ := prefState(); return ok && posts.Load() >= 1 })
 	end := time.Now().Add(4 * silence)
 	for time.Now().Before(end) {
@@ -473,7 +473,7 @@ func tokenBrain(t *testing.T, expires func(n int) time.Time) *atomic.Int32 {
 	t.Helper()
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/token" {
+		if r.URL.Path != tpath("/token") {
 			http.NotFound(w, r)
 			return
 		}
@@ -485,20 +485,20 @@ func tokenBrain(t *testing.T, expires func(n int) time.Time) *atomic.Int32 {
 		}
 		json.NewEncoder(w).Encode(map[string]any{"access_token": fmt.Sprintf("tok-%d", n), "expires_at": float64(exp.Unix())})
 	}))
-	oldBrain := brainURL
-	brainURL = srv.URL
-	tokMu.Lock()
-	oldTokens := tokens
-	tokens = map[string]tokEntry{}
-	tokMu.Unlock()
+	oldBrain := brainBase
+	brainBase = srv.URL
+	lan.tokMu.Lock()
+	oldTokens := lan.tokens
+	lan.tokens = map[string]tokEntry{}
+	lan.tokMu.Unlock()
 	t.Cleanup(func() {
 		stopPrewarmTimers()
 		prewarmWG.Wait()
 		srv.Close()
-		brainURL = oldBrain
-		tokMu.Lock()
-		tokens = oldTokens
-		tokMu.Unlock()
+		brainBase = oldBrain
+		lan.tokMu.Lock()
+		lan.tokens = oldTokens
+		lan.tokMu.Unlock()
 	})
 	return &hits
 }
@@ -512,16 +512,16 @@ func TestPrewarmRefreshesAtTheMargin(t *testing.T) {
 		}
 		return time.Now().Add(time.Hour)
 	})
-	setWarmSet(map[string]bool{"warm-acct": true})
-	if tok := getToken("warm-acct"); tok != "tok-1" {
+	lan.setWarmSet(map[string]bool{"warm-acct": true})
+	if tok := lan.getToken("warm-acct"); tok != "tok-1" {
 		t.Fatalf("first token %q", tok)
 	}
 	// The fake brain counts a fetch as its request arrives, before the proxy
 	// has cached the reply, so the wait is on the cache itself.
 	waitUntil(t, "the timer's refresh in the cache", func() bool {
-		tokMu.Lock()
-		defer tokMu.Unlock()
-		return tokens["warm-acct"].token == "tok-2"
+		lan.tokMu.Lock()
+		defer lan.tokMu.Unlock()
+		return lan.tokens["warm-acct"].token == "tok-2"
 	})
 	if n := hits.Load(); n != 2 {
 		t.Fatalf("token fetches = %d, want 2: the first and one refresh", n)
@@ -531,11 +531,11 @@ func TestPrewarmRefreshesAtTheMargin(t *testing.T) {
 // A token handed out already inside the margin arms nothing.
 func TestPrewarmInsideMarginArmsNothing(t *testing.T) {
 	tokenBrain(t, func(int) time.Time { return time.Now().Add(tokenRefreshMargin - time.Minute) })
-	setWarmSet(map[string]bool{"near-acct": true})
-	getToken("near-acct")
-	warmMu.Lock()
-	_, armed := warmTimers["near-acct"]
-	warmMu.Unlock()
+	lan.setWarmSet(map[string]bool{"near-acct": true})
+	lan.getToken("near-acct")
+	lan.warmMu.Lock()
+	_, armed := lan.warmTimers["near-acct"]
+	lan.warmMu.Unlock()
 	if armed {
 		t.Fatal("a timer was armed for a token already inside the margin")
 	}
@@ -545,21 +545,21 @@ func TestPrewarmInsideMarginArmsNothing(t *testing.T) {
 // never armed.
 func TestPrewarmTimerStopsWhenAccountLeaves(t *testing.T) {
 	tokenBrain(t, func(int) time.Time { return time.Now().Add(time.Hour) })
-	setWarmSet(map[string]bool{"lane-a": true, "lane-b": true})
-	getToken("lane-a")
-	getToken("lane-b")
-	getToken("not-routed")
-	warmMu.Lock()
-	ta, tb := warmTimers["lane-a"], warmTimers["lane-b"]
-	_, stray := warmTimers["not-routed"]
-	warmMu.Unlock()
+	lan.setWarmSet(map[string]bool{"lane-a": true, "lane-b": true})
+	lan.getToken("lane-a")
+	lan.getToken("lane-b")
+	lan.getToken("not-routed")
+	lan.warmMu.Lock()
+	ta, tb := lan.warmTimers["lane-a"], lan.warmTimers["lane-b"]
+	_, stray := lan.warmTimers["not-routed"]
+	lan.warmMu.Unlock()
 	if ta == nil || tb == nil || stray {
 		t.Fatalf("timers: lane-a=%v lane-b=%v not-routed=%v, want the two routed accounts only", ta != nil, tb != nil, stray)
 	}
-	setWarmSet(map[string]bool{"lane-b": true})
-	warmMu.Lock()
-	_, still := warmTimers["lane-a"]
-	warmMu.Unlock()
+	lan.setWarmSet(map[string]bool{"lane-b": true})
+	lan.warmMu.Lock()
+	_, still := lan.warmTimers["lane-a"]
+	lan.warmMu.Unlock()
 	if still || ta.Stop() {
 		t.Fatal("lane-a left the warm set but its timer is still live")
 	}
@@ -573,20 +573,20 @@ func TestPrewarmTimerStopsWhenAccountLeaves(t *testing.T) {
 // cache hit (the per-document prewarm) arms nothing.
 func TestPrewarmTimerRearmsWhenAccountRejoins(t *testing.T) {
 	hits := tokenBrain(t, func(int) time.Time { return time.Now().Add(time.Hour) })
-	setWarmSet(map[string]bool{"lane-a": true})
-	getToken("lane-a")
-	setWarmSet(map[string]bool{})
-	warmMu.Lock()
-	_, kept := warmTimers["lane-a"]
-	warmMu.Unlock()
+	lan.setWarmSet(map[string]bool{"lane-a": true})
+	lan.getToken("lane-a")
+	lan.setWarmSet(map[string]bool{})
+	lan.warmMu.Lock()
+	_, kept := lan.warmTimers["lane-a"]
+	lan.warmMu.Unlock()
 	if kept {
 		t.Fatal("lane-a left the warm set but kept its timer")
 	}
-	setWarmSet(map[string]bool{"lane-a": true})
-	getToken("lane-a")
-	warmMu.Lock()
-	back := warmTimers["lane-a"]
-	warmMu.Unlock()
+	lan.setWarmSet(map[string]bool{"lane-a": true})
+	lan.getToken("lane-a")
+	lan.warmMu.Lock()
+	back := lan.warmTimers["lane-a"]
+	lan.warmMu.Unlock()
 	if back == nil {
 		t.Fatal("lane-a rejoined with a fresh cached token but has no prewarm timer")
 	}
@@ -643,21 +643,21 @@ func TestPrewarmRetriesAFailedRefresh(t *testing.T) {
 		}
 		return time.Now().Add(time.Hour)
 	})
-	setWarmSet(map[string]bool{"warm-acct": true})
-	if tok := getToken("warm-acct"); tok != "tok-1" {
+	lan.setWarmSet(map[string]bool{"warm-acct": true})
+	if tok := lan.getToken("warm-acct"); tok != "tok-1" {
 		t.Fatalf("first token %q", tok)
 	}
 	waitUntil(t, "the retried refresh in the cache", func() bool {
-		tokMu.Lock()
-		defer tokMu.Unlock()
-		return tokens["warm-acct"].token == "tok-4"
+		lan.tokMu.Lock()
+		defer lan.tokMu.Unlock()
+		return lan.tokens["warm-acct"].token == "tok-4"
 	})
 	if n := hits.Load(); n != 4 {
 		t.Fatalf("token fetches = %d, want 4: the first, a failed refresh, a failed retry, a good retry", n)
 	}
-	warmMu.Lock()
-	_, armed := warmTimers["warm-acct"]
-	warmMu.Unlock()
+	lan.warmMu.Lock()
+	_, armed := lan.warmTimers["warm-acct"]
+	lan.warmMu.Unlock()
 	if !armed {
 		t.Fatal("no timer armed from the retried token")
 	}
@@ -673,17 +673,17 @@ func TestPrewarmRetryStopsWhenAccountLeaves(t *testing.T) {
 		}
 		return time.Time{}
 	})
-	setWarmSet(map[string]bool{"lane-a": true})
-	getToken("lane-a")
+	lan.setWarmSet(map[string]bool{"lane-a": true})
+	lan.getToken("lane-a")
 	waitUntil(t, "a retry armed after the failed refresh", func() bool {
-		warmMu.Lock()
-		defer warmMu.Unlock()
-		return hits.Load() == 2 && warmTimers["lane-a"] != nil
+		lan.warmMu.Lock()
+		defer lan.warmMu.Unlock()
+		return hits.Load() == 2 && lan.warmTimers["lane-a"] != nil
 	})
-	warmMu.Lock()
-	retry := warmTimers["lane-a"]
-	warmMu.Unlock()
-	setWarmSet(map[string]bool{})
+	lan.warmMu.Lock()
+	retry := lan.warmTimers["lane-a"]
+	lan.warmMu.Unlock()
+	lan.setWarmSet(map[string]bool{})
 	if retry.Stop() {
 		t.Fatal("lane-a left the warm set but its retry timer is still live")
 	}

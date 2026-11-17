@@ -8,8 +8,9 @@ The 8h access token is refreshed on demand; the refresh token ROTATES on every
 refresh, so the new one is persisted back to the creds file immediately. A
 `claude setup-token` credential is inference-only and 403s on /usage.
 
-Credentials file (CLAUDE_ACCOUNTS_FILE, default /creds/accounts.json), never
-committed, mounted RW so rotated refresh tokens persist across restarts:
+Credentials file, each tenant's own (accounts.json in the tenant's dir, read
+and written through the core's sealed store), never committed, mounted RW so
+rotated refresh tokens persist across restarts:
     [{"name": "user@example.com", "refresh_token": "..."}]
 `name` is the STABLE Prometheus `account` label; it is NOT re-derived from the
 API, so a transient failure can't churn the label.
@@ -42,7 +43,7 @@ import claude_usage_exporter as core
 from providers import register, register_route
 
 
-ACCOUNTS_FILE = os.environ.get("CLAUDE_ACCOUNTS_FILE", "/creds/accounts.json")
+ACCOUNTS_FILE = "accounts.json"  # in each tenant's dir
 CC_VERSION = os.environ.get("CLAUDE_CODE_VERSION", "2.1.207")
 API = "https://api.anthropic.com"
 TOKEN_URL = "https://api.anthropic.com/v1/oauth/token"
@@ -50,11 +51,47 @@ CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 REFRESH_MARGIN = 120  # refresh this many seconds before the access token expires
 
 
-# name -> live credential dict {refresh_token, access_token, expires_at}.
-_creds = {}
-# Incremented whenever re-authorization replaces an account's credential. A poll
-# that started on an older generation must not publish its now-obsolete result.
-_cred_generation = {}
+class _Store:
+    """One tenant's Anthropic accounts (tenant.stores["anthropic"], _st):
+    nothing of them is held at module level."""
+
+    def __init__(self, t):
+        self.file = t.path(ACCOUNTS_FILE)
+        # name -> live credential dict {refresh_token, access_token, expires_at}.
+        self.creds = {}
+        # Incremented whenever re-authorization replaces an account's credential. A poll
+        # that started on an older generation must not publish its now-obsolete result.
+        self.cred_generation = {}
+        # Each account's last access-token refresh, for the accounts page:
+        # name -> {at, why, old_left_s, fp}. old_left_s is what the replaced token had
+        # left (None when there was none). Written by _refresh under the tenant's
+        # refresh_lock; in memory only.
+        self.last_refresh = {}
+        # The switch proxy's last report that Anthropic refused its copy of an
+        # account's access token (GET /token?refused_fp=): name -> {at, fp,
+        # matched_current}, matched_current saying the refused copy was the brain's
+        # current token rather than a stale one. For the accounts page; in memory only.
+        # forced_refresh_at is when a refusal last made the brain refresh the account
+        # (FORCED_REFRESH_MIN_S apart at most). Both are guarded by
+        # proxy_refusals_lock, a leaf lock: refresh_lock is held across network calls.
+        self.proxy_refusals = {}
+        self.forced_refresh_at = {}
+        self.proxy_refusals_lock = threading.Lock()
+
+
+def _st(t):
+    """The tenant's store, made at its first use."""
+    return t.store_for("anthropic", _Store)
+
+
+def _read_file(t):
+    """The creds file's list, [] without one; raises on an unreadable one."""
+    arr = core._store.read_json(_st(t).file)
+    return arr if isinstance(arr, list) else []
+
+
+def _write_file(t, arr):
+    core._store.write_json(_st(t).file, arr)
 
 
 def _hdr(extra=None):
@@ -78,18 +115,15 @@ def _get(path, token):
 _GRANT_FACTS = ("scopes", "subscription_type")
 
 
-def _persist_creds():
+def _persist_creds(t):
     """Write current refresh/access tokens back to the creds file (atomic)."""
     try:
-        with core._refresh_lock:
+        with t.refresh_lock:
             arr = [{"name": n, "refresh_token": c.get("refresh_token"),
                     "access_token": c.get("access_token"), "expires_at": c.get("expires_at"),
                     **{k: c[k] for k in _GRANT_FACTS if c.get(k)}}
-                   for n, c in _creds.items()]
-            tmp = ACCOUNTS_FILE + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(arr, f)
-            os.replace(tmp, ACCOUNTS_FILE)
+                   for n, c in _st(t).creds.items()]
+            _write_file(t, arr)
     except Exception as e:  # noqa: BLE001
         core.log(f"WARN could not persist rotated tokens: {e}")
 
@@ -104,40 +138,35 @@ def _token_fp(token):
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
 
 
-# Each Anthropic account's last access-token refresh, for the accounts page:
-# name -> {at, why, old_left_s, fp}. old_left_s is what the replaced token had
-# left (None when there was none). Written by _refresh under _refresh_lock; in
-# memory only.
-_last_refresh = {}
 
 
-def _refresh(name, why="poll"):
+def _refresh(t, name, why="poll"):
     """Refresh the access token for `name`. Persists the rotated refresh token.
 
     A refresh makes Anthropic revoke the previous access token, so every copy
     dispensed before it (the proxy's, a cloud session's) dies with it: each one
     is logged with `why` (who asked), what the old token had left and the new
     one's fingerprint."""
-    c = _creds[name]
+    c = _st(t).creds[name]
     old_tok, old_exp = c.get("access_token"), c.get("expires_at") or 0
     body = json.dumps({"grant_type": "refresh_token",
                        "refresh_token": c["refresh_token"], "client_id": CLIENT_ID}).encode()
     req = urllib.request.Request(TOKEN_URL, data=body, method="POST",
                                  headers=_hdr({"Content-Type": "application/json"}))
     with core.urlopen(req, timeout=20) as resp:
-        t = json.loads(resp.read().decode("utf-8"))
+        grant = json.loads(resp.read().decode("utf-8"))
     now = time.time()
-    c["access_token"] = t["access_token"]
-    c["expires_at"] = now + int(t.get("expires_in", 28800))
-    if t.get("refresh_token"):
-        c["refresh_token"] = t["refresh_token"]  # rotates every refresh
-    scopes = _scope_list(t.get("scope"))
+    c["access_token"] = grant["access_token"]
+    c["expires_at"] = now + int(grant.get("expires_in", 28800))
+    if grant.get("refresh_token"):
+        c["refresh_token"] = grant["refresh_token"]  # rotates every refresh
+    scopes = _scope_list(grant.get("scope"))
     if scopes:
         c["scopes"] = scopes  # what the grant carries now; a refresh keeps the granted set
-    _persist_creds()
+    _persist_creds(t)
     old_left = max(0.0, old_exp - now) if old_tok else None
     fp = _token_fp(c["access_token"])
-    _last_refresh[name] = {"at": now, "why": why,
+    _st(t).last_refresh[name] = {"at": now, "why": why,
                            "old_left_s": None if old_left is None else round(old_left), "fp": fp}
     core.log(f"{name}: token refreshed ({why}) — old had {round((old_left or 0) / 60)}m left, "
         f"new expires {time.strftime('%H:%M', time.localtime(c['expires_at']))}, fp {fp}")
@@ -151,33 +180,23 @@ def _scope_list(scope):
     return sorted(set(scope.split())) or None
 
 
-def _ensure_token(name, margin=None, why="poll"):
+def _ensure_token(t, name, margin=None, why="poll"):
     """The account's access token, refreshed first when it has less than `margin`
     seconds left (default REFRESH_MARGIN). The proxy's /token uses the default;
     a caller that hands the token on asks for more, so what it starts never
     starts on a token about to die. `why` names the caller in the refresh's log line."""
     margin = REFRESH_MARGIN if margin is None else margin
-    with core._refresh_lock:
-        c = _creds[name]
+    with t.refresh_lock:
+        c = _st(t).creds[name]
         if not c.get("access_token") or time.time() >= (c.get("expires_at", 0) - margin):
-            return _refresh(name, why=why)
+            return _refresh(t, name, why=why)
         return c["access_token"]
 
 
-# The switch proxy's last report that Anthropic refused its copy of an
-# account's access token (GET /token?refused_fp=): name -> {at, fp,
-# matched_current}, matched_current saying the refused copy was the brain's
-# current token rather than a stale one. For the accounts page; in memory only.
-# _forced_refresh_at is when a refusal last made the brain refresh the account
-# (FORCED_REFRESH_MIN_S apart at most). Both are guarded by
-# _proxy_refusals_lock, a leaf lock: _refresh_lock is held across network calls.
-_proxy_refusals = {}
-_forced_refresh_at = {}
-_proxy_refusals_lock = threading.Lock()
 FORCED_REFRESH_MIN_S = 60
 
 
-def _proxy_refused(name, refused_fp):
+def _proxy_refused(t, name, refused_fp):
     """GET /token?refused_fp=: Anthropic answered 401 to the proxy's copy of
     `name`'s access token, the one with that fingerprint. Records the refusal,
     logs one line, and returns the token to dispense.
@@ -188,17 +207,17 @@ def _proxy_refused(name, refused_fp):
     that also answers 401, at most once a minute: a blind refresh would revoke
     every copy the cloud sessions hold. Either way the quota poll is woken, so
     a dead grant shows as auth_dead through the poll's own path."""
-    with core._refresh_lock:
-        current = (_creds.get(name) or {}).get("access_token")
+    with t.refresh_lock:
+        current = (_st(t).creds.get(name) or {}).get("access_token")
     current_fp = _token_fp(current)
     matched = bool(current) and refused_fp == current_fp
     now = time.time()
-    with _proxy_refusals_lock:
-        _proxy_refusals[name] = {"at": now, "fp": refused_fp, "matched_current": matched}
+    with _st(t).proxy_refusals_lock:
+        _st(t).proxy_refusals[name] = {"at": now, "fp": refused_fp, "matched_current": matched}
     head = f"{name}: proxy refused fp {refused_fp}"
     if not matched:
         core.log(f"{head} — a stale copy; dispensing the current token, fp {current_fp}")
-        return _ensure_token(name, why="token")
+        return _ensure_token(t, name, why="token")
     try:
         _get("/api/oauth/usage", current)
         checked = "HTTP 200"
@@ -208,11 +227,11 @@ def _proxy_refused(name, refused_fp):
         checked = type(e).__name__
     refresh = False
     if checked == "HTTP 401":
-        with _proxy_refusals_lock:
-            last = _forced_refresh_at.get(name)
+        with _st(t).proxy_refusals_lock:
+            last = _st(t).forced_refresh_at.get(name)
             refresh = last is None or now - last >= FORCED_REFRESH_MIN_S
             if refresh:
-                _forced_refresh_at[name] = now
+                _st(t).forced_refresh_at[name] = now
         outcome = ("refreshing" if refresh
                    else f"refreshed {round(now - last)}s ago, not again yet")
     else:
@@ -220,17 +239,17 @@ def _proxy_refused(name, refused_fp):
     core.log(f"{head} — the current token; usage check {checked}: {outcome}")
     try:
         if refresh:
-            with core._refresh_lock:
-                if (_creds.get(name) or {}).get("access_token") == current:
-                    _refresh(name, why="forced: proxy refused")
-        return _ensure_token(name, why="token")
+            with t.refresh_lock:
+                if (_st(t).creds.get(name) or {}).get("access_token") == current:
+                    _refresh(t, name, why="forced: proxy refused")
+        return _ensure_token(t, name, why="token")
     finally:
-        with core._poll_health_lock:
-            core._poll_schedule.pop(name, None)  # due at once
+        with t.poll_health_lock:
+            t.poll_schedule.pop(name, None)  # due at once
         core._poll_wakeup.set()
 
 
-def poll_account(name, known_meta=None):
+def poll_account(t, name, known_meta=None):
     """Return one Anthropic account's poll result (never raises); its reading
     is the §1.5 normalized reading (_anthropic_reading), None on a failure.
 
@@ -242,7 +261,7 @@ def poll_account(name, known_meta=None):
            "email": name, "tier": "", "reading": None, "http": 0, "err": "",
            "retry_after": None}
     try:
-        token = _ensure_token(name, why="poll")
+        token = _ensure_token(t, name, why="poll")
     except urllib.error.HTTPError as e:
         out["http"] = e.code
         out["err"] = f"refresh HTTP {e.code} (account authorization rejected)"
@@ -276,14 +295,13 @@ def poll_account(name, known_meta=None):
     return out
 
 
-def _load_creds():
+def _load_creds(t):
     """(Re)load the creds file into _creds, preserving live cached tokens."""
-    with core._refresh_lock:
+    with t.refresh_lock:
         try:
-            with open(ACCOUNTS_FILE) as f:
-                arr = json.load(f)
+            arr = _read_file(t)
         except Exception as e:  # noqa: BLE001
-            core.log(f"cannot read {ACCOUNTS_FILE}: {e}")
+            core.log(f"cannot read {_st(t).file}: {e}")
             return []
         names = []
         for a in arr:
@@ -292,26 +310,26 @@ def _load_creds():
                 continue
             names.append(n)
             facts = {k: a[k] for k in _GRANT_FACTS if a.get(k)}
-            if n not in _creds:
-                _creds[n] = {"refresh_token": a["refresh_token"],
+            if n not in _st(t).creds:
+                _st(t).creds[n] = {"refresh_token": a["refresh_token"],
                              "access_token": a.get("access_token"),
                              "expires_at": a.get("expires_at", 0), **facts}
-            elif (a["refresh_token"] != _creds[n]["refresh_token"]
-                  and not _creds[n].get("access_token")):
+            elif (a["refresh_token"] != _st(t).creds[n]["refresh_token"]
+                  and not _st(t).creds[n].get("access_token")):
                 # external update before we ever refreshed — adopt it, and what
                 # it says about its own grant (none of the old one's facts)
-                _creds[n]["refresh_token"] = a["refresh_token"]
+                _st(t).creds[n]["refresh_token"] = a["refresh_token"]
                 for k in _GRANT_FACTS:
-                    _creds[n].pop(k, None)
-                _creds[n].update(facts)
+                    _st(t).creds[n].pop(k, None)
+                _st(t).creds[n].update(facts)
         # Prune accounts no longer in the file (e.g. renamed): otherwise
         # _persist_creds writes them back as orphan duplicates that share a rotating
         # refresh token with the live entry and 401 each other. Only prune after a
         # successful, non-empty read.
         if names:
-            for stale in set(_creds) - set(names):
-                _creds.pop(stale, None)
-                _cred_generation.pop(stale, None)
+            for stale in set(_st(t).creds) - set(names):
+                _st(t).creds.pop(stale, None)
+                _st(t).cred_generation.pop(stale, None)
         return names
 
 
@@ -368,13 +386,13 @@ def _verify_profile(access_token):
     return _profile_facts(access_token)[0]
 
 
-def _reauth_begin(account, mode="reauth"):
+def _reauth_begin(t, account, mode="reauth"):
     """Mint a PKCE authorize URL for `account`. Returns (url, state). The
     default mode keeps the frozen /reauth semantics; mode="add" (account=None)
     is the #72 enrollment path — identity is decided at complete time by the
     VERIFIED profile email, never by operator input."""
     verifier = core._b64url(secrets.token_bytes(32))
-    state = core._auth_grant_mint("anthropic", mode, account=account, verifier=verifier)
+    state = core._auth_grant_mint(t, "anthropic", mode, account=account, verifier=verifier)
     params = {"code": "true", "client_id": CLIENT_ID, "response_type": "code",
               "redirect_uri": OAUTH_REDIRECT, "scope": OAUTH_SCOPE,
               "code_challenge": core._b64url(hashlib.sha256(verifier.encode()).digest()),
@@ -382,16 +400,16 @@ def _reauth_begin(account, mode="reauth"):
     return OAUTH_AUTHORIZE + "?" + urllib.parse.urlencode(params), state
 
 
-def _reauth_exchange(state, code):
+def _reauth_exchange(t, state, code):
     """The frozen /reauth/complete core: take the grant, exchange, persist.
     Returns the verified email. (New callers use the /auth surface, which takes
     the grant itself and calls _reauth_exchange_grant directly.)"""
-    grant = core._auth_grant_take(state, "anthropic")
-    email, _ = _reauth_exchange_grant(grant, code)
+    grant = core._auth_grant_take(t, state, "anthropic")
+    email, _ = _reauth_exchange_grant(t, grant, code)
     return email
 
 
-def _reauth_exchange_grant(grant, code):
+def _reauth_exchange_grant(t, grant, code):
     """Exchange the code against a consumed grant, verify the grant can reach the
     usage endpoints, and persist the refresh token keyed by the VERIFIED email —
     replace when configured, append when unknown AND the grant was minted as an
@@ -415,16 +433,16 @@ def _reauth_exchange_grant(grant, code):
     if not email:
         raise ValueError("grant lacks user:profile (403 on profile) — cannot poll usage")
     facts = {"scopes": _scope_list(tok.get("scope")), "subscription_type": subscription_type}
-    enrolled = _persist_anthropic_grant(email, rt, grant.get("mode", "reauth"),
+    enrolled = _persist_anthropic_grant(t, email, rt, grant.get("mode", "reauth"),
                                         {k: v for k, v in facts.items() if v})
-    with core._poll_health_lock:
-        core._poll_fails.pop(email, None)
-        core._poll_schedule.pop(email, None)  # due immediately
+    with t.poll_health_lock:
+        t.poll_fails.pop(email, None)
+        t.poll_schedule.pop(email, None)  # due immediately
     core._poll_wakeup.set()
     return email, enrolled
 
 
-def _persist_anthropic_grant(email, rt, mode, facts=None):
+def _persist_anthropic_grant(t, email, rt, mode, facts=None):
     """Route a verified grant to the right persistence. A configured email is
     always a REPLACE (safe re-auth, even mid-enrollment — approving as an
     existing account must repair that account, not duplicate it). An unknown
@@ -432,36 +450,34 @@ def _persist_anthropic_grant(email, rt, mode, facts=None):
     grant keeps _splice_refresh_token's refusal, so /reauth never adds.
     `facts` is the grant's _GRANT_FACTS (scopes, subscription_type) as far as
     the exchange knew them. Returns True when a new account was enrolled."""
-    if mode == "add" and email not in _configured_account_names():
-        _append_account(email, rt, facts)
+    if mode == "add" and email not in _configured_account_names(t):
+        _append_account(t, email, rt, facts)
         return True
-    _splice_refresh_token(email, rt, facts)
+    _splice_refresh_token(t, email, rt, facts)
     return False
 
 
-def _configured_account_names():
+def _configured_account_names(t):
     """Account names currently in accounts.json (fallback: the live cache when
     the file is unreadable — _append_account will then surface the real error)."""
-    with core._refresh_lock:
+    with t.refresh_lock:
         try:
-            with open(ACCOUNTS_FILE) as f:
-                return {a.get("name") for a in json.load(f) if isinstance(a, dict)}
+            return {a.get("name") for a in _read_file(t) if isinstance(a, dict)}
         except Exception:  # noqa: BLE001
-            return set(_creds)
+            return set(_st(t).creds)
 
 
-def _splice_refresh_token(email, refresh_token, facts=None):
+def _splice_refresh_token(t, email, refresh_token, facts=None):
     """Replace one configured account's persisted AND live credential atomically.
 
     Never adds an account or touches another entry. The shared refresh lock prevents
     an in-flight token rotation from writing the dead chain back after reauth.
     """
-    with core._refresh_lock:
+    with t.refresh_lock:
         try:
-            with open(ACCOUNTS_FILE) as f:
-                arr = json.load(f)
+            arr = _read_file(t)
         except Exception as e:  # noqa: BLE001
-            raise ValueError(f"cannot read {ACCOUNTS_FILE}: {e}") from e
+            raise ValueError(f"cannot read {_st(t).file}: {e}") from e
         facts = dict(facts or {})
         hit = False
         for a in arr:
@@ -475,62 +491,45 @@ def _splice_refresh_token(email, refresh_token, facts=None):
                 hit = True
         if not hit:
             raise ValueError(f"{email} is not a configured account — refusing to add it")
-        tmp = ACCOUNTS_FILE + ".tmp"
         try:
-            with open(tmp, "w") as f:
-                json.dump(arr, f)
-            os.replace(tmp, ACCOUNTS_FILE)
+            _write_file(t, arr)
         except Exception as e:  # noqa: BLE001
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise ValueError(f"cannot update {ACCOUNTS_FILE}: {e}") from e
-        _creds[email] = {"refresh_token": refresh_token,
+            raise ValueError(f"cannot update {_st(t).file}: {e}") from e
+        _st(t).creds[email] = {"refresh_token": refresh_token,
                          "access_token": None, "expires_at": 0, **facts}
-        _cred_generation[email] = _cred_generation.get(email, 0) + 1
+        _st(t).cred_generation[email] = _st(t).cred_generation.get(email, 0) + 1
 
 
-def _append_account(email, refresh_token, facts=None):
+def _append_account(t, email, refresh_token, facts=None):
     """Enroll a NEW Anthropic account (#72): append to accounts.json and the live
     cache atomically. Identity is the VERIFIED profile email — approving as the
     wrong account enrolls that account, visibly, rather than corrupting an
     existing entry. Only add-mode grants reach here (_persist_anthropic_grant);
     the never-add rule survives as reauth-mode policy."""
-    with core._refresh_lock:
+    with t.refresh_lock:
         try:
-            with open(ACCOUNTS_FILE) as f:
-                arr = json.load(f)
-        except FileNotFoundError:
-            arr = []  # first enrollment may legitimately create the file
+            arr = _read_file(t)  # a first enrollment may legitimately create the file
         except Exception as e:  # noqa: BLE001
-            raise ValueError(f"cannot read {ACCOUNTS_FILE}: {e}") from e
+            raise ValueError(f"cannot read {_st(t).file}: {e}") from e
         if any(a.get("name") == email for a in arr if isinstance(a, dict)):
             raise ValueError(f"{email} is already configured — re-authorize it instead")
-        if email in core.PROVIDERS or email in core._provider_poll_targets():
+        if email in core.PROVIDERS or email in core._provider_poll_targets(t):
             # _state is one flat namespace keyed by target name (#71); a
             # colliding name would fuse two targets' poll bookkeeping.
             raise ValueError(f"{email!r} collides with a provider target name")
         facts = dict(facts or {})
         arr.append({"name": email, "refresh_token": refresh_token, **facts})
-        tmp = ACCOUNTS_FILE + ".tmp"
         try:
-            with open(tmp, "w") as f:
-                json.dump(arr, f)
-            os.replace(tmp, ACCOUNTS_FILE)
+            _write_file(t, arr)
         except Exception as e:  # noqa: BLE001
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise ValueError(f"cannot update {ACCOUNTS_FILE}: {e}") from e
-        _creds[email] = {"refresh_token": refresh_token,
+            raise ValueError(f"cannot update {_st(t).file}: {e}") from e
+        _st(t).creds[email] = {"refresh_token": refresh_token,
                         "access_token": None, "expires_at": 0, **facts}
-        _cred_generation[email] = _cred_generation.get(email, 0) + 1
+        _st(t).cred_generation[email] = _st(t).cred_generation.get(email, 0) + 1
     core.log(f"enrolled new anthropic account {email}")
 
 
-def _anthropic_auth_status(now):
+def _anthropic_auth_status(t, now):
     """One row per configured account: _account_health verbatim plus the
     (secret-free) cached-token expiry, and whatever an annotator adds
     (_status_annotators).
@@ -540,35 +539,35 @@ def _anthropic_auth_status(now):
     report that Anthropic refused its copy of the token, or None; `served_at`,
     the last served request's head_at, or None (a refusal after it means the
     proxy is still being refused); `last_refresh` {at, why}, or None."""
-    with core._refresh_lock:
-        names = list(_creds)
-        exp = {n: (_creds.get(n) or {}).get("expires_at") for n in names}
-        scopes = {n: (_creds.get(n) or {}).get("scopes") for n in names}
-        refreshed = {n: {"at": r["at"], "why": r["why"]} for n, r in _last_refresh.items()}
-    with _proxy_refusals_lock:
-        refusals = {n: dict(r) for n, r in _proxy_refusals.items()}
-    with core._served_lock:
-        served_at = dict(core._served["head_at"])
-    accounts = core._account_health(names, now)["accounts"]
+    with t.refresh_lock:
+        names = list(_st(t).creds)
+        exp = {n: (_st(t).creds.get(n) or {}).get("expires_at") for n in names}
+        scopes = {n: (_st(t).creds.get(n) or {}).get("scopes") for n in names}
+        refreshed = {n: {"at": r["at"], "why": r["why"]} for n, r in _st(t).last_refresh.items()}
+    with _st(t).proxy_refusals_lock:
+        refusals = {n: dict(r) for n, r in _st(t).proxy_refusals.items()}
+    with t.served_lock:
+        served_at = dict(t.served["head_at"])
+    accounts = core._account_health(t, names, now)["accounts"]
     for a in accounts:
         a["token_expires_at"] = exp.get(a["name"]) or None
         a["proxy_refusal"] = refusals.get(a["name"])
         a["served_at"] = served_at.get(a["name"])
         a["last_refresh"] = refreshed.get(a["name"])
     for annotate in _status_annotators:
-        annotate(accounts, scopes)
+        annotate(t, accounts, scopes)
     return accounts
 
 
-def _anthropic_auth_begin(account=None):
-    return _reauth_begin(account, mode="reauth" if account else "add")
+def _anthropic_auth_begin(t, account=None):
+    return _reauth_begin(t, account, mode="reauth" if account else "add")
 
 
-def _anthropic_auth_complete(grant, fields):
+def _anthropic_auth_complete(t, grant, fields):
     code = str(fields.get("code") or "").split("#")[0].split("&")[0].strip()
     if not code:
         raise ValueError("code is required — paste the code shown after approving")
-    email, enrolled = _reauth_exchange_grant(grant, code)
+    email, enrolled = _reauth_exchange_grant(t, grant, code)
     return {"account": email, "enrolled": enrolled, "reauthorized": not enrolled}
 
 
@@ -736,11 +735,11 @@ refresh();
 """
 
 
-def _reauth_page(self, parsed=None):  # noqa: ARG001
+def _reauth_page(t, self, parsed=None):  # noqa: ARG001
     """The human-facing re-auth page, keyed like /auth (core._keyed_page)."""
     self._keyed_page(_REAUTH_HTML)
 
-def _reauth_status(self, parsed=None):  # noqa: ARG001
+def _reauth_status(t, self, parsed=None):  # noqa: ARG001
     """Account health for the page. Key-guarded like /token: account emails +
     failure detail are not public data."""
     if not core.SWITCH_KEY:
@@ -749,10 +748,10 @@ def _reauth_status(self, parsed=None):  # noqa: ARG001
         self.send_response(401)
         self.end_headers()
         return
-    self._json(200, core._account_health(list(_creds), time.time()))
+    self._json(200, core._account_health(t, list(_st(t).creds), time.time()))
 
 
-def _reauth_begin_ep(self, parsed=None):  # noqa: ARG001
+def _reauth_begin_ep(t, self, parsed=None):  # noqa: ARG001
     if not core.SWITCH_KEY:
         self._drain_body()
         return self._json(503, {"error": "SWITCH_KEY not configured"})
@@ -763,13 +762,13 @@ def _reauth_begin_ep(self, parsed=None):  # noqa: ARG001
         return
     body = self._read_json_body()
     account = (body or {}).get("account") or ""
-    if account not in _creds:
+    if account not in _st(t).creds:
         return self._json(404, {"error": f"unknown account {account!r}"})
-    url, state = _reauth_begin(account)
+    url, state = _reauth_begin(t, account)
     core.log(f"reauth begin for {account}")
     self._json(200, {"authorize_url": url, "state": state, "expires_in": core.REAUTH_TTL})
 
-def _reauth_complete_ep(self, parsed=None):  # noqa: ARG001
+def _reauth_complete_ep(t, self, parsed=None):  # noqa: ARG001
     if not core.SWITCH_KEY:
         self._drain_body()
         return self._json(503, {"error": "SWITCH_KEY not configured"})
@@ -783,14 +782,14 @@ def _reauth_complete_ep(self, parsed=None):  # noqa: ARG001
     if not state or not code:
         return self._json(400, {"error": "state and code are required"})
     try:
-        email = _reauth_exchange(state, code)
+        email = _reauth_exchange(t, state, code)
     except ValueError as e:
         return self._json(422, {"error": str(e)})
     core.log(f"reauth complete: {email} re-authorized")
     self._json(200, {"account": email, "reauthorized": True})
 
 
-def _token(self, parsed):
+def _token(t, self, parsed):
     """Dispense a fresh access token for an account. Secret-guarded — this hands
     out an inference bearer, so it must never be reachable without SWITCH_KEY.
     ?refused_fp=<sha256[:8]> is the proxy saying Anthropic refused its copy
@@ -805,29 +804,30 @@ def _token(self, parsed):
     account = (qs.get("account") or [""])[0]
     refused_fp = re.sub(r"[^0-9A-Za-z()]", "", (qs.get("refused_fp") or [""])[0])[:64]
     if account == "preferred":
-        with core._plock:
-            account = core._preferred.get("account")
-    if not account or account not in _creds:
+        with t.plock:
+            account = t.preferred.get("account")
+    if not account or account not in _st(t).creds:
         return self._json(404, {"error": f"unknown account {account!r}"})
     try:
-        tok = (_proxy_refused(account, refused_fp) if refused_fp
-               else _ensure_token(account, why="token"))
+        tok = (_proxy_refused(t, account, refused_fp) if refused_fp
+               else _ensure_token(t, account, why="token"))
     except Exception as e:  # noqa: BLE001
         return self._json(502, {"error": f"token refresh failed: {type(e).__name__}"})
-    exp = (_creds.get(account) or {}).get("expires_at")
+    exp = (_st(t).creds.get(account) or {}).get("expires_at")
     self._json(200, {"account": account, "access_token": tok, "expires_at": exp})
 
 
-def _start():
+def _start(t):
     """At boot: say when the creds file is missing, then load it, so the state
     loader restores only the configured accounts."""
-    if not os.path.exists(ACCOUNTS_FILE):
-        core.log(f"WARNING: {ACCOUNTS_FILE} not found — exporter serves poll_success=0 until it appears.")
-    _load_creds()
+    if not os.path.exists(_st(t).file):
+        core.log(f"WARNING: {_st(t).file} not found — exporter serves poll_success=0 until it appears.")
+    _load_creds(t)
 
 
-# Called with the status rows and {name: scopes} after _anthropic_auth_status
-# fills them: each may add its own facts to a row.
+# Called with the tenant, the status rows and {name: scopes} after
+# _anthropic_auth_status fills them: each may add its own facts to a row. A
+# list of callables registered at import (not state: the inspect walk allows it).
 _status_annotators = []
 
 
@@ -837,14 +837,14 @@ _status_annotators = []
 # callables look the functions up at call time, so a test's stub of one is seen.
 register("anthropic", {
     "poll": None,
-    "enabled": lambda: True,
+    "enabled": lambda t: True,
     "account_loop": {
-        "start": lambda: _start(),
-        "load": lambda: _load_creds(),
-        "names": lambda: list(_creds),
-        "poll": lambda name, known_meta: poll_account(name, known_meta),
-        "generation": lambda name: _cred_generation.get(name, 0),
-        "expires_at": lambda name: (_creds.get(name) or {}).get("expires_at"),
+        "start": lambda t: _start(t),
+        "load": lambda t: _load_creds(t),
+        "names": lambda t: list(_st(t).creds),
+        "poll": lambda t, name, known_meta: poll_account(t, name, known_meta),
+        "generation": lambda t, name: _st(t).cred_generation.get(name, 0),
+        "expires_at": lambda t, name: (_st(t).creds.get(name) or {}).get("expires_at"),
     },
     "auth": {
         "kind": "oauth-pkce",

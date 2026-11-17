@@ -62,7 +62,7 @@ func TestRouteFastPathHealthySkipsRanking(t *testing.T) {
 	armHealth(t, h)
 	a, b := uMember(uniq("fp-a")), uMember(uniq("fp-b"))
 	before := rankCalls.Load()
-	hl := decideHealthRoute(context.Background(), uniq("cls"), "s1", a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", false)
+	hl := lan.decideHealthRoute(context.Background(), uniq("cls"), "s1", a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", false)
 	if hl.m.ID != a.ID || hl.hopKind != "bound" || hl.lease != nil || hl.refuse != "" || hl.exhaust {
 		t.Fatalf("fast path verdict = %+v, want bound %s", hl, a.ID)
 	}
@@ -83,13 +83,13 @@ func TestRoutePinnedNeverPreempted(t *testing.T) {
 	halfOpenK(t, h, c, b.ID)
 	tripK(t, h, c, a.ID)
 
-	hl := decideHealthRoute(context.Background(), class, "s1", a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", true)
+	hl := lan.decideHealthRoute(context.Background(), class, "s1", a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", true)
 	if hl.m.ID != a.ID || hl.hopKind != "pinned" || hl.lease != nil {
 		t.Fatalf("pinned verdict = kind=%s m=%s lease=%v, want pinned/%s/nil", hl.hopKind, hl.m.ID, hl.lease, a.ID)
 	}
 
 	// The pin IS the half-open member: it carries the probe through.
-	hl = decideHealthRoute(context.Background(), class, "s1", b, []classMemberPref{a, b}, []byte(`{}`), false, "r-2", true)
+	hl = lan.decideHealthRoute(context.Background(), class, "s1", b, []classMemberPref{a, b}, []byte(`{}`), false, "r-2", true)
 	if hl.m.ID != b.ID || hl.hopKind != "probe" || hl.lease == nil {
 		t.Fatalf("pinned-on-half-open verdict = kind=%s lease=%v, want probe with a lease", hl.hopKind, hl.lease)
 	}
@@ -108,13 +108,13 @@ func TestRouteProbePreemptionClaimsToken(t *testing.T) {
 	tripK(t, h, c, a.ID)
 	members := []classMemberPref{a, b, cm}
 
-	hl := decideHealthRoute(context.Background(), class, "s1", a, members, []byte(`{}`), false, "r-1", false)
+	hl := lan.decideHealthRoute(context.Background(), class, "s1", a, members, []byte(`{}`), false, "r-1", false)
 	if hl.m.ID != b.ID || hl.hopKind != "probe" || hl.reason != "health:probe" || hl.lease == nil {
 		t.Fatalf("probe verdict = %+v, want probe on %s with a lease", hl, b.ID)
 	}
 
 	// Token consumed: the second request must not double-probe.
-	hl2 := decideHealthRoute(context.Background(), class, "s2", a, members, []byte(`{}`), false, "r-2", false)
+	hl2 := lan.decideHealthRoute(context.Background(), class, "s2", a, members, []byte(`{}`), false, "r-2", false)
 	if hl2.hopKind == "probe" {
 		t.Fatalf("second request also probed — the token was single-flight")
 	}
@@ -132,7 +132,7 @@ func TestRouteBoundRidesWhenTokenTaken(t *testing.T) {
 	if l := h.claimProbe(b.ID, class, b.ID, "r-infl", 100); l == nil {
 		t.Fatal("setup: token claim failed")
 	}
-	hl := decideHealthRoute(context.Background(), class, "s1", a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", false)
+	hl := lan.decideHealthRoute(context.Background(), class, "s1", a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", false)
 	if hl.m.ID != a.ID || hl.hopKind != "bound" || hl.lease != nil {
 		t.Fatalf("verdict = kind=%s m=%s, want bound/%s", hl.hopKind, hl.m.ID, a.ID)
 	}
@@ -149,11 +149,11 @@ func TestRouteElectionSeatsOnceAndReused(t *testing.T) {
 	tripK(t, h, c, a.ID)
 	members := []classMemberPref{a, b, cm}
 
-	hl := decideHealthRoute(context.Background(), class, "s1", a, members, []byte(`{}`), false, "r-1", false)
+	hl := lan.decideHealthRoute(context.Background(), class, "s1", a, members, []byte(`{}`), false, "r-1", false)
 	if hl.hopKind != "ranked" || hl.reason != "health:ranked" || hl.m.ID != b.ID {
 		t.Fatalf("first verdict = %+v, want ranked onto %s", hl, b.ID)
 	}
-	hl2 := decideHealthRoute(context.Background(), class, "s2", a, members, []byte(`{}`), false, "r-2", false)
+	hl2 := lan.decideHealthRoute(context.Background(), class, "s2", a, members, []byte(`{}`), false, "r-2", false)
 	if hl2.hopKind != "detour" || hl2.reason != "health:detour" || hl2.m.ID != b.ID {
 		t.Fatalf("second verdict = %+v, want the seated detour %s (I1)", hl2, b.ID)
 	}
@@ -172,16 +172,16 @@ func TestRouteFreshBindingBeatsElection(t *testing.T) {
 	h.elect(a.ID, class, b.ID)
 	// The brain re-pointed this session at a AFTER the episode opened: the
 	// fake clock's episode instant is 2023, real time.Now is far later.
-	bindMu.Lock()
-	bindCache[bindKey(class, sess)] = classBind{member: a, fetchedAt: time.Now(), memberSince: time.Now()}
-	bindMu.Unlock()
+	lan.bindMu.Lock()
+	lan.bindCache[bindKey(class, sess)] = classBind{member: a, fetchedAt: time.Now(), memberSince: time.Now()}
+	lan.bindMu.Unlock()
 	defer func() {
-		bindMu.Lock()
-		delete(bindCache, bindKey(class, sess))
-		bindMu.Unlock()
+		lan.bindMu.Lock()
+		delete(lan.bindCache, bindKey(class, sess))
+		lan.bindMu.Unlock()
 	}()
 
-	hl := decideHealthRoute(context.Background(), class, sess, a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", false)
+	hl := lan.decideHealthRoute(context.Background(), class, sess, a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", false)
 	if hl.m.ID != a.ID || hl.hopKind != "bound" {
 		t.Fatalf("verdict = %+v, want the freshly re-pointed bound %s", hl, a.ID)
 	}
@@ -210,7 +210,7 @@ func TestRouteRampHoldServesDetourMember(t *testing.T) {
 	// Give the ramp a queue: another session moved later, so sess's dwell
 	// (i=1 for a second session would jitter) — sess is i=0, dwell = closeAt;
 	// re-check via routeHints instead of asserting the schedule.
-	hl := decideHealthRoute(context.Background(), class, sess, a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", false)
+	hl := lan.decideHealthRoute(context.Background(), class, sess, a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", false)
 	if h2, holds := h.rampHolds(a.ID, class, sess, time.Time{}); holds {
 		if hl.hopKind != "detour" || hl.reason != "health:ramp" || hl.m.ID != h2 {
 			t.Fatalf("verdict = %+v, want the ramp hold on %s", hl, h2)
@@ -236,7 +236,7 @@ func TestRouteQuotaCoolingReadmittedBlocksExhaust(t *testing.T) {
 	tripK(t, h, c, a.ID)
 	uModelSpent(b)
 
-	hl := decideHealthRoute(context.Background(), class, "s1", a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", false)
+	hl := lan.decideHealthRoute(context.Background(), class, "s1", a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", false)
 	if hl.exhaust {
 		t.Fatal("529 fired while a quota-cooling member could be re-admitted (PR11)")
 	}
@@ -257,12 +257,12 @@ func TestRouteAllOpenExhaustAndSingleRides(t *testing.T) {
 	tripK(t, h, c, a.ID)
 	tripK(t, h, c, b.ID)
 
-	hl := decideHealthRoute(context.Background(), class, "s1", a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", false)
+	hl := lan.decideHealthRoute(context.Background(), class, "s1", a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", false)
 	if !hl.exhaust {
 		t.Fatalf("verdict = %+v, want exhaust (all admissible OPEN)", hl)
 	}
 
-	hl = decideHealthRoute(context.Background(), class, "s1", a, []classMemberPref{a}, []byte(`{}`), false, "r-2", false)
+	hl = lan.decideHealthRoute(context.Background(), class, "s1", a, []classMemberPref{a}, []byte(`{}`), false, "r-2", false)
 	if hl.exhaust || hl.hopKind != "forced" || hl.m.ID != a.ID {
 		t.Fatalf("single-member verdict = %+v, want forced ride on %s", hl, a.ID)
 	}
@@ -278,7 +278,7 @@ func TestRouteRefuseWhenNothingAdmissible(t *testing.T) {
 	b := uUnroutable(uMember(uniq("rf-b")))
 	tripK(t, h, c, a.ID) // boundOK false so the fast path can't mask the empty list
 
-	hl := decideHealthRoute(context.Background(), class, "s1", a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", false)
+	hl := lan.decideHealthRoute(context.Background(), class, "s1", a, []classMemberPref{a, b}, []byte(`{}`), false, "r-1", false)
 	if hl.refuse == "" || !strings.Contains(hl.refuse, "no member of class") {
 		t.Fatalf("verdict = %+v, want a typed refusal", hl)
 	}
@@ -298,17 +298,17 @@ func TestRankWindowFitPR9(t *testing.T) {
 	small.ContextWindow = 100000
 	members := []classMemberPref{small, big}
 
-	got := rankCandidates(members, "", rankOpt{est: 150000, health: true})
+	got := lan.rankCandidates(members, "", rankOpt{est: 150000, health: true})
 	if len(got) != 1 || got[0].m.ID != big.ID {
 		t.Fatalf("est=150k ranked %d members, want only %s", len(got), big.ID)
 	}
 	// Over the threshold but inside both windows: nobody is excluded.
-	got = rankCandidates(members, "", rankOpt{est: 90000, health: true})
+	got = lan.rankCandidates(members, "", rankOpt{est: 90000, health: true})
 	if len(got) != 2 {
 		t.Fatalf("est=90k (fits both windows) ranked %d members, want 2", len(got))
 	}
 	// At or under the threshold the window is never consulted.
-	got = rankCandidates(members, "", rankOpt{est: 60000, health: true})
+	got = lan.rankCandidates(members, "", rankOpt{est: 60000, health: true})
 	if len(got) != 2 {
 		t.Fatalf("est=60k (under the gate) ranked %d members, want 2", len(got))
 	}
@@ -327,14 +327,14 @@ func TestRankHealthTiers(t *testing.T) {
 	members := []classMemberPref{a, b, cm}
 
 	// b healthy: cooling stays out, open a ranks behind b.
-	got := rankCandidates(members, "", rankOpt{health: true})
+	got := lan.rankCandidates(members, "", rankOpt{health: true})
 	if len(got) != 2 || got[0].m.ID != b.ID || got[0].tier != 0 ||
 		got[1].m.ID != a.ID || got[1].tier != tierOpenBase {
 		t.Fatalf("tiers = %+v, want [%s@0 %s@%d]", got, b.ID, a.ID, tierOpenBase)
 	}
 
 	// b gone: everything ranked is OPEN — cooling re-admitted at the back.
-	got = rankCandidates([]classMemberPref{a, cm}, "", rankOpt{health: true})
+	got = lan.rankCandidates([]classMemberPref{a, cm}, "", rankOpt{health: true})
 	if len(got) != 2 || got[0].m.ID != a.ID || got[1].m.ID != cm.ID || got[1].tier != tierReadmit {
 		t.Fatalf("re-admit ranking = %+v, want [%s %s@%d]", got, a.ID, cm.ID, tierReadmit)
 	}
@@ -343,7 +343,7 @@ func TestRankHealthTiers(t *testing.T) {
 	// gone, and asking again would only repeat the refusal.
 	sp := uMember(uniq("t-s"))
 	uSpent(sp)
-	got = rankCandidates([]classMemberPref{a, sp}, "", rankOpt{health: true})
+	got = lan.rankCandidates([]classMemberPref{a, sp}, "", rankOpt{health: true})
 	if len(got) != 1 || got[0].m.ID != a.ID {
 		t.Fatalf("spent account re-admitted: %+v", got)
 	}
@@ -366,10 +366,10 @@ func pr11World(t *testing.T, credits string) (c *fakeClock, a, pm classMemberPre
 		"seven_day": week(60, nowFn().Add(72*time.Hour))}, credits)
 	gate := true
 	st.Allowance.Open = &gate
-	pref.mu.Lock()
-	pref.accounts[acct] = st
-	pref.mu.Unlock()
-	if chk, _ := routeCheck(pm.Route, acct, pm.Model, nowFn()); !chk.included() {
+	lan.pref.mu.Lock()
+	lan.pref.accounts[acct] = st
+	lan.pref.mu.Unlock()
+	if chk, _ := lan.routeCheck(pm.Route, acct, pm.Model, nowFn()); !chk.included() {
 		t.Fatalf("fixture: check %s, want included before the record", chk)
 	}
 	uModelSpent(pm)
@@ -383,18 +383,18 @@ func pr11World(t *testing.T, credits string) (c *fakeClock, a, pm classMemberPre
 // held, and PR11 never dials it.
 func TestReadmitNotWhereMoneyMayOpen(t *testing.T) {
 	_, a, pm, acct := pr11World(t, "open")
-	c, held := routeCheck(pm.Route, acct, pm.Model, nowFn())
+	c, held := lan.routeCheck(pm.Route, acct, pm.Model, nowFn())
 	if !c.no() || c.Reason != "pay" || held || c.held || c.onAllowance() {
 		t.Fatalf("model record, credits open, pay []: check %s held=%v, want no(pay), not held", c, held)
 	}
-	got := rankCandidates([]classMemberPref{a, pm}, "", rankOpt{health: true})
+	got := lan.rankCandidates([]classMemberPref{a, pm}, "", rankOpt{health: true})
 	if len(got) != 1 || got[0].m.ID != a.ID {
 		t.Fatalf("re-admitted where money may open: %+v", got)
 	}
-	if _, chk, ok := providerMemberDial(pm, "", true, false, nowFn()); ok {
+	if _, chk, ok := lan.providerMemberDial(pm, "", true, false, nowFn()); ok {
 		t.Fatalf("readmit dial on a route money may serve: %s", chk)
 	}
-	if _, ok, held := memberVerdict(pm, nowFn()); ok || held {
+	if _, ok, held := lan.memberVerdict(pm, nowFn()); ok || held {
 		t.Fatalf("member verdict ok=%v held=%v, want refused and not held", ok, held)
 	}
 }
@@ -404,34 +404,34 @@ func TestReadmitNotWhereMoneyMayOpen(t *testing.T) {
 // ends the record (it drew on the allowance).
 func TestReadmitWhereNoMoneyCanOpenAndItsServedEndsTheRecord(t *testing.T) {
 	clk, a, pm, acct := pr11World(t, "closed")
-	c, held := routeCheck(pm.Route, acct, pm.Model, nowFn())
+	c, held := lan.routeCheck(pm.Route, acct, pm.Model, nowFn())
 	if !c.no() || c.Reason != "spent" || !held {
 		t.Fatalf("model record, credits off: check %s held=%v, want no(spent), held", c, held)
 	}
-	got := rankCandidates([]classMemberPref{a, pm}, "", rankOpt{health: true})
+	got := lan.rankCandidates([]classMemberPref{a, pm}, "", rankOpt{health: true})
 	if len(got) != 2 || got[1].m.ID != pm.ID || got[1].tier != tierReadmit {
 		t.Fatalf("ranking = %+v, want %s re-admitted at %d", got, pm.ID, tierReadmit)
 	}
-	_, chk, ok := providerMemberDial(pm, "", true, false, nowFn())
+	_, chk, ok := lan.providerMemberDial(pm, "", true, false, nowFn())
 	if !ok || !chk.held {
 		t.Fatalf("readmit dial = %s ok=%v, want the held check", chk, ok)
 	}
 
 	// The re-admitted dial answers 2xx: the hop carries the readmit's check.
-	tokMu.Lock()
-	oldTokens := tokens
-	tokens = map[string]tokEntry{acct: {token: "tok-" + acct, exp: nowFn().Add(time.Hour)}}
-	tokMu.Unlock()
-	t.Cleanup(func() { tokMu.Lock(); tokens = oldTokens; tokMu.Unlock() })
+	lan.tokMu.Lock()
+	oldTokens := lan.tokens
+	lan.tokens = map[string]tokEntry{acct: {token: "tok-" + acct, exp: nowFn().Add(time.Hour)}}
+	lan.tokMu.Unlock()
+	t.Cleanup(func() { lan.tokMu.Lock(); lan.tokens = oldTokens; lan.tokMu.Unlock() })
 	hop := httptest.NewRequest(http.MethodPost, "https://anthropic.test/v1/messages", nil)
 	hop.Header.Set("Authorization", "Bearer tok-"+acct)
 	hop = hop.WithContext(context.WithValue(hop.Context(), servedCheckKey{}, chk))
 	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}}
 	clk.advance(time.Second)
-	noteServedHop(hop, reqInfo{body: []byte(`{"model":"` + pm.Model + `"}`)}, resp, "anthropic.test", nowFn())
-	recMu.Lock()
-	_, still := records[recKey{acct, modelLimit(pm.Model)}]
-	recMu.Unlock()
+	lan.noteServedHop(hop, reqInfo{body: []byte(`{"model":"` + pm.Model + `"}`)}, resp, "anthropic.test", nowFn())
+	lan.recMu.Lock()
+	_, still := lan.records[recKey{acct, modelLimit(pm.Model)}]
+	lan.recMu.Unlock()
 	if still {
 		t.Fatal("the re-admitted dial's 2xx left the model record standing")
 	}
@@ -448,28 +448,28 @@ func TestReadmitNeverIntoMoney(t *testing.T) {
 	a, pm := uMember(uniq("m-a")), uMember(uniq("m-p"))
 	tripK(t, h, c, a.ID)
 	acct := uAccount(pm.ID)
-	pref.mu.Lock()
-	r := pref.routes[pm.Route]
+	lan.pref.mu.Lock()
+	r := lan.pref.routes[pm.Route]
 	r.Pay = []string{acct + "/credits"}
-	pref.routes[pm.Route] = r
-	pref.accounts[acct] = standingAt("anthropic", nowFn(), map[string]checkWindow{
+	lan.pref.routes[pm.Route] = r
+	lan.pref.accounts[acct] = standingAt("anthropic", nowFn(), map[string]checkWindow{
 		"seven_day": week(100, nowFn().Add(48*time.Hour))}, "open")
-	pref.mu.Unlock()
-	if c, _ := routeCheck(pm.Route, acct, "", nowFn()); !c.paid() {
+	lan.pref.mu.Unlock()
+	if c, _ := lan.routeCheck(pm.Route, acct, "", nowFn()); !c.paid() {
 		t.Fatalf("fixture: check %s, want paid", c)
 	}
 	uModelSpent(pm)
-	c2, held := routeCheck(pm.Route, acct, pm.Model, nowFn())
+	c2, held := lan.routeCheck(pm.Route, acct, pm.Model, nowFn())
 	if !c2.paid() || held || c2.onAllowance() {
 		t.Fatalf("model record on a paid route: check %s held=%v, want paid, not held", c2, held)
 	}
-	got := rankCandidates([]classMemberPref{a, pm}, "", rankOpt{health: true})
+	got := lan.rankCandidates([]classMemberPref{a, pm}, "", rankOpt{health: true})
 	for _, g := range got {
 		if g.tier == tierReadmit {
 			t.Fatalf("re-admitted into money: %+v", got)
 		}
 	}
-	if _, chk, ok := providerMemberDial(pm, "", true, false, nowFn()); !ok || !chk.paid() {
+	if _, chk, ok := lan.providerMemberDial(pm, "", true, false, nowFn()); !ok || !chk.paid() {
 		t.Fatalf("dial = %s ok=%v, want the paid check", chk, ok)
 	}
 }
@@ -485,13 +485,13 @@ func TestDegradedExhaustResponseProperties(t *testing.T) {
 	tripK(t, h, c, a.ID)
 	tripK(t, h, c, b.ID)
 	mk := func() *classRoute {
-		return &classRoute{class: class, reqID: "r-fixed", member: a,
+		return &classRoute{tenant: lan, class: class, reqID: "r-fixed", member: a,
 			members: []classMemberPref{a, b},
 			served:  newServedHop(class, a, reqInfo{}, a.ID, "")}
 	}
 
 	cc := mk()
-	resp := degradedExhaustResponse(cc, false)
+	resp := lan.degradedExhaustResponse(cc, false)
 	if resp.StatusCode != 529 || resp.Status != "529 Overloaded" {
 		t.Fatalf("status = %d %q", resp.StatusCode, resp.Status)
 	}
@@ -509,7 +509,7 @@ func TestDegradedExhaustResponseProperties(t *testing.T) {
 		t.Fatalf("Retry-After = %v, want within [5s,60s]", ra)
 	}
 	// Deterministic per reqID: the same decision renders the same delay.
-	if r2 := degradedExhaustResponse(mk(), false); r2.Header.Get("Retry-After") != resp.Header.Get("Retry-After") {
+	if r2 := lan.degradedExhaustResponse(mk(), false); r2.Header.Get("Retry-After") != resp.Header.Get("Retry-After") {
 		t.Fatalf("Retry-After drifted for one reqID: %s vs %s",
 			resp.Header.Get("Retry-After"), r2.Header.Get("Retry-After"))
 	}
@@ -533,7 +533,7 @@ func TestDegradedExhaustResponseProperties(t *testing.T) {
 	}
 
 	pc := mk()
-	presp := degradedExhaustResponse(pc, true)
+	presp := lan.degradedExhaustResponse(pc, true)
 	if got := presp.Header.Get("X-Switch-Health"); got != "pinned-exhausted" {
 		t.Fatalf("pinned X-Switch-Health = %q", got)
 	}
@@ -565,13 +565,13 @@ func TestWouldActClauses(t *testing.T) {
 	open := uMember(uniq("wa-open"))
 	tripK(t, h, c, open.ID)
 	mk := func(m classMemberPref) *classRoute {
-		return &classRoute{class: class, member: m,
+		return &classRoute{tenant: lan, class: class, member: m,
 			served: newServedHop(class, m, reqInfo{}, m.ID, "")}
 	}
 
 	base := mk(a) // healthy bound serve: no clause fires
 	base.hopKind = "bound"
-	healthNoteWouldAct(base)
+	lan.healthNoteWouldAct(base)
 	if n := wouldActOf(h, class); n != 0 {
 		t.Fatalf("healthy serve bumped would_act to %d", n)
 	}
@@ -585,13 +585,13 @@ func TestWouldActClauses(t *testing.T) {
 		"degraded-key": func() *classRoute { x := mk(open); x.hopKind = "bound"; return x }(),
 	} {
 		before := wouldActOf(h, class)
-		healthNoteWouldAct(cc)
+		lan.healthNoteWouldAct(cc)
 		if wouldActOf(h, class) != before+1 {
 			t.Fatalf("clause %q did not bump would_act", name)
 		}
 	}
 	// nil store / nil ctx: inert.
-	healthNoteWouldAct(nil)
+	lan.healthNoteWouldAct(nil)
 }
 
 // ---- #115: the registry roster sync ----

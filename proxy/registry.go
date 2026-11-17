@@ -343,7 +343,7 @@ func advertisableConfigured() bool {
 			return true
 		}
 	}
-	if brainURL != "" {
+	if brainBase != "" {
 		return true
 	}
 	classRowsMu.RLock()

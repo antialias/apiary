@@ -18,9 +18,9 @@ import (
 // resetWireBuckets keeps the process-global rate limiter from bleeding
 // tokens across tests (buckets are keyed by class name, shared per-process).
 func resetWireBuckets() {
-	wireMu.Lock()
-	wireBuckets = map[string]*wireBucket{}
-	wireMu.Unlock()
+	lan.wireMu.Lock()
+	lan.wireBuckets = map[string]*wireBucket{}
+	lan.wireMu.Unlock()
 }
 
 func wirePost(t *testing.T, env *e2eEnv, body, session string) *http.Response {
@@ -360,7 +360,7 @@ func TestE2EOpenAIWireInjectUnreachable(t *testing.T) {
 	resetWireBuckets()
 	h.bindTo.Store("kimi/kimi-k3")
 
-	injectObserve("sess-c5", time.Now())
+	lan.injectObserve("sess-c5", time.Now())
 	key := injectSessionKey("sess-c5")
 	resp := enqueueE2E(t, h.e2eEnv, "", key, "SECRET-INSTR")
 	if resp.StatusCode != 202 {

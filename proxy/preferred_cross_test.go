@@ -51,7 +51,7 @@ func TestProxyReadsTheBrainsPreferredAndAgreesOnEveryCheck(t *testing.T) {
 	t.Cleanup(func() { nowFn = old })
 	t.Cleanup(resetQuotaState()) // the record store; the view goes with pref below
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/preferred" {
+		if r.URL.Path != tpath("/preferred") {
 			http.NotFound(w, r)
 			return
 		}
@@ -61,14 +61,14 @@ func TestProxyReadsTheBrainsPreferredAndAgreesOnEveryCheck(t *testing.T) {
 	t.Cleanup(srv.Close)
 	// fetchPreferred writes the whole decision and the class rows: run it on a
 	// fresh decision and put both back after.
-	oldBrain, oldPref := brainURL, pref
-	brainURL, pref = srv.URL, &decision{}
+	oldBrain, oldPref := brainBase, lan.pref
+	brainBase, lan.pref = srv.URL, &decision{}
 	classRowsMu.Lock()
 	oldRows, oldSource := classRowsSet, classRowsSource
 	classRowsMu.Unlock()
 	t.Cleanup(func() {
 		prewarmWG.Wait()
-		brainURL, pref = oldBrain, oldPref
+		brainBase, lan.pref = oldBrain, oldPref
 		classRowsMu.Lock()
 		classRowsSet, classRowsSource = oldRows, oldSource
 		classRowsMu.Unlock()
@@ -84,7 +84,7 @@ func TestProxyReadsTheBrainsPreferredAndAgreesOnEveryCheck(t *testing.T) {
 	got := map[seen]dialCheck{}
 	for _, id := range ids {
 		for acct, want := range brain.Routes[id].Checks {
-			c, _ := routeCheck(id, acct, "", now)
+			c, _ := lan.routeCheck(id, acct, "", now)
 			want.route = id // the route the check was made for, which the wire does not carry
 			if c != want {
 				t.Errorf("%s on %s: proxy %s, brain %s", id, acct, c, want)
@@ -96,11 +96,11 @@ func TestProxyReadsTheBrainsPreferredAndAgreesOnEveryCheck(t *testing.T) {
 	// (§2.8) names each route and reads its accounts' checks by that id: from
 	// what the brain serves, every route's body is the brain's checks.
 	for _, id := range ids {
-		r, _, _, _ := routeOf(id)
+		r, _, _, _ := lan.routeOf(id)
 		if r.ID != id {
 			t.Errorf("route %s decoded with id %q", id, r.ID)
 		}
-		u := routesUnavailable([]unavailRoute{{policy: r.routePolicy, accounts: r.Accounts}}, nil, now)
+		u := lan.routesUnavailable([]unavailRoute{{policy: r.routePolicy, accounts: r.Accounts}}, nil, now)
 		if u == nil {
 			continue // no account: configuration, the caller's typed 503
 		}
@@ -118,7 +118,7 @@ func TestProxyReadsTheBrainsPreferredAndAgreesOnEveryCheck(t *testing.T) {
 			}
 		}
 	}
-	if s := staleMax(); s != 1800 {
+	if s := lan.staleMax(); s != 1800 {
 		t.Errorf("stale_max = %v, want the brain's published 1800", s)
 	}
 	// The fixture is only worth its name while it holds every kind of answer
@@ -154,9 +154,9 @@ func TestProxyReadsTheBrainsPreferredAndAgreesOnEveryCheck(t *testing.T) {
 
 	// The ledger the budget gate reads and ledger.go charges by, as the brain
 	// publishes it (C6): the counted pot's unit and spend, and its rates.
-	pref.mu.RLock()
-	l := pref.ledger
-	pref.mu.RUnlock()
+	lan.pref.mu.RLock()
+	l := lan.pref.ledger
+	lan.pref.mu.RUnlock()
 	if l == nil || l.AsOf == nil || l.Period.Start == 0 || l.Seq < 1 {
 		t.Fatalf("ledger = %+v, want the brain's", l)
 	}
@@ -172,20 +172,20 @@ func TestProxyReadsTheBrainsPreferredAndAgreesOnEveryCheck(t *testing.T) {
 	if ir := l.Rates["codex_credit"].Images["gpt-image-2"]; ir.Image.Output != 750 || ir.Text.Input != 125 {
 		t.Errorf("ledger.rates.codex_credit.images[gpt-image-2] = %+v, want 11 §3's", ir)
 	}
-	if h := armLedger(context.Background(), dialCheck{Check: checkPaid, Pot: "gpt/credits", route: "frontier/gpt/gpt-5.6"}, "gpt-6.1-sol"); h == nil {
+	if h := lan.armLedger(context.Background(), dialCheck{Check: checkPaid, Pot: "gpt/credits", route: "frontier/gpt/gpt-5.6"}, "gpt-6.1-sol"); h == nil {
 		t.Error("a paid dial on gpt/credits arms no ledger entry on the brain's ledger")
 	}
 	// The scope map is the accounts{} windows' aliases (C5 moved off targets).
-	sm := currentScopes()
+	sm := lan.currentScopes()
 	if len(sm.lane) == 0 {
 		t.Error("no lane joins decoded from the brain's lane_rules")
 	}
 
 	// Each class member names a route the proxy holds, so its dials are checked
 	// against that route's policy, not refused as unknown.
-	pref.mu.RLock()
-	classes := pref.classes
-	pref.mu.RUnlock()
+	lan.pref.mu.RLock()
+	classes := lan.pref.classes
+	lan.pref.mu.RUnlock()
 	for name, c := range brain.Classes {
 		for i, m := range c.Members {
 			if m.Route == "" {
@@ -195,7 +195,7 @@ func TestProxyReadsTheBrainsPreferredAndAgreesOnEveryCheck(t *testing.T) {
 			if got := classes[name].Members[i].Route; got != m.Route {
 				t.Errorf("%s/%s: decoded route %q, served %q", name, m.ID, got, m.Route)
 			}
-			if _, _, _, ok := routeOf(m.Route); !ok {
+			if _, _, _, ok := lan.routeOf(m.Route); !ok {
 				t.Errorf("%s/%s: route %q is not in routes{}", name, m.ID, m.Route)
 			}
 		}

@@ -118,10 +118,10 @@ func TestServedEncoderMatchesTheGolden(t *testing.T) {
 
 // servedQueue is a copy of the served events waiting, oldest first.
 func servedQueue() []servedEvent {
-	repMu.Lock()
-	defer repMu.Unlock()
-	out := make([]servedEvent, len(repServed))
-	for i, q := range repServed {
+	lan.repMu.Lock()
+	defer lan.repMu.Unlock()
+	out := make([]servedEvent, len(lan.repServed))
+	for i, q := range lan.repServed {
 		out[i] = q.ev
 	}
 	return out
@@ -138,7 +138,7 @@ func TestServedQueueOrderBoundAndBoot(t *testing.T) {
 	t.Cleanup(resetQuotaState())
 	reportServedMax = 3
 	for i := 1; i <= 5; i++ {
-		if seq := reportServedEvent(servedOf(fmt.Sprint("a", i))); seq != int64(i) {
+		if seq := lan.reportServedEvent(servedOf(fmt.Sprint("a", i))); seq != int64(i) {
 			t.Fatalf("event %d took seq %d", i, seq)
 		}
 	}
@@ -156,13 +156,13 @@ func TestServedQueueOrderBoundAndBoot(t *testing.T) {
 		}
 		ids[ev.id] = true
 	}
-	st := reportsStatus()["served"].(map[string]any)
+	st := lan.reportsStatus()["served"].(map[string]any)
 	if st["dropped"] != int64(2) || st["pending"] != 3 || st["seq"] != int64(5) || st["boot"] != repBoot {
 		t.Fatalf("status served = %v, want 2 dropped, 3 pending, seq 5", st)
 	}
 
-	reportHeaderReading("a", reading(time.Now(), map[string][2]*float64{"five_hour": {ptr(50), nil}}))
-	b := reportBatch()
+	lan.reportHeaderReading("a", reading(time.Now(), map[string][2]*float64{"five_hour": {ptr(50), nil}}))
+	b := lan.reportBatch()
 	if len(b) != 4 || b[0].srv != nil {
 		t.Fatalf("batch of %d, first served %v: want the reading first", len(b), b[0].srv != nil)
 	}
@@ -185,13 +185,13 @@ func TestServedQueueOrderBoundAndBoot(t *testing.T) {
 		}
 		return 200, map[string]any{"results": rs, "seq": 1}
 	})
-	if ok, more := reportPost(context.Background(), url, "k"); ok || !more {
+	if ok, more := lan.reportPost(context.Background(), tbase(url), "k"); ok || !more {
 		t.Fatalf("ok %v more %v, want the retry left", ok, more)
 	}
 	if q := servedQueue(); len(q) != 1 || q[0].seq != 4 {
 		t.Fatalf("queue = %+v, want only the retry", q)
 	}
-	st = reportsStatus()["served"].(map[string]any)
+	st = lan.reportsStatus()["served"].(map[string]any)
 	if st["refused"] != int64(1) || st["pending"] != 1 {
 		t.Fatalf("status served = %v, want 1 refused, 1 pending", st)
 	}
@@ -922,10 +922,10 @@ func TestServedUnencodableCountedApart(t *testing.T) {
 	t.Cleanup(resetQuotaState())
 	ev := servedOf("a")
 	ev.readAt = math.NaN()
-	reportServedEvent(ev)
+	lan.reportServedEvent(ev)
 	url, _ := fakeReportsBrain(t, func(es []map[string]any) (int, any) { return 200, resultsAll(es, "applied", 1) })
-	reportPost(context.Background(), url, "k")
-	st := reportsStatus()["served"].(map[string]any)
+	lan.reportPost(context.Background(), tbase(url), "k")
+	st := lan.reportsStatus()["served"].(map[string]any)
 	if st["unencodable"] != int64(1) || st["refused"] != int64(0) || st["pending"] != 0 {
 		t.Fatalf("status served = %v, want 1 unencodable, none refused or pending", st)
 	}
@@ -1293,7 +1293,7 @@ func TestE2ELiveUsageCarriesCodexRawOutput(t *testing.T) {
 					t.Fatalf("output_tokens = %s, want the client's %s", got, tc.client)
 				}
 				if got := string(u["raw_output_tokens"]); got != fmt.Sprint(tokens["output"]) {
-					t.Fatalf("raw_output_tokens = %q, want the served event's output %v", got, tokens["output"])
+					t.Fatalf("raw_output_tokens = %q, want the served event's output %v", got, lan.tokens["output"])
 				}
 			})
 		}

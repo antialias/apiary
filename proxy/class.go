@@ -132,7 +132,8 @@ type classPref struct {
 // original client headers or the next hop loses anthropic-version and inherits
 // the previous wire's UA.
 type classRoute struct {
-	classReq   // the request itself, of its kind (kinds.go, C4); every rebuild starts from it
+	classReq           // the request itself, of its kind (kinds.go, C4); every rebuild starts from it
+	tenant     *tenant // whose request this is: its binds, health and accounts
 	class      string
 	session    string
 	member     classMemberPref   // the member attempt 1 was actuated on
@@ -288,13 +289,11 @@ type classBind struct {
 	memberSince time.Time
 }
 
+// Per tenant: tenant.bindMu, tenant.bindCache (class + "\x00" + session ->
+// last-good bind) and tenant.sessionFundings (the same key -> how that
+// session's last class request ended, §2.11's statusline; its own map, not a
+// binding's field: the brain's 409 refuses a session it never bound).
 var (
-	bindMu    sync.Mutex
-	bindCache = map[string]classBind{} // class + "\x00" + session -> last-good bind
-	// sessionFundings: the same key -> how that session's last class request
-	// ended (§2.11's statusline). Its own map, not a binding's field: the
-	// brain's 409 refuses a session it never bound.
-	sessionFundings = map[string]sessionFunding{}
 	// fundingIdle is the brain's SESSION_IDLE: a session idle longer has no
 	// binding there, so its funding is dropped here too.
 	fundingIdle = 6 * time.Hour
@@ -314,10 +313,10 @@ func fpSess(s string) string {
 
 // bindMemberSince is the session's last observed bind re-point (PR5's
 // bindingAt); zero when never observed to move.
-func bindMemberSince(class, session string) time.Time {
-	bindMu.Lock()
-	defer bindMu.Unlock()
-	return bindCache[bindKey(class, session)].memberSince
+func (tn *tenant) bindMemberSince(class, session string) time.Time {
+	tn.bindMu.Lock()
+	defer tn.bindMu.Unlock()
+	return tn.bindCache[bindKey(class, session)].memberSince
 }
 
 // bindClassMember resolves (class, session) to the brain's bound member.
@@ -327,15 +326,15 @@ func bindMemberSince(class, session string) time.Time {
 // class_unavailable (§2.8): no route of the class is included or paid, and
 // its body is the reply. A transport failure rides the cached member at any
 // age (STALE); no cache + no brain = FAILED.
-func bindClassMember(class, session string) (classMemberPref, string, routeState, string, *unavailable) {
+func (tn *tenant) bindClassMember(class, session string) (classMemberPref, string, routeState, string, *unavailable) {
 	key := bindKey(class, session)
-	bindMu.Lock()
-	cached, has := bindCache[key]
-	bindMu.Unlock()
+	tn.bindMu.Lock()
+	cached, has := tn.bindCache[key]
+	tn.bindMu.Unlock()
 	if has && time.Since(cached.fetchedAt) < bindFresh {
-		pref.mu.RLock()
-		ok := pref.ok
-		pref.mu.RUnlock()
+		tn.pref.mu.RLock()
+		ok := tn.pref.ok
+		tn.pref.mu.RUnlock()
 		state := stateRouted
 		if !ok {
 			state = stateStale
@@ -348,10 +347,10 @@ func bindClassMember(class, session string) (classMemberPref, string, routeState
 		}
 		return classMemberPref{}, "", stateFailed, "", nil
 	}
-	if brainURL == "" {
+	if tn.brainURL() == "" {
 		return stale()
 	}
-	req, _ := http.NewRequest("GET", brainURL+"/class-bind?class="+url.QueryEscape(class)+
+	req, _ := http.NewRequest("GET", tn.brainURL()+"/class-bind?class="+url.QueryEscape(class)+
 		"&session="+url.QueryEscape(session), nil)
 	req.Header.Set("X-Switch-Key", switchKey)
 	resp, err := brainClient.Do(req)
@@ -373,6 +372,7 @@ func bindClassMember(class, session string) (classMemberPref, string, routeState
 			if err := json.Unmarshal(b, &u); err != nil || u.Members == nil || u.Retryable == nil {
 				return classMemberPref{}, "", stateFailed, brainRefusalReason(resp.StatusCode, b), nil
 			}
+			u.tenant = tn // the refusal renders with this tenant's router-dry clause
 			return classMemberPref{}, "", stateRouted, "", &u
 		}
 		return stale() // 5xx from a proxy in between etc. — treat as outage
@@ -386,20 +386,20 @@ func bindClassMember(class, session string) (classMemberPref, string, routeState
 	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil || d.Member.ID == "" {
 		return stale()
 	}
-	bindMu.Lock()
-	prev, hadPrev := bindCache[key]
+	tn.bindMu.Lock()
+	prev, hadPrev := tn.bindCache[key]
 	nb := classBind{member: d.Member, reason: d.Reason, fetchedAt: time.Now(), memberSince: prev.memberSince, pinned: d.Pinned, servedMember: prev.servedMember, servedReason: prev.servedReason}
 	if hadPrev && prev.member.ID != d.Member.ID {
 		nb.memberSince = time.Now() // an observed re-point — PR5's binding instant
 	}
-	bindCache[key] = nb
-	bindMu.Unlock()
-	if health != nil && (d.Created || !hadPrev || prev.member.ID != d.Member.ID) {
+	tn.bindCache[key] = nb
+	tn.bindMu.Unlock()
+	if tn.health != nil && (d.Created || !hadPrev || prev.member.ID != d.Member.ID) {
 		marked := strings.HasPrefix(d.Reason, "bind: pinned")
 		if d.Pinned != nil {
 			marked = *d.Pinned
 		}
-		health.noteBinding(class, d.Member.ID, marked)
+		tn.health.noteBinding(class, d.Member.ID, marked)
 	}
 	if hadPrev && prev.member.ID != d.Member.ID {
 		// The brain re-pointed this session (forced-down / drift-up / pin) and
@@ -407,7 +407,7 @@ func bindClassMember(class, session string) (classMemberPref, string, routeState
 		st.mu.Lock()
 		st.switches++
 		st.mu.Unlock()
-		fireClassAlert(class, session, prev.member.ID, d.Member.ID, d.Reason)
+		tn.fireClassAlert(class, session, prev.member.ID, d.Member.ID, d.Reason)
 	}
 	return d.Member, d.Reason, stateRouted, "", nil
 }
@@ -444,23 +444,23 @@ var (
 
 // memberIncumbent is the account the brain put a member on, chosen from the
 // member's own route's checks (§2.2 row 16).
-func memberIncumbent(m classMemberPref) string { return m.Incumbent }
+func (tn *tenant) memberIncumbent(m classMemberPref) string { return m.Incumbent }
 
 // memberPicks judges a member's route accounts (§2.2 rows 5-9): the ones its
 // check admits, in swap order, and the ones it refuses.
-func memberPicks(m classMemberPref, now time.Time) (ok, refused []acctPick) {
+func (tn *tenant) memberPicks(m classMemberPref, now time.Time) (ok, refused []acctPick) {
 	pct := func(a string) *float64 { return m.Targets[a] }
 	if m.Kind == "anthropic" {
-		pct = lanePct(m.Lane)
+		pct = tn.lanePct(m.Lane)
 	}
-	return rankRouteAccounts(m.Route, m.Model, m.req, memberIncumbent(m), routeAccounts(m.Route), pct, now)
+	return tn.rankRouteAccounts(m.Route, m.Model, m.req, tn.memberIncumbent(m), tn.routeAccounts(m.Route), pct, now)
 }
 
 // memberVerdict is a member's best account: its check, whether that account is
 // throttled, and — for a member none of whose accounts may be dialled —
 // whether an unattributed record alone holds it out (PR11's re-admission).
-func memberVerdict(m classMemberPref, now time.Time) (best acctPick, ok, held bool) {
-	admitted, refused := memberPicks(m, now)
+func (tn *tenant) memberVerdict(m classMemberPref, now time.Time) (best acctPick, ok, held bool) {
+	admitted, refused := tn.memberPicks(m, now)
 	if len(admitted) > 0 {
 		return admitted[0], true, false
 	}
@@ -485,8 +485,8 @@ func memberVerdict(m classMemberPref, now time.Time) (best acctPick, ok, held bo
 // an account an unattributed record alone holds out. entitlement is
 // count_tokens (§2.2 row 20): free, so every account of the route may answer
 // it, the admitted first. ok=false: no account may be dialled.
-func providerMemberDial(m classMemberPref, want string, readmit, entitlement bool, now time.Time) (string, dialCheck, bool) {
-	admitted, refused := memberPicks(m, now)
+func (tn *tenant) providerMemberDial(m classMemberPref, want string, readmit, entitlement bool, now time.Time) (string, dialCheck, bool) {
+	admitted, refused := tn.memberPicks(m, now)
 	if entitlement {
 		admitted, refused = append(admitted, refused...), nil
 	}
@@ -528,8 +528,8 @@ func providerMemberDial(m classMemberPref, want string, readmit, entitlement boo
 // member's own route (§2.2 rows 6-8: its scope, its pay, its stop_at), plus
 // PR11's re-admission: with readmit, a member every account of which is held
 // out only by an unattributed record dials the first such account.
-func anthropicMemberDial(m classMemberPref, countTokens, readmit bool) laneDecision {
-	d := decideOn(m.Route, m.Lane, m.Model, m.Incumbent, "member incumbent", countTokens)
+func (tn *tenant) anthropicMemberDial(m classMemberPref, countTokens, readmit bool) laneDecision {
+	d := tn.decideOn(m.Route, m.Lane, m.Model, m.Incumbent, "member incumbent", countTokens)
 	if !d.none || !readmit {
 		return d
 	}
@@ -537,7 +537,7 @@ func anthropicMemberDial(m classMemberPref, countTokens, readmit bool) laneDecis
 		if !p.held {
 			continue
 		}
-		if tok := credentialFor(p.account); tok != "" {
+		if tok := tn.credentialFor(p.account); tok != "" {
 			return laneDecision{tok: tok, acct: p.account, reason: "PR11 re-admission", state: d.state, check: p.check}
 		}
 	}
@@ -556,10 +556,10 @@ func providerByName(name string) *provider {
 
 // hardPct is the brain's SWITCH_HARD_PCT as last served on /preferred, or the
 // mirrored default before any fetch / on an old brain that omits thresholds.
-func hardPct() float64 {
-	pref.mu.RLock()
-	h := pref.hardPct
-	pref.mu.RUnlock()
+func (tn *tenant) hardPct() float64 {
+	tn.pref.mu.RLock()
+	h := tn.pref.hardPct
+	tn.pref.mu.RUnlock()
 	if h <= 0 {
 		return defaultHardPct
 	}
@@ -615,15 +615,10 @@ type rankOpt struct {
 	wire   bool // request arrived on the OpenAI wire; PR7/D2 exclusion
 	health bool // consult the FSM: composite tiers + PR11 re-admission
 	// ctx is the request's the ranking is for (nil: none, as the prober's),
-	// so a key it asks for (memberKeyMissing) ends with it.
+	// so a key it asks for (memberKeyMissing) ends with it. The ranker reads
+	// it through the tenant it ranks for (tenant.ctxOf), so the key asked for
+	// is that tenant's whatever the caller stamped.
 	ctx context.Context
-}
-
-func (o rankOpt) context() context.Context {
-	if o.ctx == nil {
-		return context.Background()
-	}
-	return o.ctx
 }
 
 // Composite tiers (§2.3): 0-2 included and healthy; 3-5 included and
@@ -643,8 +638,8 @@ const (
 // healthy bound member is served with ZERO ranking) reads its delta.
 var rankCalls atomic.Int64
 
-func rankCandidates(members []classMemberPref, exclude string, opt rankOpt) []ranked {
-	out, _ := rankCandidatesSkips(members, exclude, opt)
+func (tn *tenant) rankCandidates(members []classMemberPref, exclude string, opt rankOpt) []ranked {
+	out, _ := tn.rankCandidatesSkips(members, exclude, opt)
 	return out
 }
 
@@ -663,22 +658,23 @@ func renderSkips(sk []memberSkip) string {
 }
 
 // rankCandidatesSkips is rankCandidates plus the members it skipped.
-func rankCandidatesSkips(members []classMemberPref, exclude string, opt rankOpt) ([]ranked, []memberSkip) {
+func (tn *tenant) rankCandidatesSkips(members []classMemberPref, exclude string, opt rankOpt) ([]ranked, []memberSkip) {
 	rankCalls.Add(1)
+	ctx := tn.ctxOf(opt.ctx)
 	var skipped []memberSkip
 	skip := func(m classMemberPref, why string) { skipped = append(skipped, memberSkip{m.ID, why}) }
-	hard := hardPct()
+	hard := tn.hardPct()
 	now := nowFn()
-	pref.mu.RLock()
-	payOrder := pref.payOrder
-	pref.mu.RUnlock()
+	tn.pref.mu.RLock()
+	payOrder := tn.pref.payOrder
+	tn.pref.mu.RUnlock()
 	var states map[string]string
-	if opt.health && health != nil {
+	if opt.health && tn.health != nil {
 		ids := make([]string, 0, len(members))
 		for _, m := range members {
 			ids = append(ids, m.ID)
 		}
-		states = health.statesOf(ids)
+		states = tn.health.statesOf(ids)
 	}
 	var buckets [tierReadmit][]ranked
 	var held []ranked
@@ -690,7 +686,7 @@ func rankCandidatesSkips(members []classMemberPref, exclude string, opt rankOpt)
 			skip(m, "provider "+m.Provider+" not configured here")
 			continue
 		}
-		if why := memberKeyMissing(opt.context(), m); why != "" {
+		if why := tn.memberKeyMissing(ctx, m); why != "" {
 			skip(m, why)
 			continue
 		}
@@ -711,7 +707,7 @@ func rankCandidatesSkips(members []classMemberPref, exclude string, opt rankOpt)
 				continue
 			}
 		}
-		best, ok, isHeld := memberVerdict(m, now)
+		best, ok, isHeld := tn.memberVerdict(m, now)
 		if !ok {
 			if opt.health && isHeld {
 				held = append(held, ranked{m: m, tier: tierReadmit, health: states[m.ID], check: best.check})
@@ -783,9 +779,11 @@ type ranked struct {
 }
 
 // classCandidates is rankCandidates for the call sites that only want the
-// members (spec §11: the wrapper form).
-func classCandidates(members []classMemberPref, exclude string) []classMemberPref {
-	r := rankCandidates(members, exclude, rankOpt{})
+// members (spec §11: the wrapper form). ctx is the request's the walk is
+// for (nil: a caller with none), carried so a key the ranking asks for is
+// asked on the request's behalf and for its tenant.
+func (tn *tenant) classCandidates(ctx context.Context, members []classMemberPref, exclude string) []classMemberPref {
+	r := tn.rankCandidates(members, exclude, rankOpt{ctx: ctx})
 	out := make([]classMemberPref, 0, len(r))
 	for _, c := range r {
 		out = append(out, c.m)
@@ -794,8 +792,8 @@ func classCandidates(members []classMemberPref, exclude string) []classMemberPre
 }
 
 // memberThrottled reports a dialable member whose best account is throttled.
-func memberThrottled(m classMemberPref, now time.Time) bool {
-	best, ok, _ := memberVerdict(m, now)
+func (tn *tenant) memberThrottled(m classMemberPref, now time.Time) bool {
+	best, ok, _ := tn.memberVerdict(m, now)
 	return ok && best.throttled
 }
 
@@ -803,11 +801,11 @@ func memberThrottled(m classMemberPref, now time.Time) bool {
 // fine): its provider isn't configured here, or no account of its route has a
 // check that is not `no` (§2.2 row 6: the bound member is dialled only while
 // its check admits it). Anthropic token availability is checked at actuation.
-func memberDialable(m classMemberPref, now time.Time) string {
+func (tn *tenant) memberDialable(m classMemberPref, now time.Time) string {
 	if m.Kind == "provider" && providerByName(m.Provider) == nil {
 		return "has no configured provider (" + m.Provider + ")"
 	}
-	if best, ok, _ := memberVerdict(m, now); !ok {
+	if best, ok, _ := tn.memberVerdict(m, now); !ok {
 		return "is " + best.check.String()
 	}
 	return ""
@@ -820,7 +818,7 @@ func memberDialable(m classMemberPref, now time.Time) string {
 // still applies: the dedup key is (class, from→to) — the session id is
 // deliberately EXCLUDED, so two sessions flap-flopping the same member pair
 // read as ONE alert stream and gate 2 suppresses the repeats.
-func fireClassAlert(class, session, from, to, reason string) {
+func (tn *tenant) fireClassAlert(class, session, from, to, reason string) {
 	log.Printf("🔀 CLASS SWITCHOVER[%s] sess=%s %s -> %s (%s)", class, fpSess(session), from, to, reason)
 	if bridgeTarget() == "" {
 		log.Printf("   (no SWITCH_BRIDGE_URL set — class switch alert skipped)")
@@ -844,11 +842,11 @@ func fireClassAlert(class, session, from, to, reason string) {
 	// nil demote closure: class alerts are always telegram-tier, so gate 1
 	// (critical cooldown) can never fire for them — only gate 2 dedup applies.
 	// nil tierInputs for the same reason: there is no tiering decision to show.
-	rec := &alertRecord{alertname: "ClaudeClassSwitchover", lane: "class:" + class, from: from, to: to, tier: "telegram"}
+	rec := &alertRecord{alertname: "ClaudeClassSwitchover", tenant: tn.id, lane: "class:" + class, from: from, to: to, tier: "telegram"}
 	if out := gateAndEnqueue(rec, entry, reason, nil, nil); !out.enqueued {
 		// Suppressed dispatches publish at the caller; enqueued ones publish
 		// from flushSwitchAlerts (see alert_history.go's ordering contract).
-		publish("alert_dispatch", out.dispatch)
+		publish(tn.id, "alert_dispatch", out.dispatch)
 		log.Printf("   suppressed: identical class alert (class=%s %s->%s) fired within %s", class, from, to, alertRepeatWindow)
 	}
 }
@@ -893,36 +891,39 @@ func imageNoMemberCan(members []classMemberPref, q classReq) bool {
 // routeClass resolves and actuates a class-routed request. The try-order is the
 // bound member first (brain-authoritative), then — only when it can't serve —
 // the local candidates in priority order; the first successful ACTUATION wins.
-func routeClass(ce *registryEntry, sess string, q classReq, hdr http.Header, decisionID ...string) classOutcome {
+func (tn *tenant) routeClass(ce *registryEntry, sess string, q classReq, hdr http.Header, decisionID ...string) classOutcome {
+	// The walk is tn's: every helper below that hands q's context on (a key
+	// ask, a hop) reads tn from it, whatever the caller stamped or left bare.
+	q.ctx = tn.ctxOf(q.ctx)
 	class := ce.Class
 	body, inPath, wireOpenAI := q.origBody, q.inPath, q.wireOpenAI
 	laneKey := "class:" + class
-	bound, bindReason, bindState, refusal, unavail := bindClassMember(class, sess)
+	bound, bindReason, bindState, refusal, unavail := tn.bindClassMember(class, sess)
 	if unavail != nil {
 		// §2.8: the brain bound nothing; its body is the reply.
-		pref.mu.RLock()
-		members := pref.classes[class].Members
-		pref.mu.RUnlock()
-		return unavailableOutcome(ce, class, sess, bound, members, q, hdr, healthReqIDOf(decisionID), unavail)
+		tn.pref.mu.RLock()
+		members := tn.pref.classes[class].Members
+		tn.pref.mu.RUnlock()
+		return tn.unavailableOutcome(ce, class, sess, bound, members, q, hdr, tn.healthReqIDOf(decisionID), unavail)
 	}
 	if refusal != "" {
-		noteState(laneKey, stateFailed)
+		tn.noteState(laneKey, stateFailed)
 		return classOutcome{eff: ce.renderedID(), refuse: refusal,
 			tag: " CLASS[" + class + "] UNROUTABLE (" + refusal + ")"}
 	}
 	if bindState == stateFailed {
-		noteState(laneKey, stateFailed)
+		tn.noteState(laneKey, stateFailed)
 		reason := "brain unreachable and no cached class binding"
 		return classOutcome{eff: ce.renderedID(), refuse: reason,
 			tag: " CLASS[" + class + "] FAILED (" + reason + ")"}
 	}
 
-	pref.mu.RLock()
+	tn.pref.mu.RLock()
 	var members []classMemberPref
-	if cp, has := pref.classes[class]; has {
+	if cp, has := tn.pref.classes[class]; has {
 		members = cp.Members
 	}
-	pref.mu.RUnlock()
+	tn.pref.mu.RUnlock()
 	members = withRequest(members, q)
 	// /class-bind names the member and carries its configuration (the newest
 	// copy: a bind is fetched per session); the live view a dial reads (route,
@@ -935,11 +936,11 @@ func routeClass(ce *registryEntry, sess string, q classReq, hdr http.Header, dec
 	}
 	bound.req = q.kind().request(bound, q)
 
-	reqID := healthReqIDOf(decisionID)
+	reqID := tn.healthReqIDOf(decisionID)
 	// Read the binding once: session facts keeps the pin with health off,
 	// while routing's pin remains gated on health, exactly as before.
-	pinFact, _ := pinForBinding(class, sess, bindReason)
-	pinned := health != nil && pinFact
+	pinFact, _ := tn.pinForBinding(class, sess, bindReason)
+	pinned := tn.health != nil && pinFact
 
 	// §5.2 (#123): under enforce, the health verdict picks the LEAD — the
 	// member that heads the try list — and may short-circuit to a typed 503
@@ -952,20 +953,20 @@ func routeClass(ce *registryEntry, sess string, q classReq, hdr http.Header, dec
 	var lease *probeLease
 	enforced := healthEnforcedClass(class)
 	if enforced {
-		hl := decideHealthRoute(q.context(), class, sess, bound, members, body, wireOpenAI, reqID, pinned)
+		hl := tn.decideHealthRoute(q.context(), class, sess, bound, members, body, wireOpenAI, reqID, pinned)
 		switch {
 		case hl.refuse != "":
-			noteState(laneKey, stateFailed)
+			tn.noteState(laneKey, stateFailed)
 			return classOutcome{eff: ce.renderedID(), refuse: hl.refuse,
 				tag: " CLASS[" + class + "] UNROUTABLE (" + hl.refuse + ")"}
 		case hl.exhaust:
-			return exhaustOutcome(ce, class, sess, bound, members, q, hdr, reqID)
+			return tn.exhaustOutcome(ce, class, sess, bound, members, q, hdr, reqID)
 		}
 		lead, hopKind, routeReason, lease = hl.m, hl.hopKind, hl.reason, hl.lease
 	}
 	abandonLease := func() {
 		if lease != nil {
-			health.settleLease(lease, outcomeProbeAbandoned, sample{class: class, reqID: reqID})
+			tn.health.settleLease(lease, outcomeProbeAbandoned, sample{class: class, reqID: reqID})
 		}
 	}
 
@@ -987,16 +988,16 @@ func routeClass(ce *registryEntry, sess string, q classReq, hdr http.Header, dec
 				try = append(try, m)
 			}
 		}
-	case hopKind == "bound" && memberThrottled(lead, nowFn()):
+	case hopKind == "bound" && tn.memberThrottled(lead, nowFn()):
 		// A throttle deranks (§2.3): the bound member, throttled on the
 		// account it would dial, ranks with the rest, so a healthy member of
 		// its funding tier serves first. It is still dialled when nothing
 		// healthy is left — a throttle is not a `no`. A pin is never detoured.
-		try = classCandidates(members, "")
-	case memberDialable(lead, nowFn()) == "" || (enforced && hopKind != "bound" && hopKind != "pinned"):
-		try = append([]classMemberPref{lead}, classCandidates(members, lead.ID)...)
+		try = tn.classCandidates(q.ctx, members, "")
+	case tn.memberDialable(lead, nowFn()) == "" || (enforced && hopKind != "bound" && hopKind != "pinned"):
+		try = append([]classMemberPref{lead}, tn.classCandidates(q.ctx, members, lead.ID)...)
 	default:
-		try = classCandidates(members, lead.ID)
+		try = tn.classCandidates(q.ctx, members, lead.ID)
 	}
 	// Unavailability (§2.8, §2.2 row 5), judged over every member this wire
 	// could possibly have used — NOT over try, which has already had the
@@ -1007,9 +1008,9 @@ func routeClass(ce *registryEntry, sess string, q classReq, hdr http.Header, dec
 	// Deliberately NOT gated on the health axis being enforced — quota is its own
 	// axis and this must work with SWITCH_HEALTH off.
 	if !countTokens {
-		if u := classUnavailable(members, q, nowFn()); u != nil {
+		if u := tn.classUnavailable(members, q, nowFn()); u != nil {
 			abandonLease()
-			return unavailableOutcome(ce, class, sess, bound, members, q, hdr, reqID, u)
+			return tn.unavailableOutcome(ce, class, sess, bound, members, q, hdr, reqID, u)
 		}
 	}
 	// Capability before money (§2.9): the request's kind filters the whole
@@ -1038,7 +1039,7 @@ func routeClass(ce *registryEntry, sess string, q classReq, hdr http.Header, dec
 		// request, not the class failing (the image door answers it 400):
 		// the class's state is left as it was.
 		if !imageNoMemberCan(members, q) {
-			noteState(laneKey, stateFailed)
+			tn.noteState(laneKey, stateFailed)
 		}
 		reason := "class " + class + " has no members that serve " + kind.name()
 		if q.image != nil {
@@ -1057,7 +1058,7 @@ func routeClass(ce *registryEntry, sess string, q classReq, hdr http.Header, dec
 	unactuated := map[string]string{}
 	for _, m := range try {
 		readmit := enforced && m.ID == lead.ID && hopKind != "bound" && hopKind != "pinned"
-		info, eff, state, ok := actuateClassMember(class, m, bindState, q, readmit, unactuated)
+		info, eff, state, ok := tn.actuateClassMember(class, m, bindState, q, readmit, unactuated)
 		if !ok {
 			continue
 		}
@@ -1075,14 +1076,14 @@ func routeClass(ce *registryEntry, sess string, q classReq, hdr http.Header, dec
 		ccLease := lease
 		if lease != nil && lease.member != m.ID {
 			// The leased member didn't actuate: the probe never flew (Rule 4).
-			health.settleLease(lease, outcomeProbeAbandoned, sample{class: class, reqID: reqID})
+			tn.health.settleLease(lease, outcomeProbeAbandoned, sample{class: class, reqID: reqID})
 			ccLease = nil
 		}
-		info.classCtx = &classRoute{classReq: q, class: class, session: sess, member: m,
+		info.classCtx = &classRoute{classReq: q, tenant: tn, class: class, session: sess, member: m,
 			members: members, origHeader: hdr.Clone(),
 			served: newServedHop(class, m, info, eff, reason), scale: info.scale, bindReason: reason,
 			reqID: reqID, pinned: pinned, pinFact: pinFact, hopKind: hk, routeReason: rr, lease: ccLease, boundMember: bound.ID}
-		noteState(laneKey, state)
+		tn.noteState(laneKey, state)
 		tag := " CLASS[" + class + "→" + m.ID + "] sess=" + fpSess(sess) + " " + state.String() + " check=" + info.check.String()
 		if m.ID != bound.ID {
 			tag += " (detour from " + bound.ID + ")"
@@ -1097,11 +1098,11 @@ func routeClass(ce *registryEntry, sess string, q classReq, hdr http.Header, dec
 		// The pre-flight said a member would get an attempt, but by actuation
 		// it would not — a concurrent request's refusal wrote a record in
 		// between. That is unavailability, not "nothing usable".
-		if u := classUnavailable(members, q, nowFn()); u != nil {
-			return unavailableOutcome(ce, class, sess, bound, members, q, hdr, reqID, u)
+		if u := tn.classUnavailable(members, q, nowFn()); u != nil {
+			return tn.unavailableOutcome(ce, class, sess, bound, members, q, hdr, reqID, u)
 		}
 	}
-	noteState(laneKey, stateFailed)
+	tn.noteState(laneKey, stateFailed)
 	reason := "no member of class " + class + " is usable (bound: " + bound.ID + ")"
 	if len(unactuated) > 0 {
 		ids := make([]string, 0, len(unactuated))
@@ -1136,7 +1137,7 @@ var classPreActuateHook func()
 //
 // unactuated collects, per member id, the account kind an anthropic member
 // was skipped for having no actuator in this build.
-func actuateClassMember(class string, m classMemberPref, bindState routeState, q classReq, readmit bool, unactuated map[string]string) (reqInfo, string, routeState, bool) {
+func (tn *tenant) actuateClassMember(class string, m classMemberPref, bindState routeState, q classReq, readmit bool, unactuated map[string]string) (reqInfo, string, routeState, bool) {
 	if m.Model == "" {
 		return reqInfo{}, "", 0, false // brain predates the anthropic-member model field
 	}
@@ -1153,8 +1154,8 @@ func actuateClassMember(class string, m classMemberPref, bindState routeState, q
 		// The member IS lane traffic on its own route: the lane's pick while
 		// the member's check admits it, else the route's next account, sharing
 		// the lane's bookkeeping and alerts.
-		d := anthropicMemberDial(m, strings.HasSuffix(inPath, "/count_tokens"), readmit)
-		noteState(m.Lane, d.state)
+		d := tn.anthropicMemberDial(m, strings.HasSuffix(inPath, "/count_tokens"), readmit)
+		tn.noteState(m.Lane, d.state)
 		if d.unactuated != "" {
 			// Never dialled, and said: the member's accounts are of a kind
 			// this build cannot sign for (actuator.go).
@@ -1164,7 +1165,7 @@ func actuateClassMember(class string, m classMemberPref, bindState routeState, q
 		if d.none || d.state == stateFailed {
 			return reqInfo{}, "", 0, false
 		}
-		noteEffective(m.Lane, d.acct, d.reason)
+		tn.noteEffective(m.Lane, d.acct, d.reason)
 		state := d.state
 		if bindState == stateStale {
 			state = stateStale // riding a cached binding is stale even on a fresh token
@@ -1175,14 +1176,14 @@ func actuateClassMember(class string, m classMemberPref, bindState routeState, q
 		if forceCache1h {
 			nb = force1hCacheControl(nb)
 		}
-		return reqInfo{token: d.tok, eff: d.acct, state: state, lane: m.Lane, body: nb, check: d.check},
+		return reqInfo{tenant: tn, token: d.tok, eff: d.acct, state: state, lane: m.Lane, body: nb, check: d.check},
 			m.ID + "@" + d.acct, state, true
 	case "provider":
 		p := providerByName(m.Provider)
 		if p == nil {
 			return reqInfo{}, "", 0, false
 		}
-		acct, chk, ok := providerMemberDial(m, "", readmit, strings.HasSuffix(inPath, "/count_tokens"), nowFn())
+		acct, chk, ok := tn.providerMemberDial(m, "", readmit, strings.HasSuffix(inPath, "/count_tokens"), nowFn())
 		if !ok {
 			return reqInfo{}, "", 0, false
 		}
@@ -1191,7 +1192,7 @@ func actuateClassMember(class string, m classMemberPref, bindState routeState, q
 		// refusal here just falls through to the next candidate — an anthropic
 		// member can serve anything this class advertises, including the
 		// /count_tokens calls a translated wire may have no equivalent for.
-		info := reqInfo{eff: m.ID, state: bindState, lane: "class:" + class,
+		info := reqInfo{tenant: tn, eff: m.ID, state: bindState, lane: "class:" + class,
 			bypass: true, upstream: p.target, wire: p.wire,
 			poolAccount: acct, check: chk,
 			ratio: memberRatio(m)}
@@ -1273,7 +1274,7 @@ func shapeRejected429(resp *http.Response, body []byte) bool {
 // brain never learns about 429s (no feedback channel by design).
 func (t *failoverTransport) classRoundTrip(req *http.Request, info reqInfo) (*http.Response, error) {
 	resp, err := t.classRoundTripInner(req, info)
-	healthNoteWouldAct(info.classCtx)
+	info.classCtx.tenant.healthNoteWouldAct(info.classCtx)
 	info.classCtx.trace.head(info)
 	noteLastServed(info.classCtx)
 	return resp, err
@@ -1281,17 +1282,18 @@ func (t *failoverTransport) classRoundTrip(req *http.Request, info reqInfo) (*ht
 
 func (t *failoverTransport) classRoundTripInner(req *http.Request, info reqInfo) (*http.Response, error) {
 	cc := info.classCtx
+	tn := cc.tenant
 	if cc.healthExhaust {
 		// §5.2's allOpen verdict, delivered without a dial: routeClass built
 		// this classCtx purely to carry §5.4's synthetic 529 out through
 		// RoundTrip, so the response tap sees it like any upstream reply.
-		return degradedExhaustResponse(cc, cc.exhaustPinned), nil
+		return tn.degradedExhaustResponse(cc, cc.exhaustPinned), nil
 	}
 	if cc.unavail != nil {
 		// Same shape on the quota axis: the class is unavailable, so there is
 		// nothing to dial. Without this, a request rode a spent
 		// kimi rung into a 120 s hang and reported itself as "timeout".
-		return unavailableResponse(cc), nil
+		return tn.unavailableResponse(cc), nil
 	}
 	resp, err := t.tripFirstEvent(req, info) // no-op wrapper for plain Anthropic attempts; one stall resend on a budget class
 	if errors.Is(err, errResendRefused) {
@@ -1300,7 +1302,7 @@ func (t *failoverTransport) classRoundTripInner(req *http.Request, info reqInfo)
 		before := cc.served.snapshot().attempts
 		resp, err, _ = t.walkRungs(req, info, nil, refusal{}, walkOpt{markQuota: true, alert: true,
 			cause: "first-event resend refused — mid-request member failover"})
-		if health != nil && cc.served.snapshot().attempts > before {
+		if tn.health != nil && cc.served.snapshot().attempts > before {
 			cc.walked = "quota"
 		}
 		if err == nil && resp == nil {
@@ -1313,7 +1315,7 @@ func (t *failoverTransport) classRoundTripInner(req *http.Request, info reqInfo)
 	// (spec signals-4).
 	out := classify(cc.member, req.Context(), resp, err)
 	out.lease = cc.leaseFor(cc.member.ID) // a final head settles the probe here (Rule 4)
-	recordHopHead(cc, cc.member, out)
+	tn.recordHopHead(cc, cc.member, out)
 	if healthEnforcedClass(cc.class) && out.ladder == ladderDetour {
 		// §5.3: degraded AT THE HEAD (≥500/529, or a transport error with no
 		// response) — the one failure shape health may walk. Row 18 (proxy
@@ -1343,12 +1345,12 @@ func (t *failoverTransport) classRoundTripInner(req *http.Request, info reqInfo)
 	log.Printf("⚠️  %d %s on class %s member %s (eff=%s) ratelimit[%s] body=%q",
 		resp.StatusCode, out.refusal.class, cc.class, cc.member.ID, info.eff, ratelimitDetail(resp.Header), snippet)
 	before := cc.served.snapshot().attempts
-	if health != nil {
+	if tn.health != nil {
 		cc.quotaNote = captureNoteWalk(cc.member.ID, resp)
 		cc.quotaNote.shapeRejected = out.refusal.class == refWrongMember
 	}
 	resp, err, exhausted := t.walkRungs(req, info, resp, out.refusal, walkOpt{markQuota: true, alert: true})
-	if health != nil && cc.served.snapshot().attempts > before {
+	if tn.health != nil && cc.served.snapshot().attempts > before {
 		cc.walked = "quota"
 	}
 	if exhausted && err == nil {
@@ -1400,6 +1402,7 @@ type walkOpt struct {
 // shortest Retry-After rather than money dodging a short wait.
 func (t *failoverTransport) walkRungs(req *http.Request, info reqInfo, resp *http.Response, ref refusal, opt walkOpt) (_ *http.Response, _ error, exhausted bool) {
 	cc := info.classCtx
+	tn := cc.tenant
 	body := info.body
 	var err error
 	crossReason := opt.cause
@@ -1415,7 +1418,7 @@ func (t *failoverTransport) walkRungs(req *http.Request, info reqInfo, resp *htt
 		if !opt.markQuota || countTokens {
 			return
 		}
-		kind, what := recordRefusal(account, rf, r)
+		kind, what := tn.recordRefusal(account, rf, r)
 		if kind == "" {
 			return
 		}
@@ -1438,32 +1441,32 @@ func (t *failoverTransport) walkRungs(req *http.Request, info reqInfo, resp *htt
 		// A 429 on one account says nothing about the route's other accounts —
 		// swap accounts on the SAME member first (§2.2 row 8).
 		note(cc.member, info.eff, info.check, resp, ref)
-		if ftok, facct, fc, ok := failoverRoute(cc.member.Route, cc.member.Lane, cc.member.Model, info.eff); ok &&
+		if ftok, facct, fc, ok := tn.failoverRoute(cc.member.Route, cc.member.Lane, cc.member.Model, info.eff); ok &&
 			!(len(throttled) > 0 && fc.paid()) {
 			log.Printf("⚠️  429 on %s — retrying class member %s on account %s check=%s", info.eff, cc.member.ID, facct, fc)
-			forceEffective(cc.member.Lane, facct)
+			tn.forceEffective(cc.member.Lane, facct)
 			st.mu.Lock()
 			st.switches++
 			st.mu.Unlock()
 			if opt.alert {
-				fireSwitchAlert(cc.member.Lane, info.eff, facct, "hit a usage limit ("+ref.class+") — auto-flipped mid-request")
+				tn.fireSwitchAlert(cc.member.Lane, info.eff, facct, "hit a usage limit ("+ref.class+") — auto-flipped mid-request")
 			}
 			resp.Body.Close()
 			req2 := req.Clone(withAnthDial(context.WithValue(req.Context(), servedCheckKey{}, fc), facct, body))
 			req2.Body = io.NopCloser(bytes.NewReader(body))
 			req2.ContentLength = int64(len(body))
-			signAccount(req2.Header, facct, ftok)
+			tn.signAccount(req2.Header, facct, ftok)
 			resp, err = t.tripWithReauth(req2) // a 401 on a rotated copy re-fetches and retries once
 			cc.served.selectHop(cc.member, facct, cc.member.Lane, false, 0)
-			if health != nil { // §5.3: the head site covers the walk's re-issues too
-				recordHopHead(cc, cc.member, classify(cc.member, req2.Context(), resp, err))
+			if tn.health != nil { // §5.3: the head site covers the walk's re-issues too
+				tn.recordHopHead(cc, cc.member, classify(cc.member, req2.Context(), resp, err))
 			}
 			if err != nil || resp == nil {
 				return resp, err, false
 			}
 			// The swapped account's refusal walks on as the member's; any
 			// other answer (served, invalid, degraded) is the reply.
-			if ref = rungRefusal(cc.member, resp); !ref.walks() {
+			if ref = tn.rungRefusal(cc.member, resp); !ref.walks() {
 				return resp, err, false
 			}
 			note(cc.member, facct, fc, resp, ref)
@@ -1479,7 +1482,7 @@ func (t *failoverTransport) walkRungs(req *http.Request, info reqInfo, resp *htt
 			note(cc.member, servedAccount(cc.member, memberEff(cc.member, info.poolAccount)), info.check, resp, ref)
 		}
 		if info.poolAccount != "" {
-			if alt, _, ok := providerMemberDial(cc.member, "", false, countTokens, nowFn()); ok && alt != info.poolAccount {
+			if alt, _, ok := tn.providerMemberDial(cc.member, "", false, countTokens, nowFn()); ok && alt != info.poolAccount {
 				if req2, eff2, ac, ok := t.rebuildForMember(req, cc, cc.member, alt, false); ok {
 					log.Printf("⚠️  429 on %s — retrying class member %s on pool account %s check=%s",
 						info.eff, cc.member.ID, alt, ac)
@@ -1487,7 +1490,7 @@ func (t *failoverTransport) walkRungs(req *http.Request, info reqInfo, resp *htt
 					st.switches++
 					st.mu.Unlock()
 					if opt.alert {
-						fireClassAlert(cc.class, cc.session, info.eff, eff2,
+						tn.fireClassAlert(cc.class, cc.session, info.eff, eff2,
 							"429 — mid-request pool account failover")
 					}
 					if resp != nil {
@@ -1497,9 +1500,9 @@ func (t *failoverTransport) walkRungs(req *http.Request, info reqInfo, resp *htt
 					_, translated := providerByName(cc.member.Provider).wire.(codexWire)
 					cc.served.selectHop(cc.member, servedAccount(cc.member, eff2), "class:"+cc.class, translated, memberRatio(cc.member))
 					var hout hopOutcome
-					if health != nil {
+					if tn.health != nil {
 						hout = classify(cc.member, req2.Context(), resp, err)
-						recordHopHead(cc, cc.member, hout)
+						tn.recordHopHead(cc, cc.member, hout)
 					}
 					if opt.health {
 						// §5.3 continuation: a swapped-account head that fails
@@ -1513,7 +1516,7 @@ func (t *failoverTransport) walkRungs(req *http.Request, info reqInfo, resp *htt
 						if err != nil || resp == nil {
 							return resp, err, false
 						}
-						if ref = rungRefusal(cc.member, resp); !ref.walks() {
+						if ref = tn.rungRefusal(cc.member, resp); !ref.walks() {
 							return resp, err, false
 						}
 						note(cc.member, alt, ac, resp, ref)
@@ -1536,7 +1539,7 @@ func (t *failoverTransport) walkRungs(req *http.Request, info reqInfo, resp *htt
 	cands := opt.candidates
 	if cands == nil {
 		var skipped []memberSkip
-		cands, skipped = rankCandidatesSkips(cc.members, cc.member.ID, rankOpt{ctx: req.Context()})
+		cands, skipped = tn.rankCandidatesSkips(cc.members, cc.member.ID, rankOpt{ctx: req.Context()})
 		if len(skipped) > 0 {
 			log.Printf("⚠️  class %s walk from %s skips %s", cc.class, cc.member.ID, renderSkips(skipped))
 		}
@@ -1562,7 +1565,7 @@ func (t *failoverTransport) walkRungs(req *http.Request, info reqInfo, resp *htt
 			// stated wait. Money does not dodge it: the throttle goes back.
 			log.Printf("⚠️  class %s walk stops before paid %s (%s): included %s throttled",
 				cc.class, next.ID, nc, strings.Join(throttled, ","))
-			return throttleReply(resp, throttled), err, true
+			return tn.throttleReply(resp, throttled), err, true
 		}
 		if resp != nil {
 			resp.Body.Close()
@@ -1572,7 +1575,7 @@ func (t *failoverTransport) walkRungs(req *http.Request, info reqInfo, resp *htt
 		st.switches++
 		st.mu.Unlock()
 		if opt.alert {
-			fireClassAlert(cc.class, cc.session, from, next.ID, crossReason)
+			tn.fireClassAlert(cc.class, cc.session, from, next.ID, crossReason)
 		}
 		translated := false
 		lane := next.Lane
@@ -1585,9 +1588,9 @@ func (t *failoverTransport) walkRungs(req *http.Request, info reqInfo, resp *htt
 		resp, err = t.tripWithReauth(req2) // the cross may land on a translated wire — 401-retry applies there too
 		cc.served.selectHop(next, servedAccount(next, eff2), lane, translated, memberRatio(next))
 		var hout hopOutcome
-		if health != nil {
+		if tn.health != nil {
 			hout = classify(next, req2.Context(), resp, err)
-			recordHopHead(cc, next, hout)
+			tn.recordHopHead(cc, next, hout)
 		}
 		if opt.health {
 			// §5.3 continuation: a rung that head-fails (detour) or refuses
@@ -1606,7 +1609,7 @@ func (t *failoverTransport) walkRungs(req *http.Request, info reqInfo, resp *htt
 		if err != nil || resp == nil {
 			return resp, err, false
 		}
-		if ref = rungRefusal(next, resp); !ref.walks() {
+		if ref = tn.rungRefusal(next, resp); !ref.walks() {
 			return resp, err, false
 		}
 		snippet = string(ref.body)
@@ -1637,14 +1640,14 @@ func refusalCross(resp *http.Response, ref refusal) string {
 
 // throttleReply is the walk's 429 when it stops before paid: the refusal in
 // hand, its Retry-After the soonest end of the throttles this walk recorded.
-func throttleReply(resp *http.Response, accounts []string) *http.Response {
+func (tn *tenant) throttleReply(resp *http.Response, accounts []string) *http.Response {
 	if resp == nil {
 		return nil
 	}
 	now := nowFn()
 	var soonest time.Time
 	for _, a := range accounts {
-		if t := throttledUntil(a, now); !t.IsZero() && (soonest.IsZero() || t.Before(soonest)) {
+		if t := tn.throttledUntil(a, now); !t.IsZero() && (soonest.IsZero() || t.Before(soonest)) {
 			soonest = t
 		}
 	}
@@ -1674,6 +1677,7 @@ func (t *failoverTransport) rebuildForMember(req *http.Request, cc *classRoute, 
 	if m.Model == "" || cc.kind().canServe(m, cc.classReq) != nil {
 		return nil, "", dialCheck{}, false
 	}
+	tn := cc.tenant
 	req2 := req.Clone(req.Context())
 	if cc.origHeader != nil {
 		req2.Header = cc.origHeader.Clone()
@@ -1690,7 +1694,7 @@ func (t *failoverTransport) rebuildForMember(req *http.Request, cc *classRoute, 
 		// translated wire re-translates the freshly spliced body (or builds the
 		// image request again) and re-acquires its credential here, since
 		// attempt 1 may have been a different member entirely.
-		poolAcct, chk, ok := providerMemberDial(m, poolAcct, readmit, strings.HasSuffix(cc.inPath, "/count_tokens"), nowFn())
+		poolAcct, chk, ok := tn.providerMemberDial(m, poolAcct, readmit, strings.HasSuffix(cc.inPath, "/count_tokens"), nowFn())
 		if !ok {
 			return nil, "", dialCheck{}, false
 		}
@@ -1698,7 +1702,7 @@ func (t *failoverTransport) rebuildForMember(req *http.Request, cc *classRoute, 
 		// producers read it off the hop's own context. Mode-off behaviour is
 		// unchanged — the only other reader this reaches is clientStream, which
 		// computes the same bool prepare already set from the spliced body.
-		info := reqInfo{eff: m.ID, upstream: p.target, wire: p.wire, poolAccount: poolAcct,
+		info := reqInfo{tenant: tn, eff: m.ID, upstream: p.target, wire: p.wire, poolAccount: poolAcct,
 			ratio: memberRatio(m), classCtx: cc, check: chk}
 		// Re-aim the request's ONE scaling record at this member — the scale
 		// site attributes (and gates) by the hop that serves, not the one bound.
@@ -1733,7 +1737,7 @@ func (t *failoverTransport) rebuildForMember(req *http.Request, cc *classRoute, 
 		if body == nil {
 			return nil, "", dialCheck{}, false
 		}
-		d := anthropicMemberDial(m, strings.HasSuffix(cc.inPath, "/count_tokens"), readmit)
+		d := tn.anthropicMemberDial(m, strings.HasSuffix(cc.inPath, "/count_tokens"), readmit)
 		if d.none || d.state == stateFailed {
 			return nil, "", dialCheck{}, false
 		}
@@ -1748,7 +1752,7 @@ func (t *failoverTransport) rebuildForMember(req *http.Request, cc *classRoute, 
 		// clone whole here (for a subscription account, the oauth beta flag its
 		// bearer requires too), or the provider→anthropic cross 401s only on this
 		// path. signAccount drops the provider's key first.
-		signAccount(req2.Header, acct, tok)
+		tn.signAccount(req2.Header, acct, tok)
 		// Deliberately NOT re-stamping infoKey the way the provider arm does: an
 		// Anthropic hop is never a translated hop, so nothing reads it — and the
 		// only honest label here is "<member>@<account>", which is not what eff
@@ -1799,7 +1803,7 @@ func joinBasePath(base, in string) string {
 // samples ride the ring for the status surface but never trip E (I5).
 func soleAdmissible(cc *classRoute, servingID string) bool {
 	est := estInputTokens(cc.origBody)
-	for _, rc := range rankCandidates(cc.members, servingID, rankOpt{ctx: cc.classReq.ctx}) {
+	for _, rc := range cc.tenant.rankCandidates(cc.members, servingID, rankOpt{ctx: cc.classReq.ctx}) {
 		m := rc.m
 		if cc.wireOpenAI && m.Kind == "anthropic" {
 			continue
@@ -1821,22 +1825,22 @@ func soleAdmissible(cc *classRoute, servingID string) bool {
 // twice and nothing is missed. The fp/forced work is skipped when the row
 // writes no sample and holds no token (Rule 4 vacuous). The walk's re-issued
 // hops run through here too, each against its own member's key.
-func recordHopHead(cc *classRoute, m classMemberPref, out hopOutcome) {
+func (tn *tenant) recordHopHead(cc *classRoute, m classMemberPref, out hopOutcome) {
 	if cc != nil {
 		cc.trace.outcome(out)
 	}
-	if health == nil || cc == nil || !out.final {
+	if tn.health == nil || cc == nil || !out.final {
 		return
 	}
 	if out.sig == sigAuth {
-		health.noteAuthFailure(m.ID)
+		tn.health.noteAuthFailure(m.ID)
 	}
 	if out.evidence == evNone && out.lease == nil {
 		return
 	}
 	forced := soleAdmissible(cc, m.ID)
 	cc.trace.forced(forced)
-	healthRecord(out, cc.class, cc.reqID, healthFP(cc.origBody), forced)
+	healthRecord(tn.health, out, cc.class, cc.reqID, healthFP(cc.origBody), forced)
 }
 
 // ---- #123: routing consumption (§5.2 route-time, §5.3 mid-request, §5.4 exhaust) ----
@@ -1890,21 +1894,21 @@ type healthLead struct {
 // decideHealthRoute is §5.2's routeClass verdict, evaluated in the spec's
 // precedence order (§5.1 PR0–PR13). It reads the store and may seat an
 // election or claim a probe; it never dials and never mutates the bind cache.
-func decideHealthRoute(ctx context.Context, class, sess string, bound classMemberPref, members []classMemberPref,
+func (tn *tenant) decideHealthRoute(ctx context.Context, class, sess string, bound classMemberPref, members []classMemberPref,
 	body []byte, wireOpenAI bool, reqID string, pinned bool) healthLead {
 	ids := make([]string, 0, len(members))
 	for _, m := range members {
 		ids = append(ids, m.ID)
 	}
-	bindAt := bindMemberSince(class, sess)
-	h := health.routeHints(bound.ID, ids, class, sess, bindAt)
+	bindAt := tn.bindMemberSince(class, sess)
+	h := tn.health.routeHints(bound.ID, ids, class, sess, bindAt)
 	if pinned {
 		// PR1: a pin is never detoured and never pre-empted. If the class
 		// holds a probe token and the pinned hop lands on it, the probe role
 		// is adopted (§4.5) — a member whose check is `no` never probes (§0.2).
 		var l *probeLease
-		if h.halfOpenAny && memberDialable(bound, nowFn()) == "" {
-			l = health.adoptProbe(bound.ID, class, bound.ID, reqID, estInputTokens(body))
+		if h.halfOpenAny && tn.memberDialable(bound, nowFn()) == "" {
+			l = tn.health.adoptProbe(bound.ID, class, bound.ID, reqID, estInputTokens(body))
 		}
 		hk := "pinned"
 		if l != nil {
@@ -1919,7 +1923,7 @@ func decideHealthRoute(ctx context.Context, class, sess string, bound classMembe
 		return healthLead{m: bound, hopKind: "bound"}
 	}
 	est := estInputTokens(body)
-	cand := rankCandidates(members, "", rankOpt{est: est, wire: wireOpenAI, health: true, ctx: ctx})
+	cand := tn.rankCandidates(members, "", rankOpt{est: est, wire: wireOpenAI, health: true, ctx: ctx})
 	// Fast work must not become recovery traffic while a healthy member has
 	// capacity. The live canary exposed PR2 stealing a healthy route for a
 	// reasoning-only probe; the lease TTL releases bookkeeping, not the stream.
@@ -1943,16 +1947,16 @@ func decideHealthRoute(ctx context.Context, class, sess string, bound classMembe
 				return healthLead{m: m, hopKind: "bound"}
 			}
 			pick, kind := ready[0], "ranked"
-			if seat, ok := health.electionFor(bound.ID, class); ok {
+			if seat, ok := tn.health.electionFor(bound.ID, class); ok {
 				if m, eligible := memberByID(ready, seat); eligible {
 					pick, kind = m, "detour"
 				}
-			} else if seat, created := health.elect(bound.ID, class, pick.ID); !created {
+			} else if seat, created := tn.health.elect(bound.ID, class, pick.ID); !created {
 				if m, eligible := memberByID(ready, seat); eligible {
 					pick, kind = m, "detour"
 				}
 			}
-			health.noteSessionDetour(bound.ID, class, sess)
+			tn.health.noteSessionDetour(bound.ID, class, sess)
 			return healthLead{m: pick, hopKind: kind, reason: "health:" + kind}
 		}
 	}
@@ -1962,9 +1966,9 @@ func decideHealthRoute(ctx context.Context, class, sess string, bound classMembe
 		if rc.tier == tierReadmit || rc.health != hsHalfOpen {
 			continue
 		}
-		if l := health.claimProbe(rc.m.ID, class, rc.m.ID, reqID, est); l != nil {
+		if l := tn.health.claimProbe(rc.m.ID, class, rc.m.ID, reqID, est); l != nil {
 			if rc.m.ID != bound.ID {
-				health.noteSessionDetour(bound.ID, class, sess)
+				tn.health.noteSessionDetour(bound.ID, class, sess)
 			}
 			return healthLead{m: rc.m, hopKind: "probe", reason: "health:probe", lease: l}
 		}
@@ -1973,9 +1977,9 @@ func decideHealthRoute(ctx context.Context, class, sess string, bound classMembe
 		// §4.6's ramp hold, tested above PR3 (BL-9) — but only while the
 		// detour member itself can still serve; a degraded or refused detour
 		// member falls through to the ordinary precedence below.
-		if dm, ok := memberByID(members, h.rampTo); ok && memberDialable(dm, nowFn()) == "" &&
+		if dm, ok := memberByID(members, h.rampTo); ok && tn.memberDialable(dm, nowFn()) == "" &&
 			!(wireOpenAI && dm.Kind == "anthropic") {
-			if ss := health.stateOf(dm.ID); ss != hsOpen && ss != hsHalfOpen {
+			if ss := tn.health.stateOf(dm.ID); ss != hsOpen && ss != hsHalfOpen {
 				return healthLead{m: dm, hopKind: "detour", reason: "health:ramp"}
 			}
 		}
@@ -1986,8 +1990,8 @@ func decideHealthRoute(ctx context.Context, class, sess string, bound classMembe
 		// served. If the bound key itself is the half-open one, the hop
 		// adopts the probe role on its way through.
 		var l *probeLease
-		if memberDialable(bound, nowFn()) == "" {
-			l = health.adoptProbe(bound.ID, class, bound.ID, reqID, est)
+		if tn.memberDialable(bound, nowFn()) == "" {
+			l = tn.health.adoptProbe(bound.ID, class, bound.ID, reqID, est)
 		}
 		hk, rr := "bound", ""
 		if l != nil {
@@ -1999,15 +2003,15 @@ func decideHealthRoute(ctx context.Context, class, sess string, bound classMembe
 	// (I1). A seated member that has itself degraded is passed over — the
 	// ranked serve below takes charge without re-seating (the election CAS
 	// keeps the seat; a churning seat would thrash every session).
-	if em, ok := health.electionFor(bound.ID, class); ok {
-		if dm, has := memberByID(members, em); has && memberDialable(dm, nowFn()) == "" &&
+	if em, ok := tn.health.electionFor(bound.ID, class); ok {
+		if dm, has := memberByID(members, em); has && tn.memberDialable(dm, nowFn()) == "" &&
 			!(wireOpenAI && dm.Kind == "anthropic") && dm.Model != "" {
-			if ss := health.stateOf(dm.ID); ss != hsOpen {
+			if ss := tn.health.stateOf(dm.ID); ss != hsOpen {
 				var l *probeLease
 				if ss == hsHalfOpen {
-					l = health.adoptProbe(dm.ID, class, dm.ID, reqID, est)
+					l = tn.health.adoptProbe(dm.ID, class, dm.ID, reqID, est)
 				}
-				health.noteSessionDetour(bound.ID, class, sess)
+				tn.health.noteSessionDetour(bound.ID, class, sess)
 				hk := "detour"
 				if l != nil {
 					hk = "probe"
@@ -2026,10 +2030,10 @@ func decideHealthRoute(ctx context.Context, class, sess string, bound classMembe
 		m := cand[0].m
 		var l *probeLease
 		if cand[0].tier != tierReadmit && cand[0].health == hsHalfOpen {
-			l = health.adoptProbe(m.ID, class, m.ID, reqID, est)
+			l = tn.health.adoptProbe(m.ID, class, m.ID, reqID, est)
 		}
 		if m.ID != bound.ID {
-			health.noteSessionDetour(bound.ID, class, sess)
+			tn.health.noteSessionDetour(bound.ID, class, sess)
 		}
 		return healthLead{m: m, hopKind: "forced", reason: "health:forced-single", lease: l}
 	}
@@ -2039,7 +2043,7 @@ func decideHealthRoute(ctx context.Context, class, sess string, bound classMembe
 		return healthLead{exhaust: true}
 	}
 	pick := cand[0].m
-	if seated, created := health.elect(bound.ID, class, pick.ID); !created {
+	if seated, created := tn.health.elect(bound.ID, class, pick.ID); !created {
 		// A concurrent hop seated its member between our electionFor read and
 		// this elect — ride the seat (I1) when it is still in the snapshot.
 		if dm, has := memberByID(members, seated); has {
@@ -2047,11 +2051,11 @@ func decideHealthRoute(ctx context.Context, class, sess string, bound classMembe
 		}
 	}
 	var l *probeLease
-	if health.stateOf(pick.ID) == hsHalfOpen {
-		l = health.adoptProbe(pick.ID, class, pick.ID, reqID, est)
+	if tn.health.stateOf(pick.ID) == hsHalfOpen {
+		l = tn.health.adoptProbe(pick.ID, class, pick.ID, reqID, est)
 	}
 	if pick.ID != bound.ID {
-		health.noteSessionDetour(bound.ID, class, sess)
+		tn.health.noteSessionDetour(bound.ID, class, sess)
 	}
 	hk := "ranked"
 	if l != nil {
@@ -2064,12 +2068,12 @@ func decideHealthRoute(ctx context.Context, class, sess string, bound classMembe
 // classOutcome whose classCtx is flagged healthExhaust — classRoundTrip
 // answers the synthetic 529 before any dial, so it flows out of RoundTrip and
 // through the response tap like any upstream reply (§5.4 property 1).
-func exhaustOutcome(ce *registryEntry, class, sess string, bound classMemberPref,
+func (tn *tenant) exhaustOutcome(ce *registryEntry, class, sess string, bound classMemberPref,
 	members []classMemberPref, q classReq, hdr http.Header, reqID string) classOutcome {
 	sc := newScaleMark("", 0)
 	sc.resolveNone()
-	info := reqInfo{eff: bound.ID, body: q.origBody}
-	cc := &classRoute{classReq: q, class: class, session: sess, member: bound,
+	info := reqInfo{tenant: tn, eff: bound.ID, body: q.origBody}
+	cc := &classRoute{classReq: q, tenant: tn, class: class, session: sess, member: bound,
 		members: members, origHeader: hdr.Clone(),
 		served: newServedHop(class, bound, info, bound.ID, ""), scale: sc,
 		reqID: reqID, hopKind: "none", routeReason: "health:exhausted",
@@ -2087,12 +2091,12 @@ func exhaustOutcome(ce *registryEntry, class, sess string, bound classMemberPref
 // all see it exactly like an upstream reply — no dial, no actuation, no member
 // touched. bound stays the nominal member (none, when the brain bound nothing)
 // so the served-hop record names the binding the brain actually chose.
-func unavailableOutcome(ce *registryEntry, class, sess string, bound classMemberPref,
+func (tn *tenant) unavailableOutcome(ce *registryEntry, class, sess string, bound classMemberPref,
 	members []classMemberPref, q classReq, hdr http.Header, reqID string, u *unavailable) classOutcome {
 	sc := newScaleMark("", 0)
 	sc.resolveNone()
-	info := reqInfo{eff: bound.ID, body: q.origBody}
-	cc := &classRoute{classReq: q, class: class, session: sess, member: bound,
+	info := reqInfo{tenant: tn, eff: bound.ID, body: q.origBody}
+	cc := &classRoute{classReq: q, tenant: tn, class: class, session: sess, member: bound,
 		members: members, origHeader: hdr.Clone(),
 		served: newServedHop(class, bound, info, bound.ID, ""), scale: sc,
 		reqID: reqID, hopKind: "none", routeReason: "quota:unavailable",
@@ -2109,11 +2113,11 @@ func unavailableOutcome(ce *registryEntry, class, sess string, bound classMember
 
 // healthReqIDOf is the request's decision id when the handler made one, else
 // a fresh one (ring rule 0's dedup key).
-func healthReqIDOf(decisionID []string) string {
+func (tn *tenant) healthReqIDOf(decisionID []string) string {
 	if len(decisionID) > 0 {
 		return decisionID[0]
 	}
-	return healthReqID()
+	return tn.healthReqID()
 }
 
 // healthWalk is §5.3's health detour: the serving hop failed AT THE HEAD
@@ -2125,8 +2129,9 @@ func healthReqIDOf(decisionID []string) string {
 func (t *failoverTransport) healthWalk(req *http.Request, info reqInfo, resp *http.Response,
 	origErr error, cause string, afterQuota bool) (*http.Response, error) {
 	cc := info.classCtx
+	tn := cc.tenant
 	est := estInputTokens(cc.origBody)
-	cand := rankCandidates(cc.members, "", rankOpt{est: est, wire: cc.wireOpenAI, health: true, ctx: req.Context()})
+	cand := tn.rankCandidates(cc.members, "", rankOpt{est: est, wire: cc.wireOpenAI, health: true, ctx: req.Context()})
 	if len(cand) <= 1 {
 		return resp, origErr // sole admissible (or none): ride the failure as-is
 	}
@@ -2134,7 +2139,7 @@ func (t *failoverTransport) healthWalk(req *http.Request, info reqInfo, resp *ht
 		if resp != nil {
 			resp.Body.Close()
 		}
-		return degradedExhaustResponse(cc, true), nil
+		return tn.degradedExhaustResponse(cc, true), nil
 	}
 	servingID := cc.served.snapshot().member
 	rungs := make([]ranked, 0, len(cand))
@@ -2154,7 +2159,7 @@ func (t *failoverTransport) healthWalk(req *http.Request, info reqInfo, resp *ht
 		walked = "both"
 	}
 	before := cc.served.snapshot().attempts
-	if health != nil {
+	if tn.health != nil {
 		cc.healthNote = captureNoteWalk(servingID, resp)
 	}
 	wresp, werr, exhausted := t.walkRungs(req, info, resp, refusal{}, walkOpt{
@@ -2169,15 +2174,15 @@ func (t *failoverTransport) healthWalk(req *http.Request, info reqInfo, resp *ht
 		if wresp != nil {
 			wresp.Body.Close()
 		}
-		return degradedExhaustResponse(cc, false), nil
+		return tn.degradedExhaustResponse(cc, false), nil
 	}
 	return wresp, werr
 }
 
 // degradedDetail names the class's degraded keys for §5.4's message —
 // "gpt/gpt-5.6-sol open 4m0s, kimi/kimi-k3 open 40s".
-func degradedDetail(members []classMemberPref) string {
-	if health == nil {
+func (tn *tenant) degradedDetail(members []classMemberPref) string {
+	if tn.health == nil {
 		return ""
 	}
 	ids := make([]string, 0, len(members))
@@ -2187,7 +2192,7 @@ func degradedDetail(members []classMemberPref) string {
 		byID[m.ID] = m
 	}
 	var parts []string
-	for _, kd := range health.describeKeys(ids) {
+	for _, kd := range tn.health.describeKeys(ids) {
 		if kd.state != hsOpen && kd.state != hsHalfOpen {
 			continue
 		}
@@ -2205,7 +2210,7 @@ func degradedDetail(members []classMemberPref) string {
 // headers. It flags the classCtx so RoundTrip hands it out untouched —
 // translate would replace the header map (destroying Retry-After) and the
 // scaler would misread the body. 529 means health; 503 stays brain/decision.
-func degradedExhaustResponse(cc *classRoute, pinned bool) *http.Response {
+func (tn *tenant) degradedExhaustResponse(cc *classRoute, pinned bool) *http.Response {
 	cc.healthExhaust, cc.exhaustPinned = true, pinned
 	// clamp(8, 5, 60) with ±20% jitter per response (R-48): jitterDur's FNV
 	// spread over the reqID keeps concurrent retries from re-converging.
@@ -2219,7 +2224,7 @@ func degradedExhaustResponse(cc *classRoute, pinned bool) *http.Response {
 	var msg string
 	if pinned {
 		cond := "degraded"
-		for _, kd := range health.describeKeys([]string{cc.member.ID}) {
+		for _, kd := range tn.health.describeKeys([]string{cc.member.ID}) {
 			if kd.state == hsOpen || kd.state == hsHalfOpen {
 				cond = fmt.Sprintf("%s (%s, %d/%d failed)",
 					kd.state, kd.since.Round(time.Second), kd.ringDeg, kd.ringTot)
@@ -2229,7 +2234,7 @@ func degradedExhaustResponse(cc *classRoute, pinned bool) *http.Response {
 			cc.class, cc.member.ID, cond, cc.class, retry)
 	} else {
 		msg = "every member of class " + cc.class + " is degraded"
-		if detail := degradedDetail(cc.members); detail != "" {
+		if detail := tn.degradedDetail(cc.members); detail != "" {
 			msg += " (" + detail + ")"
 		}
 		msg += fmt.Sprintf("; retry in %ds", retry)
@@ -2262,28 +2267,28 @@ func degradedExhaustResponse(cc *classRoute, pinned bool) *http.Response {
 // under observe AND enforce (N24), so the counter reads the same across the
 // rollout: a walk crossed, an exhaust fired, route-time acted (or would
 // have), or the request was served on a key the FSM holds degraded.
-func healthNoteWouldAct(cc *classRoute) {
-	if health == nil || cc == nil {
+func (tn *tenant) healthNoteWouldAct(cc *classRoute) {
+	if tn.health == nil || cc == nil {
 		return
 	}
 	act := cc.walked != "" || cc.healthExhaust ||
 		cc.hopKind == "detour" || cc.hopKind == "ranked" || cc.hopKind == "forced" || cc.hopKind == "probe" ||
 		cc.routeReason == "health:ramp"
 	if !act {
-		switch health.stateOf(cc.served.snapshot().member) {
+		switch tn.health.stateOf(cc.served.snapshot().member) {
 		case "", hsHealthy, hsConvalescent:
 		default:
 			act = true
 		}
 	}
 	if act {
-		health.noteWouldAct(cc.class)
+		tn.health.noteWouldAct(cc.class)
 	}
 	if cc.trace == nil {
-		health.noteRouteDecision(cc.class, cc.hopKind, cc.routeReason)
+		tn.health.noteRouteDecision(cc.class, cc.hopKind, cc.routeReason)
 	}
 	if cc.healthExhaust {
-		health.noteExhausted(cc.class, cc.exhaustPinned)
+		tn.health.noteExhausted(cc.class, cc.exhaustPinned)
 	}
 }
 
@@ -2303,23 +2308,23 @@ type sessionFunding struct {
 // count_tokens writes nothing: it is free and asks entitlement only (§2.2 row
 // 20), so it says nothing of what the session's requests are funded by. A
 // session idle past the brain's binding lifetime is dropped here.
-func noteSessionFunding(cc *classRoute, f sessionFunding) {
+func (tn *tenant) noteSessionFunding(cc *classRoute, f sessionFunding) {
 	if cc == nil || cc.session == "" || strings.HasSuffix(cc.inPath, "/count_tokens") {
 		return
 	}
 	if f.Unavailable {
-		noteSessionUnavailable(cc.class, cc.session, f.Until)
+		tn.noteSessionUnavailable(cc.class, cc.session, f.Until)
 	}
 	now := nowFn()
 	f.at = now
-	bindMu.Lock()
-	sessionFundings[bindKey(cc.class, cc.session)] = f
-	for k, o := range sessionFundings {
+	tn.bindMu.Lock()
+	tn.sessionFundings[bindKey(cc.class, cc.session)] = f
+	for k, o := range tn.sessionFundings {
 		if now.Sub(o.at) > fundingIdle {
-			delete(sessionFundings, k)
+			delete(tn.sessionFundings, k)
 		}
 	}
-	bindMu.Unlock()
+	tn.bindMu.Unlock()
 }
 
 // json is a session's funding as /_switch/status class_funding shows it.

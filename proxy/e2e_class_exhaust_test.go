@@ -81,9 +81,9 @@ func incidentShape(t *testing.T, h *e2eHosted) exhaustScenario {
 	// kimi has never been measured. The proxy merges standings by as_of, so a
 	// reading it holds from the harness's first poll would survive the brain's
 	// null: start it from nothing, as on a proxy that never held one.
-	pref.mu.Lock()
-	delete(pref.accounts, "kimi")
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	delete(lan.pref.accounts, "kimi")
+	lan.pref.mu.Unlock()
 	fetchPreferredSync()
 	return sc
 }
@@ -252,12 +252,12 @@ func TestE2EClassExhaustionRedialsOnlyWhenTheRecordEnds(t *testing.T) {
 	drainCodexHits(h)
 	drainClassAlerts(t, h.e2eEnv)
 
-	recMu.Lock()
-	for k, r := range records {
+	lan.recMu.Lock()
+	for k, r := range lan.records {
 		r.until = time.Now().Add(-time.Second)
-		records[k] = r
+		lan.records[k] = r
 	}
-	recMu.Unlock()
+	lan.recMu.Unlock()
 
 	assertHonest(t, postCC(t, h.e2eEnv, "claude-frontier", "sess-probe"), sc.t1, "five_hour")
 	if hits := drainAnthropicHits(h.e2eEnv); len(hits) != 0 {
@@ -448,10 +448,10 @@ func TestE2EClassWalkCreditsServedLane(t *testing.T) {
 		t.Fatal("the Fable 429 must close native's Fable scope and nothing else")
 	}
 	later := time.Now().Add(quotaCooldown + time.Second) // past the record floor
-	if c, _ := routeCheck("lane:fable", native, "claude-fable-5", later); !c.no() || !c.Until.Time().Equal(reset) {
+	if c, _ := lan.routeCheck("lane:fable", native, "claude-fable-5", later); !c.no() || !c.Until.Time().Equal(reset) {
 		t.Fatalf("fable on native after a haiku 2xx = %s, want still refused by its Fable cap until %v", c, reset)
 	}
-	if c, _ := routeCheck("lane:haiku", native, "claude-haiku-5", later); c.no() {
+	if c, _ := lan.routeCheck("lane:haiku", native, "claude-haiku-5", later); c.no() {
 		t.Fatalf("haiku on native = %s, want admitted", c)
 	}
 }

@@ -118,7 +118,7 @@ func TestNoteCandidateModeAndSnapshot(t *testing.T) {
 	armEnforce(t)
 	oldEnabled := healthNotesEnabled
 	t.Cleanup(func() { healthNotesEnabled = oldEnabled })
-	cc := &classRoute{class: "test-note", boundMember: "gpt/a", member: classMemberPref{ID: "gpt/a"},
+	cc := &classRoute{tenant: lan, class: "test-note", boundMember: "gpt/a", member: classMemberPref{ID: "gpt/a"},
 		served: &servedHop{member: "kimi/b"}, hopKind: "detour"}
 	h.keys["gpt/a"] = &epState{state: hsOpen, since: nowFn().Add(-4 * time.Minute)}
 	n := prepareResponseNote(cc)
@@ -260,7 +260,7 @@ func TestNoteResponseGuardsAndCounters(t *testing.T) {
 			t.Fatalf("status %d counted %d emissions, want %d", status, delta, want)
 		}
 	}
-	metrics := newHealthStore(defaultHealthCfg()).renderMetrics()
+	metrics := renderHealthMetrics(newHealthStore(defaultHealthCfg()))
 	if !strings.Contains(metrics, `switch_health_notes_total{class="note-test",note_kind="walk_health"}`) {
 		t.Fatal("no class/kind emission metric")
 	}

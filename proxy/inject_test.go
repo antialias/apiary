@@ -10,14 +10,14 @@ import (
 
 func withInjectWorld(t *testing.T) {
 	t.Helper()
-	injectMu.Lock()
-	oldSessions := injectSessions
-	injectSessions = map[string]*injectSession{}
-	injectMu.Unlock()
+	lan.injectMu.Lock()
+	oldSessions := lan.injectSessions
+	lan.injectSessions = map[string]*injectSession{}
+	lan.injectMu.Unlock()
 	t.Cleanup(func() {
-		injectMu.Lock()
-		injectSessions = oldSessions
-		injectMu.Unlock()
+		lan.injectMu.Lock()
+		lan.injectSessions = oldSessions
+		lan.injectMu.Unlock()
 	})
 }
 
@@ -25,7 +25,7 @@ func TestInjectEmptyQueueIsByteIdenticalPassthrough(t *testing.T) {
 	withInjectWorld(t)
 	body := []byte(" {\n  \"model\": \"claude-fable-5\", \"messages\" : [ {\"role\":\"user\",\"content\":\"hi\"} ]\n}\n")
 	before := append([]byte(nil), body...)
-	got, reservation := injectRequest(body, "session-a")
+	got, reservation := lan.injectRequest(body, "session-a")
 	if reservation != nil {
 		t.Fatal("empty queue created a reservation")
 	}
@@ -40,17 +40,17 @@ func TestInjectEmptyQueueIsByteIdenticalPassthrough(t *testing.T) {
 func TestInjectAppendsOneVisibleUserTurnInFIFOOrder(t *testing.T) {
 	withInjectWorld(t)
 	const session = "session-a"
-	key := injectObserve(session, time.Now())
-	first, _, problem := injectEnqueue(key, "first instruction", time.Now())
+	key := lan.injectObserve(session, time.Now())
+	first, _, problem := lan.injectEnqueue(key, "first instruction", time.Now())
 	if problem != nil {
 		t.Fatal(problem)
 	}
-	second, _, problem := injectEnqueue(key, "second instruction", time.Now())
+	second, _, problem := lan.injectEnqueue(key, "second instruction", time.Now())
 	if problem != nil {
 		t.Fatal(problem)
 	}
 	body := []byte(`{"model":"claude-fable-5","messages":[{"role":"user","content":"original"}],"stream":true}`)
-	got, reservation := injectRequest(body, session)
+	got, reservation := lan.injectRequest(body, session)
 	if reservation == nil || len(reservation.items) != 2 || reservation.items[0].ID != first.ID || reservation.items[1].ID != second.ID {
 		t.Fatalf("reserved items = %#v, want FIFO %s, %s", reservation, first.ID, second.ID)
 	}
@@ -79,11 +79,11 @@ func TestInjectAppendsOneVisibleUserTurnInFIFOOrder(t *testing.T) {
 	if strings.Index(text, "first instruction") > strings.Index(text, "second instruction") {
 		t.Fatalf("instructions are not FIFO: %q", text)
 	}
-	if concurrent, secondReservation := injectRequest(body, session); secondReservation != nil || !bytes.Equal(concurrent, body) {
+	if concurrent, secondReservation := lan.injectRequest(body, session); secondReservation != nil || !bytes.Equal(concurrent, body) {
 		t.Fatal("a concurrent request stole an in-flight reservation")
 	}
-	finishInject(reservation, true)
-	if again, laterReservation := injectRequest(body, session); laterReservation != nil || !bytes.Equal(again, body) {
+	lan.finishInject(reservation, true)
+	if again, laterReservation := lan.injectRequest(body, session); laterReservation != nil || !bytes.Equal(again, body) {
 		t.Fatal("queue was not committed exactly once")
 	}
 }
@@ -91,22 +91,22 @@ func TestInjectAppendsOneVisibleUserTurnInFIFOOrder(t *testing.T) {
 func TestInjectMalformedRequestDoesNotDrainQueue(t *testing.T) {
 	withInjectWorld(t)
 	const session = "session-a"
-	key := injectObserve(session, time.Now())
-	if _, _, problem := injectEnqueue(key, "keep me", time.Now()); problem != nil {
+	key := lan.injectObserve(session, time.Now())
+	if _, _, problem := lan.injectEnqueue(key, "keep me", time.Now()); problem != nil {
 		t.Fatal(problem)
 	}
 	bad := []byte(`{"model":"claude-fable-5","messages":"not-an-array"}`)
-	got, reservation := injectRequest(bad, session)
+	got, reservation := lan.injectRequest(bad, session)
 	if reservation != nil || !bytes.Equal(got, bad) {
 		t.Fatal("malformed request changed or reserved the queue")
 	}
 	good := []byte(`{"model":"claude-fable-5","messages":[]}`)
-	_, reservation = injectRequest(good, session)
+	_, reservation = lan.injectRequest(good, session)
 	if reservation == nil || len(reservation.items) != 1 || reservation.items[0].Text != "keep me" {
 		t.Fatalf("queued item was lost after malformed request: %#v", reservation)
 	}
-	finishInject(reservation, false)
-	_, retry := injectRequest(good, session)
+	lan.finishInject(reservation, false)
+	_, retry := lan.injectRequest(good, session)
 	if retry == nil || len(retry.items) != 1 {
 		t.Fatal("failed response did not release the reservation for retry")
 	}
@@ -119,23 +119,23 @@ func TestInjectQueueCapsAreTypedAndNeverDrop(t *testing.T) {
 	t.Cleanup(func() {
 		injectMaxItems, injectMaxItemBytes, injectMaxSessionBytes = oldItems, oldItemBytes, oldSessionBytes
 	})
-	key := injectObserve("session-a", time.Now())
-	if _, _, p := injectEnqueue(key, "123456789", time.Now()); p == nil || p.Type != "instruction_too_large" {
+	key := lan.injectObserve("session-a", time.Now())
+	if _, _, p := lan.injectEnqueue(key, "123456789", time.Now()); p == nil || p.Type != "instruction_too_large" {
 		t.Fatalf("oversize problem = %#v", p)
 	}
-	if _, _, p := injectEnqueue(key, "12345678", time.Now()); p != nil {
+	if _, _, p := lan.injectEnqueue(key, "12345678", time.Now()); p != nil {
 		t.Fatal(p)
 	}
-	if _, _, p := injectEnqueue(key, "12345", time.Now()); p == nil || p.Type != "queue_full" {
+	if _, _, p := lan.injectEnqueue(key, "12345", time.Now()); p == nil || p.Type != "queue_full" {
 		t.Fatalf("byte-cap problem = %#v", p)
 	}
-	if _, _, p := injectEnqueue(key, "four", time.Now()); p != nil {
+	if _, _, p := lan.injectEnqueue(key, "four", time.Now()); p != nil {
 		t.Fatal(p)
 	}
-	if _, depth, p := injectEnqueue(key, "x", time.Now()); p == nil || p.Type != "queue_full" || depth != 2 {
+	if _, depth, p := lan.injectEnqueue(key, "x", time.Now()); p == nil || p.Type != "queue_full" || depth != 2 {
 		t.Fatalf("item-cap result depth=%d problem=%#v", depth, p)
 	}
-	_, reservation := injectRequest([]byte(`{"messages":[]}`), "session-a")
+	_, reservation := lan.injectRequest([]byte(`{"messages":[]}`), "session-a")
 	if reservation == nil || len(reservation.items) != 2 || reservation.items[0].Text != "12345678" || reservation.items[1].Text != "four" {
 		t.Fatalf("cap silently dropped/reordered accepted items: %#v", reservation)
 	}
@@ -143,7 +143,7 @@ func TestInjectQueueCapsAreTypedAndNeverDrop(t *testing.T) {
 
 func TestInjectRejectsUnknownSession(t *testing.T) {
 	withInjectWorld(t)
-	_, _, problem := injectEnqueue(strings.Repeat("a", 64), "hello", time.Now())
+	_, _, problem := lan.injectEnqueue(strings.Repeat("a", 64), "hello", time.Now())
 	if problem == nil || problem.Type != "unknown_session" || problem.Status != 404 {
 		t.Fatalf("problem = %#v", problem)
 	}

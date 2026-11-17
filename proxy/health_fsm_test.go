@@ -833,11 +833,11 @@ func TestU5RecordsOnNowFn(t *testing.T) {
 	t.Cleanup(resetQuotaState())
 	m := uMember(uniq("u5"))
 	uSpent(m)
-	if c, _ := routeCheck(m.Route, uAccount(m.ID), m.Model, nowFn()); !c.no() {
+	if c, _ := lan.routeCheck(m.Route, uAccount(m.ID), m.Model, nowFn()); !c.no() {
 		t.Fatalf("check = %s right after the record, want no", c)
 	}
 	c.advance(quotaCooldown + time.Second)
-	if chk, _ := routeCheck(m.Route, uAccount(m.ID), m.Model, nowFn()); !chk.included() {
+	if chk, _ := lan.routeCheck(m.Route, uAccount(m.ID), m.Model, nowFn()); !chk.included() {
 		t.Fatalf("check = %s after the floor on the fake clock — the store is not on nowFn", chk)
 	}
 }

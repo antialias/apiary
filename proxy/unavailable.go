@@ -118,6 +118,7 @@ type unavailOption struct {
 
 // unavailable is the §2.8 body: the brain's 409 and this proxy's own.
 type unavailable struct {
+	tenant         *tenant         // whose refusal: its router-dry clause reads its classes
 	Members        []unavailMember `json:"members"`
 	AvailableAt    *float64        `json:"available_at"`
 	AvailableBasis *string         `json:"available_basis"`
@@ -337,14 +338,14 @@ func strOrEmpty(s *string) string {
 
 // memberUnroutable is why this proxy cannot dial a member at all, "" when it
 // can: a configuration fact, not a quota one. ctx is the asking request's.
-func memberUnroutable(ctx context.Context, m classMemberPref) string {
+func (tn *tenant) memberUnroutable(ctx context.Context, m classMemberPref) string {
 	if m.Kind == "provider" && providerByName(m.Provider) == nil {
 		return "provider " + m.Provider + " is not configured here"
 	}
-	if r, _, _, ok := routeOf(m.Route); !ok || len(r.Accounts) == 0 {
+	if r, _, _, ok := tn.routeOf(m.Route); !ok || len(r.Accounts) == 0 {
 		return "the brain serves no route " + m.Route
 	}
-	return memberKeyMissing(ctx, m)
+	return tn.memberKeyMissing(ctx, m)
 }
 
 // keyedWire is a wire that sends an account's key the brain dispenses
@@ -355,8 +356,12 @@ type keyedWire interface {
 
 // memberKeyMissing is why a keyed wire's member has no key on any account of
 // its route ("" = one has a key, or the wire sends none of its own): it is
-// then unusable, with that reason, and nothing is recorded.
-func memberKeyMissing(ctx context.Context, m classMemberPref) string {
+// then unusable, with that reason, and nothing is recorded. The wire is asked
+// on tn's behalf (ctxOf): the key it looks for is tn's dispense of tn's
+// account, whatever ctx carried — a walk with no request context (the
+// prober's, the status page's) is never judged against another tenant.
+func (tn *tenant) memberKeyMissing(ctx context.Context, m classMemberPref) string {
+	ctx = tn.ctxOf(ctx)
 	p := providerByName(m.Provider)
 	if m.Kind != "provider" || p == nil {
 		return ""
@@ -365,7 +370,7 @@ func memberKeyMissing(ctx context.Context, m classMemberPref) string {
 	if !ok {
 		return ""
 	}
-	r, _, _, ok := routeOf(m.Route)
+	r, _, _, ok := tn.routeOf(m.Route)
 	if !ok {
 		return ""
 	}
@@ -384,12 +389,12 @@ func memberKeyMissing(ctx context.Context, m classMemberPref) string {
 // attempt, and nil when no member is routable here at all (an empty universe,
 // or every member unroutable, so no route has an account): that is a
 // configuration error, and the typed 503 is the caller's.
-func classUnavailable(members []classMemberPref, q classReq, now time.Time) *unavailable {
-	routes, routable := classRoutes(members, q, now, true)
+func (tn *tenant) classUnavailable(members []classMemberPref, q classReq, now time.Time) *unavailable {
+	routes, routable := tn.classRoutes(members, q, now, true)
 	if routable {
 		return nil
 	}
-	return routesUnavailable(routes, modelsOf(members), now)
+	return tn.routesUnavailable(routes, modelsOf(members), now)
 }
 
 // classRoutes is every member's route as the reply lists it, in member
@@ -400,7 +405,7 @@ func classUnavailable(members []classMemberPref, q classReq, now time.Time) *una
 // the OpenAI wire) is left out, as a member that wire never uses. With stop,
 // it stops at the first member that would get a real attempt now and says
 // so (routable).
-func classRoutes(members []classMemberPref, q classReq, now time.Time, stop bool) (routes []unavailRoute, routable bool) {
+func (tn *tenant) classRoutes(members []classMemberPref, q classReq, now time.Time, stop bool) (routes []unavailRoute, routable bool) {
 	kind := q.kind()
 	for _, m := range members {
 		if cs := kind.canServe(m, q); cs != nil {
@@ -409,14 +414,14 @@ func classRoutes(members []classMemberPref, q classReq, now time.Time, stop bool
 			}
 			continue
 		}
-		if why := memberUnroutable(q.context(), m); why != "" {
+		if why := tn.memberUnroutable(q.context(), m); why != "" {
 			routes = append(routes, unavailRoute{policy: routePolicy{ID: m.Route}, unroutable: why})
 			continue
 		}
-		if stop && memberRoutableNow(m, now) {
+		if stop && tn.memberRoutableNow(m, now) {
 			return nil, true
 		}
-		r, _, _, _ := routeOf(m.Route)
+		r, _, _, _ := tn.routeOf(m.Route)
 		routes = append(routes, unavailRoute{policy: r.routePolicy, accounts: r.Accounts, req: m.req})
 	}
 	return routes, false
@@ -427,16 +432,16 @@ func classRoutes(members []classMemberPref, q classReq, now time.Time, stop bool
 // door's 400): built even when no route has an account (every member
 // skipped for capability or unroutable), which the unavailable reply leaves
 // to the typed 503.
-func classRefusal(members []classMemberPref, q classReq, now time.Time) *unavailable {
-	routes, _ := classRoutes(members, q, now, false)
+func (tn *tenant) classRefusal(members []classMemberPref, q classReq, now time.Time) *unavailable {
+	routes, _ := tn.classRoutes(members, q, now, false)
 	if q.image != nil {
 		q.image.refusalRoutes(members, q, routes, now)
 	}
-	if u := routesUnavailable(routes, modelsOf(members), now); u != nil {
+	if u := tn.routesUnavailable(routes, modelsOf(members), now); u != nil {
 		return u
 	}
 	f := false
-	u := &unavailable{Members: []unavailMember{}, Options: []unavailOption{}, Retryable: &f}
+	u := &unavailable{tenant: tn, Members: []unavailMember{}, Options: []unavailOption{}, Retryable: &f}
 	for _, rt := range routes {
 		u.Members = append(u.Members, unavailMember{Route: rt.policy.ID, Accounts: []unavailAccount{},
 			Unroutable: rt.unroutable, CannotServe: rt.cannotServe})
@@ -456,30 +461,31 @@ func modelsOf(members []classMemberPref) map[string]string {
 
 // routesUnavailable asks every account of every route its check, on the
 // standing that check read, and builds the body (nil with no account at all).
-func routesUnavailable(routes []unavailRoute, models map[string]string, now time.Time) *unavailable {
+func (tn *tenant) routesUnavailable(routes []unavailRoute, models map[string]string, now time.Time) *unavailable {
 	checks := map[string]map[string]dialCheck{}
 	standings := map[string]map[string]*acctStanding{}
 	for _, rt := range routes {
 		checks[rt.policy.ID], standings[rt.policy.ID] = map[string]dialCheck{}, map[string]*acctStanding{}
 		for _, a := range rt.accounts {
-			c, st, _ := routeCheckStanding(rt.policy.ID, a, models[rt.policy.ID], rt.req, now)
+			c, st, _ := tn.routeCheckStanding(rt.policy.ID, a, models[rt.policy.ID], rt.req, now)
 			checks[rt.policy.ID][a], standings[rt.policy.ID][a] = c, st
 		}
 	}
-	pref.mu.RLock()
-	pots := pref.pots
-	pref.mu.RUnlock()
-	u := unavailableBody(routes, checks, standings, unixSeconds(now), pots, ledgerView(unixSeconds(now)))
+	tn.pref.mu.RLock()
+	pots := tn.pref.pots
+	tn.pref.mu.RUnlock()
+	u := unavailableBody(routes, checks, standings, unixSeconds(now), pots, tn.ledgerView(unixSeconds(now)))
 	if u == nil {
 		return nil
 	}
+	u.tenant = tn
 	for i := range u.Members {
 		for j := range u.Members[i].Accounts {
 			a := &u.Members[i].Accounts[j]
 			if a.Why == nil {
 				continue
 			}
-			if rec, ok := spentRecordOf(a.Account, now); ok && rec.detail != "" {
+			if rec, ok := tn.spentRecordOf(a.Account, now); ok && rec.detail != "" {
 				a.Detail = strconv.Itoa(rec.status) + " " + rec.detail
 			}
 			if st := standings[u.Members[i].Route][a.Account]; st != nil {
@@ -494,10 +500,10 @@ func routesUnavailable(routes []unavailRoute, models map[string]string, now time
 }
 
 // laneUnavailable is a bare lane's body: one member, the lane's route.
-func laneUnavailable(lane, model string, now time.Time) *unavailable {
+func (tn *tenant) laneUnavailable(lane, model string, now time.Time) *unavailable {
 	id := laneRouteID(lane)
-	r, _, _, _ := routeOf(id)
-	return routesUnavailable([]unavailRoute{{policy: r.routePolicy, accounts: r.Accounts}},
+	r, _, _, _ := tn.routeOf(id)
+	return tn.routesUnavailable([]unavailRoute{{policy: r.routePolicy, accounts: r.Accounts}},
 		map[string]string{id: model}, now)
 }
 
@@ -651,7 +657,7 @@ func (u *unavailable) message(subject string, now time.Time) string {
 		}
 		b.WriteString(" Options: " + strings.Join(acts, "; ") + ".")
 	}
-	return b.String() + routerDryClause()
+	return b.String() + u.tenant.routerDryClause()
 }
 
 // claim is the representative-claim Claude Code reads for the minted reset:
@@ -742,7 +748,7 @@ func renderUnavailable(u *unavailable, subject, class, reqID string, rw replyWir
 // unavailableResponse mints the reply for a classCtx carrying a body; it flows
 // out of RoundTrip untouched (cc.unavail exempts it from translate, which
 // would rebuild the header map).
-func unavailableResponse(cc *classRoute) *http.Response {
+func (tn *tenant) unavailableResponse(cc *classRoute) *http.Response {
 	now := nowFn()
 	rw := replyWireFor(cc.origHeader, cc.wireOpenAI)
 	status, hd, body, msg := renderUnavailable(cc.unavail, "class "+cc.class, cc.class, cc.reqID, rw, now)
@@ -752,7 +758,7 @@ func unavailableResponse(cc *classRoute) *http.Response {
 	if cc.unavail.retryable() && cc.unavail.timed() {
 		f.Until = epochTime(*cc.unavail.AvailableAt)
 	}
-	noteSessionFunding(cc, f)
+	tn.noteSessionFunding(cc, f)
 	logUnavailable("class "+cc.class, status, rw, hd, msg)
 	return &http.Response{
 		StatusCode: status, Status: fmt.Sprintf("%d %s", status, http.StatusText(status)),
@@ -770,9 +776,9 @@ func logUnavailable(subject string, status int, rw replyWire, hd http.Header, ms
 // writeLaneRefused answers a bare-lane request whose route admits no account
 // (§2.2 row 11) with the lane's unavailable reply; nobody is dialled. A bare
 // lane is the Anthropic wire.
-func writeLaneRefused(w http.ResponseWriter, d *laneDecision, hdr http.Header, now time.Time) {
+func (tn *tenant) writeLaneRefused(w http.ResponseWriter, d *laneDecision, hdr http.Header, now time.Time) {
 	lane := strings.TrimPrefix(d.refusedRoute, "lane:")
-	u := laneUnavailable(lane, d.model, now)
+	u := tn.laneUnavailable(lane, d.model, now)
 	if u == nil {
 		// No account serves the lane at all: configuration, not quota.
 		writeModelUnroutable(w, "lane:"+lane, "the brain serves no account on lane "+lane, 0)

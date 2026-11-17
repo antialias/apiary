@@ -23,7 +23,7 @@ import (
 
 func init() {
 	actuators[subscriptionKind] = &actuator{
-		credential: getToken,
+		credential: (*tenant).getToken,
 		sign: func(h http.Header, tok string) {
 			h.Set("Authorization", "Bearer "+tok)
 			// anthropic-beta / anthropic-version are forwarded verbatim — EXCEPT
@@ -39,7 +39,7 @@ func init() {
 		},
 		accountOf: accountByBearer,
 		refused:   (*failoverTransport).anthropicReauth,
-		warm:      warmSubscriptions,
+		warm:      (*tenant).warmSubscriptions,
 	}
 }
 
@@ -47,12 +47,12 @@ func init() {
 // any lane routes to (not just the default), so a freshly-flipped lane's
 // first request doesn't stall on a fetch. Every routed account is warmed —
 // none is privileged, all get injected.
-func warmSubscriptions(warm map[string]bool) {
-	setWarmSet(warm)
+func (tn *tenant) warmSubscriptions(warm map[string]bool) {
+	tn.setWarmSet(warm)
 	for a := range warm {
 		if a != "" {
 			prewarmWG.Add(1)
-			go func(a string) { defer prewarmWG.Done(); getToken(a) }(a)
+			go func(a string) { defer prewarmWG.Done(); tn.getToken(a) }(a)
 		}
 	}
 }
@@ -86,20 +86,17 @@ type refusedCopy struct {
 	fetchedAt, exp time.Time
 }
 
-var (
-	tokMu  sync.Mutex
-	tokens = map[string]tokEntry{}
-)
+// The cache is per tenant: tenant.tokMu, tenant.tokens.
 
 // fetchToken asks the brain for account's access token. refusedFP, when set,
 // is the fingerprint (fp) of the copy Anthropic just refused: the brain records
 // the refusal and checks its own copy (an old brain ignores the parameter).
-func fetchToken(account, refusedFP string) (string, time.Time, error) {
+func (tn *tenant) fetchToken(account, refusedFP string) (string, time.Time, error) {
 	q := "/token?account=" + url.QueryEscape(account)
 	if refusedFP != "" {
 		q += "&refused_fp=" + url.QueryEscape(refusedFP)
 	}
-	req, _ := http.NewRequest("GET", brainURL+q, nil)
+	req, _ := http.NewRequest("GET", tn.brainURL()+q, nil)
 	req.Header.Set("X-Switch-Key", switchKey)
 	resp, err := brainClient.Do(req)
 	if err != nil {
@@ -124,14 +121,14 @@ func fetchToken(account, refusedFP string) (string, time.Time, error) {
 // A still-valid cached token is returned when a live fetch fails (this is what makes a
 // brain-down route STALE rather than FAILED). The network fetch runs without the lock
 // held so concurrent requests don't serialize behind it.
-func getToken(account string) string {
-	tokMu.Lock()
-	e := tokens[account]
-	tokMu.Unlock()
+func (tn *tenant) getToken(account string) string {
+	tn.tokMu.Lock()
+	e := tn.tokens[account]
+	tn.tokMu.Unlock()
 	if e.token != "" && time.Until(e.exp) > tokenRefreshMargin {
 		return e.token
 	}
-	tok, exp, err := fetchToken(account, "")
+	tok, exp, err := tn.fetchToken(account, "")
 	if err != nil {
 		if e.token != "" && time.Now().Before(e.exp) {
 			return e.token // still-valid cached token (keeps a brain-down route STALE, not FAILED)
@@ -139,22 +136,22 @@ func getToken(account string) string {
 		log.Printf("token fetch for %s failed: %v (no cached token — route will FAIL loud)", account, err)
 		return ""
 	}
-	storeToken(account, tok, exp)
+	tn.storeToken(account, tok, exp)
 	return tok
 }
 
 // storeToken caches a freshly fetched token and arms its prewarm timer. The
 // account's refusal history stays; a new copy lifts the reauth quiet.
-func storeToken(account, tok string, exp time.Time) {
-	tokMu.Lock()
-	e := tokens[account]
+func (tn *tenant) storeToken(account, tok string, exp time.Time) {
+	tn.tokMu.Lock()
+	e := tn.tokens[account]
 	if e.token != tok {
 		e.quietUntil = time.Time{}
 	}
 	e.token, e.exp, e.fetchedAt = tok, exp, time.Now()
-	tokens[account] = e
-	tokMu.Unlock()
-	armPrewarm(account, exp)
+	tn.tokens[account] = e
+	tn.tokMu.Unlock()
+	tn.armPrewarm(account, exp)
 }
 
 // reauthQuiet is how long a reauth that got nothing fresher keeps this proxy
@@ -171,18 +168,15 @@ var reauthFailQuiet = 3 * time.Second
 // reauthLocks serializes the reauths of one account, so a burst of 401s on a
 // rotated copy makes one brain fetch: the first holder fetches, the rest find
 // the copy already replaced.
-var (
-	reauthLocksMu sync.Mutex
-	reauthLocks   = map[string]*sync.Mutex{}
-)
+// Per tenant: tenant.reauthLocksMu, tenant.reauthLocks.
 
-func reauthLock(account string) *sync.Mutex {
-	reauthLocksMu.Lock()
-	defer reauthLocksMu.Unlock()
-	m := reauthLocks[account]
+func (tn *tenant) reauthLock(account string) *sync.Mutex {
+	tn.reauthLocksMu.Lock()
+	defer tn.reauthLocksMu.Unlock()
+	m := tn.reauthLocks[account]
 	if m == nil {
 		m = &sync.Mutex{}
-		reauthLocks[account] = m
+		tn.reauthLocks[account] = m
 	}
 	return m
 }
@@ -205,20 +199,20 @@ type reauthResult struct {
 // the refused one, else a fresh one from the brain, told which copy was
 // refused. It never empties the cache: accountByBearer and getToken's
 // brain-down fallback read it, and storeToken re-arms the prewarm itself.
-func reauthToken(account, refused, msg string) reauthResult {
-	mu := reauthLock(account)
+func (tn *tenant) reauthToken(account, refused, msg string) reauthResult {
+	mu := tn.reauthLock(account)
 	mu.Lock()
 	defer mu.Unlock()
 	now := time.Now()
 	rfp := fp("Bearer " + refused)
-	tokMu.Lock()
-	e := tokens[account]
+	tn.tokMu.Lock()
+	e := tn.tokens[account]
 	if e.token != "" && e.token != refused {
 		old := refusedCopy{fp: rfp}
 		if e.refused.fp == rfp {
 			old = e.refused
 		}
-		tokMu.Unlock()
+		tn.tokMu.Unlock()
 		return reauthResult{tok: e.token, how: "replaced", old: old}
 	}
 	old := refusedCopy{at: now, fp: rfp, msg: msg, fetchedAt: e.fetchedAt, exp: e.exp}
@@ -228,57 +222,57 @@ func reauthToken(account, refused, msg string) reauthResult {
 		if !quiet {
 			e.reauths++
 		}
-		tokens[account] = e
+		tn.tokens[account] = e
 	}
-	tokMu.Unlock()
+	tn.tokMu.Unlock()
 	if quiet {
 		return reauthResult{how: "quiet", old: old, quietFor: e.quietFor}
 	}
-	tok, exp, err := fetchToken(account, rfp)
+	tok, exp, err := tn.fetchToken(account, rfp)
 	switch {
 	case err != nil:
-		quietAccount(account, refused, reauthFailQuiet)
+		tn.quietAccount(account, refused, reauthFailQuiet)
 		return reauthResult{how: "failed", err: err, old: old}
 	case tok == refused:
-		quietAccount(account, refused, reauthQuiet)
+		tn.quietAccount(account, refused, reauthQuiet)
 		return reauthResult{how: "same", old: old}
 	}
-	storeToken(account, tok, exp)
+	tn.storeToken(account, tok, exp)
 	return reauthResult{tok: tok, how: "fetched", old: old}
 }
 
 // quietAccount starts account's reauth quiet, for d, while its cached copy is
 // still tok: a copy that moved on meanwhile is not held to it.
-func quietAccount(account, tok string, d time.Duration) {
-	tokMu.Lock()
-	defer tokMu.Unlock()
-	if e := tokens[account]; e.token == tok {
+func (tn *tenant) quietAccount(account, tok string, d time.Duration) {
+	tn.tokMu.Lock()
+	defer tn.tokMu.Unlock()
+	if e := tn.tokens[account]; e.token == tok {
 		e.quietUntil = time.Now().Add(d)
 		e.quietFor = d
-		tokens[account] = e
+		tn.tokens[account] = e
 	}
 }
 
 // noteRetryRefused records Anthropic refusing the fresh copy a reauth retried
 // on too, and quiets the account: a copy straight from the brain refused at
 // once is a grant the brain cannot mend by being asked again.
-func noteRetryRefused(account, tok, msg string) {
-	tokMu.Lock()
-	if e := tokens[account]; e.token == tok {
+func (tn *tenant) noteRetryRefused(account, tok, msg string) {
+	tn.tokMu.Lock()
+	if e := tn.tokens[account]; e.token == tok {
 		e.refused = refusedCopy{at: time.Now(), fp: fp("Bearer " + tok), msg: msg, fetchedAt: e.fetchedAt, exp: e.exp}
-		tokens[account] = e
+		tn.tokens[account] = e
 	}
-	tokMu.Unlock()
-	quietAccount(account, tok, reauthQuiet)
+	tn.tokMu.Unlock()
+	tn.quietAccount(account, tok, reauthQuiet)
 }
 
 // anthropicTokensStatus is /_switch/status's anthropic_tokens: per account,
 // the cached copy's fingerprint, when it was fetched and expires, the last
 // refusal Anthropic gave an injected copy, and how many reauths refusals
 // caused. tokMu is held by the caller.
-func anthropicTokensStatus() map[string]any {
-	out := make(map[string]any, len(tokens))
-	for a, e := range tokens {
+func (tn *tenant) anthropicTokensStatus() map[string]any {
+	out := make(map[string]any, len(tn.tokens))
+	for a, e := range tn.tokens {
 		if e.token == "" {
 			continue
 		}
@@ -313,11 +307,7 @@ const tokenRefreshMargin = 10 * time.Minute
 // a token's own clock says when. warmSet is the routed accounts the last
 // applied document named (applyPreferred); warmTimers holds one timer per
 // account, armed when getToken stores a token, firing at exp - margin.
-var (
-	warmMu     sync.Mutex
-	warmSet    = map[string]bool{}
-	warmTimers = map[string]*time.Timer{}
-)
+// Per tenant: tenant.warmMu, tenant.warmSet, tenant.warmTimers.
 
 // A timed refresh that fails is tried again while the cached token lasts:
 // after prewarmRetryMin, doubling up to prewarmRetryMax, and never later than
@@ -350,25 +340,25 @@ func nextPrewarmRetry(prev, left time.Duration) time.Duration {
 // account that rejoins the set with a still-fresh token would otherwise have
 // none, since getToken's cache hit arms nothing. tokMu is taken inside warmMu
 // here; nothing takes warmMu while holding tokMu.
-func setWarmSet(w map[string]bool) {
-	warmMu.Lock()
-	defer warmMu.Unlock()
-	warmSet = w
-	for a, t := range warmTimers {
+func (tn *tenant) setWarmSet(w map[string]bool) {
+	tn.warmMu.Lock()
+	defer tn.warmMu.Unlock()
+	tn.warmSet = w
+	for a, t := range tn.warmTimers {
 		if !w[a] {
 			t.Stop()
-			delete(warmTimers, a)
+			delete(tn.warmTimers, a)
 		}
 	}
 	for a := range w {
-		if a == "" || warmTimers[a] != nil {
+		if a == "" || tn.warmTimers[a] != nil {
 			continue
 		}
-		tokMu.Lock()
-		e := tokens[a]
-		tokMu.Unlock()
+		tn.tokMu.Lock()
+		e := tn.tokens[a]
+		tn.tokMu.Unlock()
 		if e.token != "" {
-			armPrewarmLocked(a, e.exp)
+			tn.armPrewarmLocked(a, e.exp)
 		}
 	}
 }
@@ -378,42 +368,42 @@ func setWarmSet(w map[string]bool) {
 // the next document cover it), nor does an account outside the warm set. A
 // timed refresh that fails re-arms itself (prewarmRefresh); a failed fetch on
 // any other path arms nothing.
-func armPrewarm(account string, exp time.Time) {
-	warmMu.Lock()
-	defer warmMu.Unlock()
-	armPrewarmLocked(account, exp)
+func (tn *tenant) armPrewarm(account string, exp time.Time) {
+	tn.warmMu.Lock()
+	defer tn.warmMu.Unlock()
+	tn.armPrewarmLocked(account, exp)
 }
 
 // armPrewarmLocked is armPrewarm with warmMu held.
-func armPrewarmLocked(account string, exp time.Time) {
+func (tn *tenant) armPrewarmLocked(account string, exp time.Time) {
 	left := time.Until(exp) - tokenRefreshMargin
-	if !warmSet[account] || left <= 0 {
+	if !tn.warmSet[account] || left <= 0 {
 		return
 	}
-	armWarmTimerLocked(account, left, 0)
+	tn.armWarmTimerLocked(account, left, 0)
 }
 
 // armWarmTimerLocked (re)arms account's one timer to run prewarmRefresh after
 // d; wait is the wait it was armed with when it is a retry, 0 at the margin.
-func armWarmTimerLocked(account string, d, wait time.Duration) {
-	if t := warmTimers[account]; t != nil {
+func (tn *tenant) armWarmTimerLocked(account string, d, wait time.Duration) {
+	if t := tn.warmTimers[account]; t != nil {
 		t.Stop()
 	}
 	var t *time.Timer
 	t = time.AfterFunc(d, func() {
-		warmMu.Lock()
-		live := warmTimers[account] == t
+		tn.warmMu.Lock()
+		live := tn.warmTimers[account] == t
 		if live {
-			delete(warmTimers, account)
+			delete(tn.warmTimers, account)
 			prewarmWG.Add(1)
 		}
-		warmMu.Unlock()
+		tn.warmMu.Unlock()
 		if live {
 			defer prewarmWG.Done()
-			prewarmRefresh(account, wait)
+			tn.prewarmRefresh(account, wait)
 		}
 	})
-	warmTimers[account] = t
+	tn.warmTimers[account] = t
 }
 
 // prewarmRefresh is a timer's fetch. On success storeToken arms the next one
@@ -421,15 +411,15 @@ func armWarmTimerLocked(account string, d, wait time.Duration) {
 // the brain is down) and the refresh is armed again (nextPrewarmRetry),
 // unless another path armed a timer meanwhile or the account left the warm
 // set. The first failure of a run is logged; the retries are not.
-func prewarmRefresh(account string, wait time.Duration) {
-	tok, exp, err := fetchToken(account, "")
+func (tn *tenant) prewarmRefresh(account string, wait time.Duration) {
+	tok, exp, err := tn.fetchToken(account, "")
 	if err == nil {
-		storeToken(account, tok, exp)
+		tn.storeToken(account, tok, exp)
 		return
 	}
-	tokMu.Lock()
-	e := tokens[account]
-	tokMu.Unlock()
+	tn.tokMu.Lock()
+	e := tn.tokens[account]
+	tn.tokMu.Unlock()
 	next := nextPrewarmRetry(wait, time.Until(e.exp))
 	if wait == 0 {
 		if next > 0 {
@@ -441,10 +431,10 @@ func prewarmRefresh(account string, wait time.Duration) {
 	if next == 0 {
 		return
 	}
-	warmMu.Lock()
-	defer warmMu.Unlock()
-	if warmSet[account] && warmTimers[account] == nil {
-		armWarmTimerLocked(account, next, next)
+	tn.warmMu.Lock()
+	defer tn.warmMu.Unlock()
+	if tn.warmSet[account] && tn.warmTimers[account] == nil {
+		tn.armWarmTimerLocked(account, next, next)
 	}
 }
 
@@ -475,7 +465,8 @@ func (t *failoverTransport) anthropicReauth(req *http.Request, resp *http.Respon
 		msg = msg[:300] + "…"
 	}
 	refused := strings.TrimSpace(strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer "))
-	r := reauthToken(d.acct, refused, msg)
+	tn := d.tenant
+	r := tn.reauthToken(d.acct, refused, msg)
 	fetched, left := "?", "? left"
 	if !r.old.fetchedAt.IsZero() {
 		fetched = r.old.fetchedAt.Format("15:04")
@@ -506,7 +497,7 @@ func (t *failoverTransport) anthropicReauth(req *http.Request, resp *http.Respon
 	}
 	resp.Body.Close()
 	req2 := req.Clone(req.Context())
-	signAccount(req2.Header, d.acct, r.tok)
+	tn.signAccount(req2.Header, d.acct, r.tok)
 	req2.Body = io.NopCloser(bytes.NewReader(d.body))
 	req2.ContentLength = int64(len(d.body))
 	req2.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(d.body)), nil }
@@ -522,7 +513,7 @@ func (t *failoverTransport) anthropicReauth(req *http.Request, resp *http.Respon
 		msg2 = msg2[:300] + "…"
 	}
 	resp2.Body.Close()
-	noteRetryRefused(d.acct, r.tok, msg2)
+	tn.noteRetryRefused(d.acct, r.tok, msg2)
 	log.Printf("upstream 401 %s on the retry: %q (fp %s, fetched just now) — answered 403", d.acct, msg2, fp("Bearer "+r.tok))
 	return reauthRefusedResponse(req2, d.acct, msg2), nil
 }

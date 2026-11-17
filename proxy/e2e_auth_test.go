@@ -234,9 +234,9 @@ func TestE2EBetaFlagOnClassPaths(t *testing.T) {
 	h.bindTo.Store("") // (b)'s fresh session must bind to the P1 anthropic member
 
 	// (b) same-lane account swap on an anthropic member: both attempts flagged
-	recMu.Lock()
-	records = map[recKey]refusalRecord{}
-	recMu.Unlock()
+	lan.recMu.Lock()
+	lan.records = map[recKey]refusalRecord{}
+	lan.recMu.Unlock()
 	h.body429.Store(`{"type":"error","error":{"type":"rate_limit_error","message":"You have exceeded your weekly usage limit."}}`)
 	h.deny429.Store(e2eToken(other)) // only the first account 429s; the swap lands
 	resp = postRaw(t, h.e2eEnv, "claude-frontier", "CLIENT", "", "sess-beta-swap")

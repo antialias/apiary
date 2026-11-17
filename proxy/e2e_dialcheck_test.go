@@ -50,7 +50,7 @@ func (env *e2eEnv) payFrom(routeID string, pots ...string) {
 
 func gptCheck(t *testing.T) dialCheck {
 	t.Helper()
-	c, _ := routeCheck(gptRoute, "gpt", "", nowFn())
+	c, _ := lan.routeCheck(gptRoute, "gpt", "", nowFn())
 	return c
 }
 
@@ -181,10 +181,10 @@ func TestE2EWalkRechecksEachRung(t *testing.T) {
 	h.bindTo.Store("kimi/kimi-k3")
 	fetchPreferredSync()
 	for _, r := range []string{"frontier/lane:fable", "frontier/lane:opus"} {
-		if c, _ := routeCheck(r, native, "", nowFn()); !c.included() {
+		if c, _ := lan.routeCheck(r, native, "", nowFn()); !c.included() {
 			t.Fatalf("fixture: %s on native %s, want included", r, c)
 		}
-		if c, _ := routeCheck(r, other, "", nowFn()); !c.no() {
+		if c, _ := lan.routeCheck(r, other, "", nowFn()); !c.no() {
 			t.Fatalf("fixture: %s on other %s, want no", r, c)
 		}
 	}

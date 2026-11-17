@@ -59,19 +59,19 @@ func TestClassCandidatesTiers(t *testing.T) {
 	}
 	members[2].Route = "c/none"
 	seedQuota(t, accounts, routes, nil, []string{"acct-paid-x/credits"})
-	pref.mu.Lock()
-	oldHard := pref.hardPct
-	pref.hardPct = 0 // => defaultHardPct (95)
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	oldHard := lan.pref.hardPct
+	lan.pref.hardPct = 0 // => defaultHardPct (95)
+	lan.pref.mu.Unlock()
 	t.Cleanup(func() {
-		pref.mu.Lock()
-		pref.hardPct = oldHard
-		pref.mu.Unlock()
+		lan.pref.mu.Lock()
+		lan.pref.hardPct = oldHard
+		lan.pref.mu.Unlock()
 	})
 	seedSpent("acct-cooling", "seven_day", 429, "usage_limit_reached", time.Time{})
-	recordThrottle("acct-throttled-20", 429, "slow down", nil)
+	lan.recordThrottle("acct-throttled-20", 429, "slow down", nil)
 
-	got := ids(classCandidates(members, "bound"))
+	got := ids(lan.classCandidates(nil, members, "bound"))
 	want := []string{"fresh-34", "unknown", "reserve-70", "spent-100", "spent-95", "throttled-20", "paid-x", "paid-y"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("default hard=95: got %v want %v", got, want)
@@ -79,7 +79,7 @@ func TestClassCandidatesTiers(t *testing.T) {
 
 	// Every member the walk drops is named with its check, so a "walk skips"
 	// log line says why a turn ended without trying it.
-	_, skips := rankCandidatesSkips(members, "bound", rankOpt{})
+	_, skips := lan.rankCandidatesSkips(members, "bound", rankOpt{})
 	until := now.Add(quotaCooldown).UTC().Format(time.RFC3339)
 	reset := now.Add(48 * time.Hour).UTC().Format(time.RFC3339)
 	wantSkips := []memberSkip{
@@ -94,36 +94,36 @@ func TestClassCandidatesTiers(t *testing.T) {
 	// The brain's hard line moves the tier boundary: at hard=60 the 70% reserve
 	// member is at the line (served order within it), and 34 stays. The paid
 	// tier stays last: money is spent only after every included rung.
-	pref.mu.Lock()
-	pref.hardPct = 60
-	pref.mu.Unlock()
-	got = ids(classCandidates(members, "bound"))
+	lan.pref.mu.Lock()
+	lan.pref.hardPct = 60
+	lan.pref.mu.Unlock()
+	got = ids(lan.classCandidates(nil, members, "bound"))
 	want = []string{"fresh-34", "unknown", "spent-100", "reserve-70", "spent-95", "throttled-20", "paid-x", "paid-y"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("hard=60: got %v want %v", got, want)
 	}
 
 	// With no pay_order the paid tier falls back to member priority.
-	pref.mu.Lock()
-	pref.payOrder = nil
-	pref.mu.Unlock()
-	got = ids(classCandidates(members, "bound"))
+	lan.pref.mu.Lock()
+	lan.pref.payOrder = nil
+	lan.pref.mu.Unlock()
+	got = ids(lan.classCandidates(nil, members, "bound"))
 	if n := len(got); n < 2 || got[n-2] != "paid-y" || got[n-1] != "paid-x" {
 		t.Fatalf("no pay_order: got %v, want paid-y (priority 4) before paid-x (10)", got)
 	}
 }
 
 func TestHardPctDefaultsWhenBrainOmitsThresholds(t *testing.T) {
-	pref.mu.Lock()
-	old := pref.hardPct
-	pref.hardPct = 0
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	old := lan.pref.hardPct
+	lan.pref.hardPct = 0
+	lan.pref.mu.Unlock()
 	defer func() {
-		pref.mu.Lock()
-		pref.hardPct = old
-		pref.mu.Unlock()
+		lan.pref.mu.Lock()
+		lan.pref.hardPct = old
+		lan.pref.mu.Unlock()
 	}()
-	if got := hardPct(); got != defaultHardPct {
+	if got := lan.hardPct(); got != defaultHardPct {
 		t.Fatalf("hardPct() = %v with nothing fetched, want the mirrored default %v", got, defaultHardPct)
 	}
 }

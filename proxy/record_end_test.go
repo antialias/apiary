@@ -43,23 +43,23 @@ func recWorld(t *testing.T) (now *time.Time, r5, r7 time.Time) {
 func refuse(t *testing.T, m classMemberPref, account string, status int, hdr map[string]string, body string) {
 	t.Helper()
 	resp := hResp(status, hdr, body)
-	if kind, _ := recordRefusal(account, rungRefusal(m, resp), resp); kind == "" {
+	if kind, _ := lan.recordRefusal(account, lan.rungRefusal(m, resp), resp); kind == "" {
 		t.Fatalf("%d %s recorded nothing", status, body)
 	}
 }
 
 func recOf(account, limit string) (refusalRecord, bool) {
-	recMu.Lock()
-	defer recMu.Unlock()
-	r, ok := records[recKey{account, limit}]
+	lan.recMu.Lock()
+	defer lan.recMu.Unlock()
+	r, ok := lan.records[recKey{account, limit}]
 	return r, ok && r.live(nowFn())
 }
 
 // reread replaces account's standing with a reading at asOf and runs the
 // prune the pull runs after it.
 func reread(account string, asOf time.Time, edit func(*acctStanding)) {
-	pref.mu.Lock()
-	st := pref.accounts[account]
+	lan.pref.mu.Lock()
+	st := lan.pref.accounts[account]
 	st.AsOf = epoch(asOf)
 	ws := make(map[string]checkWindow, len(st.Allowance.Windows))
 	for n, w := range st.Allowance.Windows {
@@ -75,10 +75,10 @@ func reread(account string, asOf time.Time, edit func(*acctStanding)) {
 	if edit != nil {
 		edit(&st)
 	}
-	pref.accounts[account] = st
-	accounts := pref.accounts
-	pref.mu.Unlock()
-	pruneRecords(accounts)
+	lan.pref.accounts[account] = st
+	accounts := lan.pref.accounts
+	lan.pref.mu.Unlock()
+	lan.pruneRecords(accounts)
 }
 
 func setWindow(name string, pct float64, reset *float64) func(*acctStanding) {
@@ -106,14 +106,14 @@ func TestRecordEndCodexEarlyReset(t *testing.T) {
 	}
 	// The window is closed until r7; the credits it could draw are not in
 	// this route's pay.
-	if c, _ := routeCheck("r-gpt", "gpt-a", "gpt-5.6", *now); !c.no() || c.Reason != "pay" || !c.Until.Time().Equal(r7) {
+	if c, _ := lan.routeCheck("r-gpt", "gpt-a", "gpt-5.6", *now); !c.no() || c.Reason != "pay" || !c.Until.Time().Equal(r7) {
 		t.Fatalf("check = %s, want no(pay) until %v", c, r7)
 	}
 	reread("gpt-a", now.Add(time.Minute), setWindow("seven_day", 0, epoch(now.Add(7*24*time.Hour))))
 	if _, ok := recOf("gpt-a", "seven_day"); ok {
 		t.Fatal("the early reset (a new resets_at, use 0) did not end the record")
 	}
-	if c, _ := routeCheck("r-gpt", "gpt-a", "gpt-5.6", *now); !c.included() {
+	if c, _ := lan.routeCheck("r-gpt", "gpt-a", "gpt-5.6", *now); !c.included() {
 		t.Fatalf("check after the early reset = %s, want included", c)
 	}
 }
@@ -129,7 +129,7 @@ func TestRecordEndSamePeriodSameOrHigherUseDoesNotEnd(t *testing.T) {
 	if !ok || !rec.attributed || !rec.until.IsZero() {
 		t.Fatalf("record = %+v, want attributed, ending by reading", rec)
 	}
-	if c, _ := routeCheck("r-kimi", "kimi", "kimi-k3", *now); !c.no() || c.Reason != "spent" {
+	if c, _ := lan.routeCheck("r-kimi", "kimi", "kimi-k3", *now); !c.no() || c.Reason != "spent" {
 		t.Fatalf("check = %s, want no(spent): the refusal outranks the 80 %% reading", c)
 	}
 	steps := []struct {
@@ -199,11 +199,11 @@ func TestRecordEndUnattributedClamp(t *testing.T) {
 		}
 	}
 	// The model record binds that model only.
-	if c, _ := routeCheck("r-kimi", "kimi", "kimi-k3-max", *now); !c.no() {
+	if c, _ := lan.routeCheck("r-kimi", "kimi", "kimi-k3-max", *now); !c.no() {
 		t.Fatalf("kimi-k3-max = %s: the pool record closes the account", c)
 	}
 	// The Anthropic credits pot reads closed for as long as the record holds.
-	if st := standingFor("a", *now); st.Money[potCredits].Open == nil || *st.Money[potCredits].Open {
+	if st := lan.standingFor("a", *now); st.Money[potCredits].Open == nil || *st.Money[potCredits].Open {
 		t.Fatal("an unpaid record did not close its pot")
 	}
 	open := true
@@ -270,7 +270,7 @@ func TestRecordEndCodexCreditsByReading(t *testing.T) {
 	if !ok || !rec.attributed || !rec.until.IsZero() {
 		t.Fatalf("record = %+v, want attributed to the credits gate, ending by reading", rec)
 	}
-	if st := standingFor("gpt-a", *now); *st.Money[potCredits].Open {
+	if st := lan.standingFor("gpt-a", *now); *st.Money[potCredits].Open {
 		t.Fatal("the unpaid record did not close the credits pot")
 	}
 	open := true
@@ -321,7 +321,7 @@ func TestRecordEndKimiEntitlement(t *testing.T) {
 	if rec, ok := recOf("kimi", limitEntitlement); !ok || !rec.attributed || rec.kind != recNotEntitled {
 		t.Fatalf("record = %+v, want attributed not_entitled on the plan", rec)
 	}
-	if c, _ := routeCheck("r-kimi", "kimi", "kimi-k3", *now); !c.no() {
+	if c, _ := lan.routeCheck("r-kimi", "kimi", "kimi-k3", *now); !c.no() {
 		t.Fatalf("check = %s, want no", c)
 	}
 	reread("kimi", now.Add(-time.Second), nil)
@@ -334,7 +334,7 @@ func TestRecordEndKimiEntitlement(t *testing.T) {
 	}
 	refuse(t, memKimi, "kimi", 403, nil, kimiNotEntitled403)
 	refuse(t, memKimi, "kimi", 403, nil, kimiModel403)
-	noteServed("kimi", "", "kimi-k3", now.Add(time.Second))
+	lan.noteServed("kimi", "", "kimi-k3", now.Add(time.Second))
 	if _, ok := recOf("kimi", limitEntitlement); ok {
 		t.Fatal("a 2xx on the allowance did not end the entitlement record")
 	}
@@ -348,14 +348,14 @@ func TestRecordEndPaidServed(t *testing.T) {
 	now, _, r7 := recWorld(t)
 	refuse(t, memGpt, "gpt-a", 429, nil, codexCreditExhausted429)
 	refuse(t, memGpt, "gpt-a", 429, nil, s9(r7))
-	notePaidServed("gpt-a", potCredits, now.Add(time.Second))
+	lan.notePaidServed("gpt-a", potCredits, now.Add(time.Second))
 	if _, ok := recOf("gpt-a", potCredits); ok {
 		t.Fatal("a paid 2xx did not end the pot's record")
 	}
 	if _, ok := recOf("gpt-a", "seven_day"); !ok {
 		t.Fatal("a paid 2xx ended the window's record")
 	}
-	st := recordsStatus(*now)
+	st := lan.recordsStatus(*now)
 	got, _ := st["gpt-a/seven_day"].(map[string]any)
 	if got["attributed"] != true || got["until"] == nil {
 		t.Fatalf("status = %v, want attributed with its until", got)

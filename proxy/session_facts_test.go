@@ -30,7 +30,7 @@ func sfWindow(period string, scope *string, pct float64, resets time.Time) check
 // withSessionFacts installs a brain view and an empty session table at sfNow.
 func withSessionFacts(t *testing.T, accounts map[string]acctStanding, routes map[string]routePref) {
 	t.Helper()
-	oldPref, oldBrain, oldNow := pref, brainURL, nowFn
+	oldPref, oldBrain, oldNow := lan.pref, brainBase, nowFn
 	classRowsMu.Lock()
 	oldRows := classRowsSet
 	// frontier's window is marked [1m]; capable's and deep's are not.
@@ -40,21 +40,21 @@ func withSessionFacts(t *testing.T, accounts map[string]acctStanding, routes map
 		{Name: "deep", Type: "class", Class: "deep", ContextWindow: 200000},
 	}
 	classRowsMu.Unlock()
-	sessFactsMu.Lock()
-	oldFacts := sessFacts
-	sessFacts = map[string]sessionFact{}
-	sessFactsMu.Unlock()
-	pref = &decision{accounts: accounts, routes: routes, ok: true, fleet: sfQuietFleet(), fleetAt: sfNow}
-	brainURL = "http://brain.test"
+	lan.sessFactsMu.Lock()
+	oldFacts := lan.sessFacts
+	lan.sessFacts = map[string]sessionFact{}
+	lan.sessFactsMu.Unlock()
+	lan.pref = &decision{accounts: accounts, routes: routes, ok: true, fleet: sfQuietFleet(), fleetAt: sfNow}
+	brainBase = "http://brain.test"
 	nowFn = func() time.Time { return sfNow }
 	t.Cleanup(func() {
-		pref, brainURL, nowFn = oldPref, oldBrain, oldNow
+		lan.pref, brainBase, nowFn = oldPref, oldBrain, oldNow
 		classRowsMu.Lock()
 		classRowsSet = oldRows
 		classRowsMu.Unlock()
-		sessFactsMu.Lock()
-		sessFacts = oldFacts
-		sessFactsMu.Unlock()
+		lan.sessFactsMu.Lock()
+		lan.sessFacts = oldFacts
+		lan.sessFactsMu.Unlock()
 	})
 }
 
@@ -75,7 +75,7 @@ func sfQuietFleet() *brainFleet {
 // sfServe records a hop that served session for the model the client asked
 // for, keyed as noteServedSession keys it.
 func sfServe(session, asked string, f sessionFact) {
-	noteSessionServed(session, sessionModelKey(asked), f)
+	lan.noteSessionServed(session, sessionModelKey(asked), f)
 }
 
 // sfFixture is the two sessions the contract is shown with: an Anthropic
@@ -120,7 +120,7 @@ func sfFixture(t *testing.T) {
 func sfGet(t *testing.T, id, model string) map[string]any {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	sessionHandler(rec, httptest.NewRequest("GET", "/_switch/session?id="+id+"&model="+url.QueryEscape(model), nil))
+	sessionHandler(rec, lanRequest("GET", "/_switch/session?id="+id+"&model="+url.QueryEscape(model), nil))
 	if rec.Code != 200 {
 		t.Fatalf("GET session %s: %d %s", id, rec.Code, rec.Body)
 	}
@@ -208,7 +208,7 @@ func TestSessionFactsPayingAPIUnknownBalance(t *testing.T) {
 func TestSessionFactsUnseen(t *testing.T) {
 	sfFixture(t)
 	rec := httptest.NewRecorder()
-	sessionHandler(rec, httptest.NewRequest("GET", "/_switch/session?id=never-seen&model=claude-frontier", nil))
+	sessionHandler(rec, lanRequest("GET", "/_switch/session?id=never-seen&model=claude-frontier", nil))
 	var m map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
 		t.Fatal(err)
@@ -219,14 +219,14 @@ func TestSessionFactsUnseen(t *testing.T) {
 	}
 	// No id is a caller's mistake, not an unseen session.
 	rec = httptest.NewRecorder()
-	sessionHandler(rec, httptest.NewRequest("GET", "/_switch/session?model=claude-frontier", nil))
+	sessionHandler(rec, lanRequest("GET", "/_switch/session?model=claude-frontier", nil))
 	if rec.Code != 400 {
 		t.Fatalf("no id: %d", rec.Code)
 	}
 	// Nor is no model: the reply is the prompt's model's, so it must be named.
 	for _, q := range []string{"?id=sess-fable", "?id=sess-fable&model="} {
 		rec = httptest.NewRecorder()
-		sessionHandler(rec, httptest.NewRequest("GET", "/_switch/session"+q, nil))
+		sessionHandler(rec, lanRequest("GET", "/_switch/session"+q, nil))
 		if rec.Code != 400 || rec.Body.String() != `{"error":"model is required: the model the session's prompt is set to"}` {
 			t.Fatalf("no model (%s): %d %s", q, rec.Code, rec.Body)
 		}
@@ -291,7 +291,7 @@ func TestSessionFactsProviderWithoutUsage(t *testing.T) {
 func TestSessionFactsUnavailableUntil(t *testing.T) {
 	sfFixture(t)
 	until := sfNow.Add(5 * time.Hour)
-	noteSessionUnavailable("capable", "sess-gpt", until)
+	lan.noteSessionUnavailable("capable", "sess-gpt", until)
 	m := sfGet(t, "sess-gpt", "claude-capable")
 	if m["unavailable_until"] != isoTime(until) {
 		t.Fatalf("unavailable_until = %v", m["unavailable_until"])
@@ -303,13 +303,13 @@ func TestSessionFactsUnavailableUntil(t *testing.T) {
 		t.Fatalf("the member that last served it stays: %v", m["model"])
 	}
 	// No reading says when: null, and said in plain words.
-	noteSessionUnavailable("capable", "sess-gpt", time.Time{})
+	lan.noteSessionUnavailable("capable", "sess-gpt", time.Time{})
 	m = sfGet(t, "sess-gpt", "claude-capable")
 	if m["unavailable_until"] != nil || len(m["problems"].([]any)) != 1 {
 		t.Fatalf("unknown until: %v %v", m["unavailable_until"], m["problems"])
 	}
 	// A class that refused a session on its first request served nothing.
-	noteSessionUnavailable("deep", "sess-first", until)
+	lan.noteSessionUnavailable("deep", "sess-first", until)
 	m = sfGet(t, "sess-first", "claude-deep")
 	if m["seen"] != true || m["model"] != nil || m["account"] != nil || m["class"] != "claude-deep" {
 		t.Fatalf("first-request refusal: %v", m)
@@ -381,11 +381,11 @@ func TestSessionFactsPerModel(t *testing.T) {
 
 	// A class's unavailable reply shows only under that class.
 	until := sfNow.Add(2 * time.Hour)
-	noteSessionUnavailable("capable", sess, until)
+	lan.noteSessionUnavailable("capable", sess, until)
 	if m := sfGet(t, sess, "claude-capable"); m["unavailable_until"] != isoTime(until) || m["paying"] != nil {
 		t.Errorf("capable after its refusal = %v", m)
 	}
-	noteSessionUnavailable("capable", sess, time.Time{}) // and no reading says until when
+	lan.noteSessionUnavailable("capable", sess, time.Time{}) // and no reading says until when
 	if b, _ := json.Marshal(sfGet(t, sess, "claude-capable")["problems"]); !strings.Contains(string(b), "claude-capable cannot serve") {
 		t.Errorf("capable with no until: problems = %s", b)
 	}
@@ -397,7 +397,7 @@ func TestSessionFactsPerModel(t *testing.T) {
 	}
 	// And a class that refused a model the session never served is seen
 	// there only, with nothing served.
-	noteSessionUnavailable("deep", sess, until)
+	lan.noteSessionUnavailable("deep", sess, until)
 	if m := sfGet(t, sess, "claude-deep"); m["seen"] != true || m["model"] != nil || m["class"] != "claude-deep" {
 		t.Errorf("deep refusal = %v", m)
 	}
@@ -436,7 +436,7 @@ func TestSessionModelKey(t *testing.T) {
 
 func TestSessionFactsBrainUnreachableIsAProblem(t *testing.T) {
 	sfFixture(t)
-	pref.ok = false
+	lan.pref.ok = false
 	const words = "the proxy cannot reach the brain, so its facts may be old"
 	m := sfGet(t, "sess-fable", "claude-frontier[1m]")
 	if p := m["problems"].([]any); len(p) != 1 || p[0] != words {
@@ -493,11 +493,11 @@ func TestSessionFactsRefusedWithoutSecret(t *testing.T) {
 func TestE2ESessionFactsRecordsServedHop(t *testing.T) {
 	h, restore := newE2EClass(t)
 	defer restore()
-	sessFactsMu.Lock()
-	oldFacts := sessFacts
-	sessFacts = map[string]sessionFact{}
-	sessFactsMu.Unlock()
-	t.Cleanup(func() { sessFactsMu.Lock(); sessFacts = oldFacts; sessFactsMu.Unlock() })
+	lan.sessFactsMu.Lock()
+	oldFacts := lan.sessFacts
+	lan.sessFacts = map[string]sessionFact{}
+	lan.sessFactsMu.Unlock()
+	t.Cleanup(func() { lan.sessFactsMu.Lock(); lan.sessFacts = oldFacts; lan.sessFactsMu.Unlock() })
 
 	resp := h.postSess(t, "claude-frontier", "CLIENT", "sess-e2e-class")
 	resp.Body.Close()
@@ -565,7 +565,7 @@ func TestSessionFactsNeverCarryAnAddress(t *testing.T) {
 	for id, f := range cases {
 		sfServe(id, asked(f), f)
 	}
-	noteSessionUnavailable("frontier", "leak-class", time.Time{})
+	lan.noteSessionUnavailable("frontier", "leak-class", time.Time{})
 	for id, f := range cases {
 		m := sfGet(t, id, asked(f)) // sfGet fails on any "@" in the reply
 		if a := m["account"].(map[string]any); a["name"] != "x" || a["kind"] != nil {
@@ -585,7 +585,7 @@ func TestSessionFactsNeverCarryAnAddress(t *testing.T) {
 	}
 	// And every reply the fixture scenarios make.
 	sfFixture(t)
-	noteSessionUnavailable("deep", "sess-first", sfNow.Add(time.Hour))
+	lan.noteSessionUnavailable("deep", "sess-first", sfNow.Add(time.Hour))
 	for id, model := range map[string]string{"sess-fable": "claude-frontier[1m]", "sess-gpt": "claude-capable",
 		"sess-first": "claude-deep", "nobody": "claude-frontier"} {
 		sfGet(t, id, model)
@@ -625,9 +625,9 @@ func sfGetVia(t *testing.T, base, id, model string) map[string]any {
 
 // sfFactOf is the fact held for session under the model the client asked for.
 func sfFactOf(session, model string) (sessionFact, bool) {
-	sessFactsMu.Lock()
-	defer sessFactsMu.Unlock()
-	f, ok := sessFacts[sessionFactKey(sessionModelKey(model), session)]
+	lan.sessFactsMu.Lock()
+	defer lan.sessFactsMu.Unlock()
+	f, ok := lan.sessFacts[sessionFactKey(sessionModelKey(model), session)]
 	return f, ok
 }
 

@@ -12,7 +12,7 @@ import (
 
 func enqueueE2E(t *testing.T, env *e2eEnv, bearer, sessionKey, text string) *http.Response {
 	t.Helper()
-	b, _ := json.Marshal(map[string]string{"session_key": sessionKey, "text": text})
+	b, _ := json.Marshal(map[string]string{"tenant": testLanTenant, "session_key": sessionKey, "text": text})
 	req, _ := http.NewRequest("POST", env.proxy.URL+"/_switch/inject", bytes.NewReader(b))
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
@@ -132,8 +132,8 @@ func TestE2EInjectWorksForPrintModeShapeWithoutInteractiveTools(t *testing.T) {
 	env, restore := newE2E(t)
 	defer restore()
 	const session = "print-session"
-	key := injectObserve(session, time.Now())
-	if _, _, problem := injectEnqueue(key, "continue headlessly", time.Now()); problem != nil {
+	key := lan.injectObserve(session, time.Now())
+	if _, _, problem := lan.injectEnqueue(key, "continue headlessly", time.Now()); problem != nil {
 		t.Fatal(problem)
 	}
 	body := `{"model":"claude-fable-5","max_tokens":16,"tools":[],"messages":[{"role":"user","content":"print"}]}`

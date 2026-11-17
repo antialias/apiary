@@ -19,14 +19,19 @@ Row keys the prepaid notices read (notices.py), each optional (null when
 absent), declared by the driver: name (the provider's name in words, "Acme"),
 serves (what stops when its money runs out, "image generation"), billing
 (the page where the owner pays, a URL).
-Row keys the core reads: poll(prev, account=), enabled(), accounts(),
-auth {kind, label, custody, enroll, status, begin, complete}, api_key(account),
-lanes (its accounts serve the lanes, as the account loop's do),
-account_loop {start, load, names, poll, generation, expires_at} (the one
-provider whose accounts the account loop polls), sizing(wid, kind).
+Row keys the core reads, each callable taking the tenant first (tenancy.Tenant:
+a driver keeps that tenant's credentials and watchers in
+tenant.store_for(pid, make), never at module level): poll(t, prev, account=),
+enabled(t), accounts(t), auth {kind, label, custody, enroll, status(t, now),
+begin(t, account=), complete(t, grant, fields)}, api_key(t, account), lanes
+(its accounts serve the lanes, as the account loop's do), account_loop
+{start(t), load(t), names(t), poll(t, name, meta), generation(t, name),
+expires_at(t, name)} (the one provider whose accounts the account loop polls),
+sizing(wid, kind) (pure: no tenant).
 
 register_route(method, path, handler) adds an HTTP route the core's dispatch
-does not know: handler(request_handler, parsed_url) answers it.
+does not know, served under /t/<tenant>/<path>: handler(tenant,
+request_handler, parsed_url) answers it.
 """
 
 PROVIDERS = {}
@@ -61,7 +66,7 @@ def register(pid, spec):
 
 
 def register_route(method, path, handler):
-    """Serve `method path` with handler(request_handler, parsed_url)."""
+    """Serve `method /t/<tenant>path` with handler(tenant, request_handler, parsed_url)."""
     key = (method.upper(), path.rstrip("/"))
     if key in ROUTES:
         raise ValueError(f"route {key} is registered twice")

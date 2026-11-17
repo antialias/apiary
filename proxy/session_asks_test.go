@@ -67,13 +67,13 @@ func asksWordingCases() []asksWordingCase {
 // withRoster sets the accounts the brain lists to names, for short names.
 func withRoster(t *testing.T, names []string) {
 	t.Helper()
-	old := pref
+	old := lan.pref
 	accts := map[string]acctStanding{}
 	for _, n := range names {
 		accts[n] = acctStanding{}
 	}
-	pref = &decision{accounts: accts, ok: true}
-	t.Cleanup(func() { pref = old })
+	lan.pref = &decision{accounts: accts, ok: true}
+	t.Cleanup(func() { lan.pref = old })
 }
 
 func TestAsksWordingGoldenIsCurrent(t *testing.T) {
@@ -84,7 +84,7 @@ func TestAsksWordingGoldenIsCurrent(t *testing.T) {
 		"out over accounts.",
 		Accounts: asksWordingAccounts}
 	for _, c := range asksWordingCases() {
-		c.Words = askWords(c.Ask)
+		c.Words = lan.askWords(c.Ask)
 		g.Cases = append(g.Cases, c)
 	}
 	var buf bytes.Buffer
@@ -125,7 +125,7 @@ func TestAsksWording(t *testing.T) {
 		"max-b: needs a plan change",
 	}
 	for i, c := range asksWordingCases() {
-		got := askWords(c.Ask)
+		got := lan.askWords(c.Ask)
 		if got != want[i] {
 			t.Errorf("%s: %q, want %q", c.Note, got, want[i])
 		}
@@ -138,8 +138,8 @@ func TestAsksWording(t *testing.T) {
 	}
 	// Keyed on the sign-in, never on the account's kind: the same kimi
 	// account, listed as a subscription, reads "key refused".
-	pref.accounts["kimi"] = acctStanding{Kind: "subscription"}
-	if got := askWords(fleetAsk{Account: "kimi", Kind: "auth", SignIn: str("key")}); got != "kimi: key refused, replace the key" {
+	lan.pref.accounts["kimi"] = acctStanding{Kind: "subscription"}
+	if got := lan.askWords(fleetAsk{Account: "kimi", Kind: "auth", SignIn: str("key")}); got != "kimi: key refused, replace the key" {
 		t.Errorf("kimi as a subscription: %q", got)
 	}
 }
@@ -150,7 +150,7 @@ func TestAsksWording(t *testing.T) {
 func sfRaw(t *testing.T, id, model string) []byte {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	sessionHandler(rec, httptest.NewRequest("GET", "/_switch/session?id="+url.QueryEscape(id)+"&model="+url.QueryEscape(model), nil))
+	sessionHandler(rec, lanRequest("GET", "/_switch/session?id="+url.QueryEscape(id)+"&model="+url.QueryEscape(model), nil))
 	if rec.Code != 200 {
 		t.Fatalf("GET session %s: %d %s", id, rec.Code, rec.Body)
 	}
@@ -233,10 +233,10 @@ func TestSessionFactsMissingFigureProblems(t *testing.T) {
 	t.Run("unreachable", func(t *testing.T) {
 		sfBrainDoc(t, nil)
 		sfServeFrontier()
-		pref.mu.Lock()
-		pref.ok = false // as brainFail leaves it: the last fleet still held
-		held := pref.fleet != nil
-		pref.mu.Unlock()
+		lan.pref.mu.Lock()
+		lan.pref.ok = false // as brainFail leaves it: the last fleet still held
+		held := lan.pref.fleet != nil
+		lan.pref.mu.Unlock()
 		if !held {
 			t.Fatal("the last fleet is not held")
 		}
@@ -330,11 +330,11 @@ func TestE2ESessionFactsPinnedThroughTheServePath(t *testing.T) {
 	fetchPreferredSync()
 	// No health store: a pin is the brain's binding fact, not health's.
 	armHealth(t, nil)
-	sessFactsMu.Lock()
-	oldFacts := sessFacts
-	sessFacts = map[string]sessionFact{}
-	sessFactsMu.Unlock()
-	t.Cleanup(func() { sessFactsMu.Lock(); sessFacts = oldFacts; sessFactsMu.Unlock() })
+	lan.sessFactsMu.Lock()
+	oldFacts := lan.sessFacts
+	lan.sessFacts = map[string]sessionFact{}
+	lan.sessFactsMu.Unlock()
+	t.Cleanup(func() { lan.sessFactsMu.Lock(); lan.sessFacts = oldFacts; lan.sessFactsMu.Unlock() })
 
 	post := func(session string) {
 		t.Helper()
@@ -431,7 +431,7 @@ func TestSessionFactsGoldenIsCurrent(t *testing.T) {
 		{name: "unavailable", session: "sess-unavailable", model: "claude-frontier",
 			serve: func() {
 				frontierOn("sess-unavailable")
-				noteSessionUnavailable("frontier", "sess-unavailable", sfFixtureNow.Add(3*time.Hour))
+				lan.noteSessionUnavailable("frontier", "sess-unavailable", sfFixtureNow.Add(3*time.Hour))
 			}},
 		{name: "unseen", session: "sess-unseen", model: "claude-frontier"},
 		{name: "no fleet", session: "sess-nofleet", model: "claude-frontier", serve: func() { frontierOn("sess-nofleet") },
@@ -439,7 +439,7 @@ func TestSessionFactsGoldenIsCurrent(t *testing.T) {
 		{name: "no entry", session: "sess-noentry", model: "claude-frontier", serve: func() { frontierOn("sess-noentry") },
 			edit: func(p map[string]any) { delete(sfFleetSelections(p), "frontier") }},
 		{name: "brain unreachable", session: "sess-unreachable", model: "claude-frontier", serve: func() { frontierOn("sess-unreachable") },
-			after: func() { pref.mu.Lock(); pref.ok = false; pref.mu.Unlock() }},
+			after: func() { lan.pref.mu.Lock(); lan.pref.ok = false; lan.pref.mu.Unlock() }},
 	}
 	var got []sfGoldenCase
 	for _, c := range cases {
@@ -528,7 +528,7 @@ func TestE2ESessionFactsHealthOffPinDeranksThrottle(t *testing.T) {
 	defer restore()
 	armHealth(t, nil)
 	h.bindReason.Store("bind: pinned by operator")
-	recordThrottle("kimi", 429, "busy", nil)
+	lan.recordThrottle("kimi", 429, "busy", nil)
 	resp := h.postSess(t, "claude-frontier", "CLIENT", "sess-pin-throttle")
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()

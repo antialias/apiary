@@ -345,9 +345,9 @@ func TestE2EClassBootFromLastGoodBrainDown(t *testing.T) {
 	dead := httptest.NewServer(http.NotFoundHandler())
 	deadURL := dead.URL
 	dead.Close()
-	oldBrain := brainURL
-	brainURL = deadURL
-	t.Cleanup(func() { brainURL = oldBrain })
+	oldBrain := brainBase
+	brainBase = deadURL
+	t.Cleanup(func() { brainBase = oldBrain })
 
 	// production boot order: registry first (buildHandler), THEN the snapshot —
 	// loadClassRowsState's named-collision guard consults the built registry.
@@ -485,11 +485,11 @@ func TestClassShapedRefusalDistinguishesItsThreeCases(t *testing.T) {
 	oldRows, oldSrc := classRowsSet, classRowsSource
 	t.Cleanup(func() { classRowsSet, classRowsSource = oldRows, oldSrc })
 
-	pref.mu.Lock()
-	oldOK := pref.ok
-	pref.ok = false
-	pref.mu.Unlock()
-	t.Cleanup(func() { pref.mu.Lock(); pref.ok = oldOK; pref.mu.Unlock() })
+	lan.pref.mu.Lock()
+	oldOK := lan.pref.ok
+	lan.pref.ok = false
+	lan.pref.mu.Unlock()
+	t.Cleanup(func() { lan.pref.mu.Lock(); lan.pref.ok = oldOK; lan.pref.mu.Unlock() })
 
 	// (1) nothing loaded and the brain has never answered — every class id is
 	// unknown right now and may well resolve on its own. The ONLY retryable case.
@@ -504,9 +504,9 @@ func TestClassShapedRefusalDistinguishesItsThreeCases(t *testing.T) {
 
 	// (1b) the brain ANSWERED and declared no classes. Same empty registry,
 	// opposite advice — waiting cannot conjure a class that does not exist.
-	pref.mu.Lock()
-	pref.ok = true
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	lan.pref.ok = true
+	lan.pref.mu.Unlock()
 	reason, retry, ok = classShapedRefusalReason("claude-frontier")
 	if !ok || retry != 0 {
 		t.Fatalf("no-classes refusal = (%q, %d), want a permanent refusal", reason, retry)

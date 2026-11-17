@@ -145,7 +145,7 @@ func TestReauthRetryIsSignedWhole(t *testing.T) {
 	tr := &failoverTransport{base: rec, anthropic: anth}
 	body := []byte(`{"model":"claude-haiku-4-5","messages":[]}`)
 	req, _ := http.NewRequest("POST", anth.String()+"/v1/messages", bytes.NewReader(body))
-	req = req.WithContext(withAnthDial(req.Context(), other, body))
+	req = req.WithContext(withAnthDial(withTenant(req.Context(), lan), other, body))
 	req.Header.Set("Authorization", "Bearer "+old)
 	req.Header.Set("X-Api-Key", "sk-stray")
 	resp, err := tr.tripWithReauth(req)

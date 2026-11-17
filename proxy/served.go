@@ -171,7 +171,8 @@ func (e servedEvent) wire() map[string]any {
 // door's finish queues the event. Once finished it is sealed: a late write (a
 // codex translator still running after the client left) changes nothing.
 type servedCap struct {
-	mu sync.Mutex
+	mu     sync.Mutex
+	tenant *tenant // whose reporter the served event goes to
 
 	// what was asked, from the door
 	inference   bool
@@ -215,7 +216,7 @@ type servedCapKey struct{}
 
 // withServedCap puts a new capture on ctx.
 func withServedCap(ctx context.Context) (context.Context, *servedCap) {
-	c := &servedCap{}
+	c := &servedCap{tenant: tenantFrom(ctx)}
 	return context.WithValue(ctx, servedCapKey{}, c), c
 }
 
@@ -452,7 +453,7 @@ func (c *servedCap) finish(left bool) (seq int64, first bool) {
 	}
 	ev := c.eventLocked()
 	c.mu.Unlock()
-	seq = reportServedEvent(ev)
+	seq = c.tenant.reportServedEvent(ev)
 	c.mu.Lock()
 	c.seq = seq
 	c.mu.Unlock()
@@ -663,9 +664,9 @@ func noteServedCap(hop *http.Request, info reqInfo, resp *http.Response, anthrop
 		}
 		if cc != nil {
 			f.member = cc.served.snapshot().member
-			pref.mu.RLock()
-			f.consumer = pref.classes[cc.class].Consumer
-			pref.mu.RUnlock()
+			cc.tenant.pref.mu.RLock()
+			f.consumer = cc.tenant.pref.classes[cc.class].Consumer
+			cc.tenant.pref.mu.RUnlock()
 		} else if lane := servedLane(hop, info); lane != "" {
 			f.member = laneRouteID(lane)
 		}

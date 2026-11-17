@@ -73,9 +73,9 @@ func paidGptWorld(t *testing.T, set potSettings, l *checkLedger) {
 	r.Pay = []string{"gpt/credits"}
 	seedQuota(t, map[string]acctStanding{"gpt": st}, map[string]routePref{gptRoute: r},
 		map[string]potSettings{"gpt/credits": set}, nil)
-	pref.mu.Lock()
-	pref.ledger = l
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	lan.pref.ledger = l
+	lan.pref.mu.Unlock()
 }
 
 // pulledLedger is a ledger as the brain publishes it, read now: seq entries,
@@ -95,12 +95,12 @@ func pulledLedger(t *testing.T, now time.Time, seq int64, spend float64) *checkL
 // enter is one counted entry of ours on gpt/credits, not posted (no brain).
 func enter(charge float64, at time.Time) {
 	basis := "derived"
-	ledgerEnter(ledgerEntry{ID: newLedgerID(), At: unixSeconds(at), Account: "gpt", Pot: potCredits,
+	lan.ledgerEnter(ledgerEntry{ID: newLedgerID(), At: unixSeconds(at), Account: "gpt", Pot: potCredits,
 		Route: gptRoute, Charge: &charge, Unit: "codex_credit", Basis: &basis})
 }
 
 func checkGpt() dialCheck {
-	c, _ := routeCheck(gptRoute, "gpt", "", time.Now())
+	c, _ := lan.routeCheck(gptRoute, "gpt", "", time.Now())
 	return c
 }
 
@@ -122,27 +122,27 @@ func TestBudgetGateCountsOurEntriesTheBrainHasNot(t *testing.T) {
 		t.Fatalf("0.5 + our 0.6: %s, want no(budget)", c)
 	}
 	// Until the allowance reopens, no later than the period's end.
-	if want := math.Min(*pref.accounts["gpt"].Allowance.Windows["seven_day"].ResetsAt, end); c.Until.At != want {
+	if want := math.Min(*lan.pref.accounts["gpt"].Allowance.Windows["seven_day"].ResetsAt, end); c.Until.At != want {
 		t.Fatalf("until %v, want %v", c.Until.At, want)
 	}
 
 	// Accepted at seq 6: a ledger at seq 5 still lacks it.
-	ledgerMu.Lock()
-	ledgerOwn[0].seq = 6
-	ledgerMu.Unlock()
-	ledgerPulled(pulledLedger(t, now, 5, 0.5), unixSeconds(now))
+	lan.ledgerMu.Lock()
+	lan.ledgerOwn[0].seq = 6
+	lan.ledgerMu.Unlock()
+	lan.ledgerPulled(pulledLedger(t, now, 5, 0.5), unixSeconds(now))
 	if c := checkGpt(); !c.no() || c.Reason != "budget" {
 		t.Fatalf("accepted, not yet pulled: %s, want no(budget)", c)
 	}
 	// A ledger at seq 6 has it: the entry goes, and the brain's spend decides.
 	l := pulledLedger(t, now, 6, 0.4) // (the brain's number, whatever it is)
-	pref.mu.Lock()
-	pref.ledger = l
-	pref.mu.Unlock()
-	ledgerPulled(l, unixSeconds(now))
-	ledgerMu.Lock()
-	left := len(ledgerOwn)
-	ledgerMu.Unlock()
+	lan.pref.mu.Lock()
+	lan.pref.ledger = l
+	lan.pref.mu.Unlock()
+	lan.ledgerPulled(l, unixSeconds(now))
+	lan.ledgerMu.Lock()
+	left := len(lan.ledgerOwn)
+	lan.ledgerMu.Unlock()
 	if left != 0 {
 		t.Fatalf("%d entries kept after a ledger covering them", left)
 	}
@@ -181,7 +181,7 @@ func TestBudgetGateOnAStaleLedger(t *testing.T) {
 	}
 	// Until the account's next poll: the brain's next answer may bring a
 	// ledger with it (C3's rule: retryable, and a passed until is null).
-	if np := pref.accounts["gpt"].NextPollAt; c.Until.At != *np {
+	if np := lan.pref.accounts["gpt"].NextPollAt; c.Until.At != *np {
 		t.Fatalf("until %v, want the next poll %v", c.Until, *np)
 	}
 	// A reached budget stays reached however old the ledger: spend only grows.
@@ -211,7 +211,7 @@ func TestLedgerViewStartsEachPeriodAtZero(t *testing.T) {
 	l.AsOf = epoch(now) // read now, but the period it covers is last month's
 	paidGptWorld(t, potSettings{Budget: &budget}, l)
 	enter(2.0, last)
-	v := ledgerView(unixSeconds(now))
+	v := lan.ledgerView(unixSeconds(now))
 	if v.Period.Start != start || v.Pots["gpt/credits"].PeriodSpend != 0 {
 		t.Fatalf("view = %+v, want this period at 0", v)
 	}
@@ -239,16 +239,16 @@ func TestBudgetPeriodIsTheUTCMonth(t *testing.T) {
 
 // testHop is a ledger hop on gpt/credits at the brain's rates, posting nowhere.
 func testHop(model string) *ledgerHop {
-	return &ledgerHop{account: "gpt", pot: potCredits, route: gptRoute, model: model, unit: "codex_credit",
+	return &ledgerHop{tenant: lan, account: "gpt", pot: potCredits, route: gptRoute, model: model, unit: "codex_credit",
 		speed: "standard", rates: codexRates()}
 }
 
 func ownEntries(t *testing.T) []ledgerEntry {
 	t.Helper()
-	ledgerMu.Lock()
-	defer ledgerMu.Unlock()
-	out := make([]ledgerEntry, 0, len(ledgerOwn))
-	for _, o := range ledgerOwn {
+	lan.ledgerMu.Lock()
+	defer lan.ledgerMu.Unlock()
+	out := make([]ledgerEntry, 0, len(lan.ledgerOwn))
+	for _, o := range lan.ledgerOwn {
 		out = append(out, o.e)
 	}
 	return out
@@ -348,15 +348,15 @@ func TestArmLedgerOnlyOnACountedPaidPot(t *testing.T) {
 	now := time.Now()
 	paidGptWorld(t, potSettings{}, pulledLedger(t, now, 0, 0))
 	c := checkGpt()
-	if h := armLedger(context.Background(), c, "gpt-5.6"); h == nil || h.account != "gpt" || h.pot != "credits" || h.route != gptRoute ||
+	if h := lan.armLedger(context.Background(), c, "gpt-5.6"); h == nil || h.account != "gpt" || h.pot != "credits" || h.route != gptRoute ||
 		h.unit != "codex_credit" || h.rates == nil {
 		t.Fatalf("paid on gpt/credits: hop %+v", h)
 	}
-	if h := armLedger(context.Background(), dialCheck{Check: checkIncluded, route: gptRoute}, "m"); h != nil {
+	if h := lan.armLedger(context.Background(), dialCheck{Check: checkIncluded, route: gptRoute}, "m"); h != nil {
 		t.Fatal("an included check armed a hop")
 	}
 	// A pot the ledger does not list (Anthropic or Kimi credits) is not counted.
-	if h := armLedger(context.Background(), dialCheck{Check: checkPaid, Pot: "kimi/credits", route: "r"}, "m"); h != nil {
+	if h := lan.armLedger(context.Background(), dialCheck{Check: checkPaid, Pot: "kimi/credits", route: "r"}, "m"); h != nil {
 		t.Fatal("an uncounted pot armed a hop")
 	}
 }
@@ -378,37 +378,37 @@ func TestLedgerPostKeepsWhatTheBrainHasNotAccepted(t *testing.T) {
 		},
 		func(es []map[string]any) (int, any) { return 200, resultsAll(es, "applied", 9) })
 
-	if ok, _ := reportPost(context.Background(), url, "k"); ok {
+	if ok, _ := lan.reportPost(context.Background(), tbase(url), "k"); ok {
 		t.Fatal("a 503 read as a post the brain took")
 	}
-	st := ledgerStatus()
+	st := lan.ledgerStatus()
 	if st["pending"] != 2 || !strings.Contains(st["last_error"].(string), "HTTP 503") {
 		t.Fatalf("after a 503: %+v", st)
 	}
-	if ok, _ := reportPost(context.Background(), url, "k"); ok {
+	if ok, _ := lan.reportPost(context.Background(), tbase(url), "k"); ok {
 		t.Fatal("a retry result read as done")
 	}
-	if ok, more := reportPost(context.Background(), url, "k"); !ok || more {
+	if ok, more := lan.reportPost(context.Background(), tbase(url), "k"); !ok || more {
 		t.Fatalf("the third post: ok %v more %v, want done", ok, more)
 	}
 	p := posts()
 	if len(p) != 3 || len(p[1]) != 2 || len(p[2]) != 1 || p[2][0]["charge"] != 0.1 || p[2][0]["kind"] != "ledger" {
 		t.Fatalf("posts = %v, want the refused entry dropped from the third", p)
 	}
-	st = ledgerStatus()
+	st = lan.ledgerStatus()
 	if st["pending"] != 0 || st["refused"] != 1 || st["accepted_unpulled"] != 1 || st["last_error"] != "" {
 		t.Fatalf("after the refusal and the retry: %+v", st)
 	}
 	// The refused entry still counts in the budget view; the accepted one
 	// until a ledger at seq 9 is pulled.
-	pref.mu.Lock()
-	pref.ledger = pulledLedger(t, now, 8, 0)
-	pref.mu.Unlock()
-	if v := ledgerView(unixSeconds(now)); !near(v.Pots["gpt/credits"].PeriodSpend, 0.3) {
+	lan.pref.mu.Lock()
+	lan.pref.ledger = pulledLedger(t, now, 8, 0)
+	lan.pref.mu.Unlock()
+	if v := lan.ledgerView(unixSeconds(now)); !near(v.Pots["gpt/credits"].PeriodSpend, 0.3) {
 		t.Fatalf("view spend %v, want both entries' 0.3", v.Pots["gpt/credits"].PeriodSpend)
 	}
 	// Posting again sends nothing: nothing is pending.
-	reportPost(context.Background(), url, "k")
+	lan.reportPost(context.Background(), tbase(url), "k")
 	if len(posts()) != 3 {
 		t.Fatal("a post with nothing pending reached the brain")
 	}
@@ -420,7 +420,7 @@ func TestLedgerPostKeepsWhatTheBrainHasNotAccepted(t *testing.T) {
 func TestLedgerEntryWireShape(t *testing.T) {
 	t.Cleanup(resetQuotaState())
 	testHop("gpt-5.6").abandon("abandoned by the first-event resend (no_head)")
-	batch := reportBatch()
+	batch := lan.reportBatch()
 	if len(batch) != 1 || batch[0].entry == nil {
 		t.Fatalf("batch = %+v, want the one entry", batch)
 	}
@@ -453,9 +453,9 @@ func TestE2EPaidCodexServeIsLedgered(t *testing.T) {
 	h, restore := classWithUsableGpt(t)
 	defer restore()
 	t.Cleanup(func() {
-		ledgerMu.Lock()
-		ledgerOwn, ledgerLastErr = nil, ""
-		ledgerMu.Unlock()
+		lan.ledgerMu.Lock()
+		lan.ledgerOwn, lan.ledgerLastErr = nil, ""
+		lan.ledgerMu.Unlock()
 	})
 	h.spentWithCredits("gpt", "gpt")
 	h.payFrom(gptRoute, "gpt/credits")
@@ -504,7 +504,7 @@ func TestE2EPaidCodexServeIsLedgered(t *testing.T) {
 		"unit": "codex_credit", "period_spend": 0.009, "routes": map[string]any{gptRoute: 0.009}}})
 	h.brainMu.Unlock()
 	fetchPreferredSync()
-	if st := ledgerStatus(); st["accepted_unpulled"] != 0 || st["pending"] != 0 {
+	if st := lan.ledgerStatus(); st["accepted_unpulled"] != 0 || st["pending"] != 0 {
 		t.Fatalf("after the covering pull: %+v", st)
 	}
 	if c := gptCheck(t); !c.no() || c.Reason != "budget" {
@@ -520,9 +520,9 @@ func TestE2EFirstEventResendLedgersTheAbandonedHopUncounted(t *testing.T) {
 	h, restore := classWithUsableGpt(t)
 	defer restore()
 	t.Cleanup(func() {
-		ledgerMu.Lock()
-		ledgerOwn, ledgerLastErr = nil, ""
-		ledgerMu.Unlock()
+		lan.ledgerMu.Lock()
+		lan.ledgerOwn, lan.ledgerLastErr = nil, ""
+		lan.ledgerMu.Unlock()
 	})
 	armHealth(t, newHealthStore(defaultHealthCfg()))
 	armObserve(t)
@@ -567,15 +567,10 @@ func TestE2EFirstEventResendLedgersTheAbandonedHopUncounted(t *testing.T) {
 // statusFunding is a session's class_funding on /_switch/status.
 func statusFunding(t *testing.T, proxyURL, class, sess string) map[string]any {
 	t.Helper()
-	resp, err := http.Get(proxyURL + "/_switch/status")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
 	var s struct {
 		ClassFunding map[string]map[string]map[string]any `json:"class_funding"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+	if err := json.Unmarshal(statusMine(t, proxyURL), &s); err != nil {
 		t.Fatal(err)
 	}
 	f := s.ClassFunding[class][fpSess(sess)]
@@ -605,19 +600,19 @@ func TestBudgetGateOnAnEntryUnpostedPastStaleMax(t *testing.T) {
 		t.Fatalf("0.3 unposted 31 min: %s, want no(unknown, ledger_unposted) with no until", c)
 	}
 	// Refused entries are never posted again: the same.
-	ledgerMu.Lock()
-	ledgerOwn[1].refused = "entries[0]: unit must be 'codex_credit'"
-	ledgerMu.Unlock()
+	lan.ledgerMu.Lock()
+	lan.ledgerOwn[1].refused = "entries[0]: unit must be 'codex_credit'"
+	lan.ledgerMu.Unlock()
 	if c := checkGpt(); c.Basis != "ledger_unposted" {
 		t.Fatalf("refused 31 min ago: %s, want no(unknown, ledger_unposted)", c)
 	}
 	// Accepted (the brain has it on disk) is not unposted, though no pull
 	// covers it yet; nor is an uncounted entry, which no budget counts.
-	ledgerMu.Lock()
-	ledgerOwn[1].refused, ledgerOwn[1].seq = "", 6
-	ledgerOwn = append(ledgerOwn, &ownEntry{e: ledgerEntry{ID: newLedgerID(), At: unixSeconds(old),
+	lan.ledgerMu.Lock()
+	lan.ledgerOwn[1].refused, lan.ledgerOwn[1].seq = "", 6
+	lan.ledgerOwn = append(lan.ledgerOwn, &ownEntry{e: ledgerEntry{ID: newLedgerID(), At: unixSeconds(old),
 		Account: "gpt", Pot: potCredits, Route: gptRoute, Unit: "codex_credit"}})
-	ledgerMu.Unlock()
+	lan.ledgerMu.Unlock()
 	if c := checkGpt(); !c.paid() {
 		t.Fatalf("accepted, and an uncounted one unposted: %s, want paid", c)
 	}
@@ -665,13 +660,13 @@ func TestLedgerPulledKeepsAnEntryNotYetAccepted(t *testing.T) {
 	paidGptWorld(t, potSettings{Budget: &budget}, pulledLedger(t, now, 5, 0.5))
 	enter(0.6, now)
 	l := pulledLedger(t, now, 1000, 0.5)
-	pref.mu.Lock()
-	pref.ledger = l
-	pref.mu.Unlock()
-	ledgerPulled(l, unixSeconds(now))
-	ledgerMu.Lock()
-	left := len(ledgerOwn)
-	ledgerMu.Unlock()
+	lan.pref.mu.Lock()
+	lan.pref.ledger = l
+	lan.pref.mu.Unlock()
+	lan.ledgerPulled(l, unixSeconds(now))
+	lan.ledgerMu.Lock()
+	left := len(lan.ledgerOwn)
+	lan.ledgerMu.Unlock()
 	if left != 1 {
 		t.Fatalf("%d entries after a pull, want the unaccepted one kept", left)
 	}
@@ -691,22 +686,22 @@ func TestLedgerViewReadsTheLedgerAndOurEntriesTogether(t *testing.T) {
 	older, newer := pulledLedger(t, now, 5, 0), pulledLedger(t, now, 6, 0.6)
 	charge, basis := 0.6, "derived"
 	for i := 0; i < 2000; i++ {
-		pref.mu.Lock()
-		pref.ledger = older
-		pref.mu.Unlock()
-		ledgerMu.Lock()
-		ledgerOwn = []*ownEntry{{seq: 6, e: ledgerEntry{ID: "e", At: at, Account: "gpt", Pot: potCredits,
+		lan.pref.mu.Lock()
+		lan.pref.ledger = older
+		lan.pref.mu.Unlock()
+		lan.ledgerMu.Lock()
+		lan.ledgerOwn = []*ownEntry{{seq: 6, e: ledgerEntry{ID: "e", At: at, Account: "gpt", Pot: potCredits,
 			Route: gptRoute, Charge: &charge, Unit: "codex_credit", Basis: &basis}}}
-		ledgerMu.Unlock()
+		lan.ledgerMu.Unlock()
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			pref.mu.Lock()
-			pref.ledger = newer
-			pref.mu.Unlock()
-			ledgerPulled(newer, at)
+			lan.pref.mu.Lock()
+			lan.pref.ledger = newer
+			lan.pref.mu.Unlock()
+			lan.ledgerPulled(newer, at)
 		}()
-		v := ledgerView(at)
+		v := lan.ledgerView(at)
 		<-done
 		if got := v.Pots["gpt/credits"].PeriodSpend; !near(got, 0.6) {
 			t.Fatalf("round %d: the view read %v, want 0.6 (seq %d)", i, got, v.Seq)
@@ -731,15 +726,15 @@ func TestShutdownFlushDoesNotWaitOnAPostInFlight(t *testing.T) {
 	}))
 	release := sync.OnceFunc(func() { close(hang) })
 	t.Cleanup(func() { release(); slow.Close() })
-	oldBrain, oldKey := brainURL, switchKey
-	brainURL, switchKey = slow.URL, "k"
-	t.Cleanup(func() { brainURL, switchKey = oldBrain, oldKey })
+	oldBrain, oldKey := brainBase, switchKey
+	brainBase, switchKey = slow.URL, "k"
+	t.Cleanup(func() { brainBase, switchKey = oldBrain, oldKey })
 	oldBound := reportShutdownPost
 	reportShutdownPost = 200 * time.Millisecond
 	t.Cleanup(func() { reportShutdownPost = oldBound })
 	runReporterFor(t, slow.URL, "k")
 	basis, c := "derived", 0.5
-	ledgerEnter(ledgerEntry{ID: newLedgerID(), At: unixSeconds(now), Account: "gpt", Pot: potCredits,
+	lan.ledgerEnter(ledgerEntry{ID: newLedgerID(), At: unixSeconds(now), Account: "gpt", Pot: potCredits,
 		Route: gptRoute, Charge: &c, Unit: "codex_credit", Basis: &basis}) // the sender's post hangs
 	select {
 	case <-arrived:
@@ -747,12 +742,12 @@ func TestShutdownFlushDoesNotWaitOnAPostInFlight(t *testing.T) {
 		t.Fatal("the entry's own post never reached the brain")
 	}
 	t0 := time.Now()
-	reportsFlush()
+	lan.reportsFlush()
 	if d := time.Since(t0); d > time.Second {
 		t.Fatalf("flush took %s with a 200ms bound behind a post in flight (brainClient timeout %s)",
 			d.Round(time.Millisecond), brainClient.Timeout)
 	}
-	if s := ledgerStatus(); s["pending"] != 1 {
+	if s := lan.ledgerStatus(); s["pending"] != 1 {
 		t.Fatalf("status = %v, want the entry still pending (lost to the restart)", s)
 	}
 }
@@ -765,12 +760,12 @@ func TestBudgetGateOnOurLowerBoundEntry(t *testing.T) {
 	budget := 10.0
 	paidGptWorld(t, potSettings{Budget: &budget}, pulledLedger(t, now, 5, 0))
 	charge, basis := 0.5, "lower_bound"
-	ledgerEnter(ledgerEntry{ID: newLedgerID(), At: unixSeconds(now), Account: "gpt", Pot: potCredits,
+	lan.ledgerEnter(ledgerEntry{ID: newLedgerID(), At: unixSeconds(now), Account: "gpt", Pot: potCredits,
 		Route: gptRoute, Charge: &charge, Unit: "codex_credit", Basis: &basis})
 	if c := checkGpt(); !c.no() || c.Reason != "unknown" || c.Basis != "unpriced" || c.Until.known() {
 		t.Fatalf("our lower bound: %s, want no(unknown, unpriced)", c)
 	}
-	if v := ledgerView(unixSeconds(now)); !near(v.Pots["gpt/credits"].PeriodSpend, 0.5) {
+	if v := lan.ledgerView(unixSeconds(now)); !near(v.Pots["gpt/credits"].PeriodSpend, 0.5) {
 		t.Fatalf("view spend %v, want the lower bound counted", v.Pots["gpt/credits"].PeriodSpend)
 	}
 }
@@ -780,9 +775,9 @@ func TestBudgetGateOnOurLowerBoundEntry(t *testing.T) {
 // whatever its status; a request none of whose dials entered says nothing.
 func TestAChargedRequestsReplyIsNotRetried(t *testing.T) {
 	t.Cleanup(func() {
-		ledgerMu.Lock()
-		ledgerOwn = nil
-		ledgerMu.Unlock()
+		lan.ledgerMu.Lock()
+		lan.ledgerOwn = nil
+		lan.ledgerMu.Unlock()
 	})
 	ctx, mark := withLedgerMark(context.Background())
 	clean := &recorder{ResponseWriter: httptest.NewRecorder(), mark: mark}
@@ -790,7 +785,7 @@ func TestAChargedRequestsReplyIsNotRetried(t *testing.T) {
 	if v := clean.Header().Get("x-should-retry"); v != "" || mark.charged() {
 		t.Fatalf("x-should-retry %q before any entry", v)
 	}
-	h := &ledgerHop{account: "gpt", pot: "credits", route: "r", unit: "codex_credit", mark: ledgerMarkOf(ctx)}
+	h := &ledgerHop{tenant: lan, account: "gpt", pot: "credits", route: "r", unit: "codex_credit", mark: ledgerMarkOf(ctx)}
 	h.abandon("the stream ended before response.completed")
 	if !mark.charged() {
 		t.Fatal("an uncounted entry did not mark its request")

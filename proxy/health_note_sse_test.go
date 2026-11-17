@@ -159,7 +159,7 @@ func TestNoteCodexCompletedOnly(t *testing.T) {
 			var baseline, out bytes.Buffer
 			_ = translateCodexSSE(strings.NewReader(input), &baseline, 1, nil, nil, nil, nil, nil)
 			n := testResponseNote()
-			hs := &hopScore{ctx: context.Background(), cc: &classRoute{note: n}}
+			hs := &hopScore{ctx: context.Background(), cc: &classRoute{tenant: lan, note: n}}
 			_ = translateCodexSSE(strings.NewReader(input), &out, 1, nil, hs, nil, nil, nil)
 			if name == "completed" {
 				insertion := renderedNoteFrames(1, n.text)

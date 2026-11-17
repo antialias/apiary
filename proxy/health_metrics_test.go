@@ -40,7 +40,7 @@ func TestMetricsExpositionShape(t *testing.T) {
 	armHealth(t, hs)
 	hs.record("lane:m1", sample{ok: true, class: "c1", reqID: "r1"})
 
-	out := hs.renderMetrics()
+	out := renderHealthMetrics(hs)
 
 	// Every family declares HELP and TYPE exactly once, and every declared
 	// family has at least one series — a bare HELP is a lie about coverage.
@@ -80,7 +80,7 @@ func TestMetricsStateGaugeSumsToOne(t *testing.T) {
 	armHealth(t, hs)
 	tripK(t, hs, c, "lane:m1")
 
-	out := hs.renderMetrics()
+	out := renderHealthMetrics(hs)
 	sum := 0
 	for _, st := range []string{hsHealthy, hsOpen, hsHalfOpen, hsConvalescent} {
 		if v := mustMetric(t, out, `state{key="lane:m1",state="`+st+`"}`); v == "1" {
@@ -108,7 +108,7 @@ func TestMetricsSamplesTotalSeparatesCleanFromSilent(t *testing.T) {
 	hs := newHealthStore(defaultHealthCfg())
 	armHealth(t, hs)
 
-	if out := hs.renderMetrics(); strings.Contains(out, "samples_total") {
+	if out := renderHealthMetrics(hs); strings.Contains(out, "samples_total") {
 		t.Fatal("samples_total exists before anything was scored — silence must read as absence")
 	}
 	base := time.Now()
@@ -119,7 +119,7 @@ func TestMetricsSamplesTotalSeparatesCleanFromSilent(t *testing.T) {
 	hs.record("lane:m1", sample{t: base.Add(18 * time.Second),
 		ok: false, cause: "http_5xx", class: "c1", reqID: "d1", fp: 7})
 
-	out := hs.renderMetrics()
+	out := renderHealthMetrics(hs)
 	if v := mustMetric(t, out, `samples_total{key="lane:m1",class="c1",outcome="ok",cause="",forced="false"}`); v != "3" {
 		t.Fatalf("ok samples = %s, want 3", v)
 	}
@@ -145,7 +145,7 @@ func TestMetricsSamplesFollowBucketDedup(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		hs.record("lane:m1", sample{t: base, ok: true, class: "c1", reqID: "r" + string(rune('a'+i))})
 	}
-	out := hs.renderMetrics()
+	out := renderHealthMetrics(hs)
 	if v := mustMetric(t, out, `outcome="ok"`); v != "1" {
 		t.Fatalf("five same-bucket hops counted %s samples, want 1", v)
 	}
@@ -159,7 +159,7 @@ func TestMetricsSupersededOkStillCounts(t *testing.T) {
 	hs.record("lane:m1", sample{ok: true, class: "c1", reqID: "same"})
 	hs.record("lane:m1", sample{ok: false, cause: "transport", class: "c1", reqID: "same"})
 
-	out := hs.renderMetrics()
+	out := renderHealthMetrics(hs)
 	if v := mustMetric(t, out, `outcome="ok"`); v != "1" {
 		t.Fatalf("ok = %s, want 1", v)
 	}
@@ -176,7 +176,7 @@ func TestMetricsSupersededOkStillCounts(t *testing.T) {
 func TestMetricsDoubleSettleAlwaysPresent(t *testing.T) {
 	hs := newHealthStore(defaultHealthCfg())
 	armHealth(t, hs)
-	out := hs.renderMetrics()
+	out := renderHealthMetrics(hs)
 	if v := mustMetric(t, out, "lease_double_settle_total"); v != "0" {
 		t.Fatalf("lease_double_settle_total = %s, want 0", v)
 	}
@@ -190,7 +190,7 @@ func TestMetricsModeAndDecisions(t *testing.T) {
 	hs.noteRouteDecision("frontier", "", "")
 	hs.noteExhausted("frontier", true)
 
-	out := hs.renderMetrics()
+	out := renderHealthMetrics(hs)
 	if v := mustMetric(t, out, `mode{mode="observe"}`); v != "1" {
 		t.Fatalf("observe mode gauge = %s", v)
 	}
@@ -213,7 +213,7 @@ func TestMetricsEscapesLabelValues(t *testing.T) {
 	hs := newHealthStore(defaultHealthCfg())
 	armHealth(t, hs)
 	hs.noteRouteDecision(`we"ird\class`, "bound", "r")
-	out := hs.renderMetrics()
+	out := renderHealthMetrics(hs)
 	if !strings.Contains(out, `class="we\"ird\\class"`) {
 		t.Fatalf("label not escaped:\n%s", out)
 	}
@@ -247,13 +247,18 @@ func TestE2EMetricsEndpointServesScoredTraffic(t *testing.T) {
 	}
 	b, _ := io.ReadAll(scrape.Body)
 	out := string(b)
-	if !strings.Contains(out, `samples_total{key="lane:fable",class="frontier",outcome="ok"`) {
+	// Every health series wears the tenant label first (the household's here).
+	tl := `tenant="` + testLanTenant + `",`
+	if !strings.Contains(out, `samples_total{`+tl+`key="lane:fable",class="frontier",outcome="ok"`) {
 		t.Fatalf("the served hop did not reach samples_total:\n%s", out)
 	}
-	if !strings.Contains(out, `route_decisions_total{class="frontier"`) {
+	if !strings.Contains(out, `route_decisions_total{`+tl+`class="frontier"`) {
 		t.Fatalf("no route decision recorded:\n%s", out)
 	}
-	if v := mustMetric(t, out, `state{key="lane:fable",state="healthy"}`); v != "1" {
+	if !strings.Contains(out, `switch_proxy_requests_total{lane="class:frontier",tenant="`+testLanTenant+`",code="200"}`) {
+		t.Fatalf("requests_total has no tenant label:\n%s", out)
+	}
+	if v := mustMetric(t, out, `state{`+tl+`key="lane:fable",state="healthy"}`); v != "1" {
 		t.Fatalf("served key not healthy: %s", v)
 	}
 }

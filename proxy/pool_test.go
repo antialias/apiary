@@ -18,7 +18,7 @@ func f64(v float64) *float64 { return &v }
 
 // poolPick is the pool account providerMemberDial dials for m ("" = none).
 func poolPick(m classMemberPref) string {
-	a, _, _ := providerMemberDial(m, "", false, false, nowFn())
+	a, _, _ := lan.providerMemberDial(m, "", false, false, nowFn())
 	return a
 }
 
@@ -84,11 +84,11 @@ func TestPoolPick(t *testing.T) {
 	t.Run("a throttled incumbent is deranked, not refused", func(t *testing.T) {
 		poolWorld(t, nil, "gpt-a", "gpt-b")
 		m := gptPoolMember("gpt-a", map[string]*float64{"gpt-a": f64(10), "gpt-b": f64(20)})
-		recordThrottle("gpt-a", 429, "slow down", nil)
+		lan.recordThrottle("gpt-a", 429, "slow down", nil)
 		if got := poolPick(m); got != "gpt-b" {
 			t.Fatalf("got %q, want gpt-b ahead of the throttled incumbent", got)
 		}
-		recordThrottle("gpt-b", 429, "slow down", nil)
+		lan.recordThrottle("gpt-b", 429, "slow down", nil)
 		if got := poolPick(m); got == "" {
 			t.Fatal("every account throttled: still dialled — a throttle is not a no")
 		}
@@ -103,7 +103,7 @@ func TestPoolPick(t *testing.T) {
 		if got := poolPick(m); got != "" {
 			t.Fatalf("got %q, want nobody: every check is no (the old cooldown rode the incumbent)", got)
 		}
-		if why := memberDialable(m, nowFn()); !strings.Contains(why, "no(spent") {
+		if why := lan.memberDialable(m, nowFn()); !strings.Contains(why, "no(spent") {
 			t.Fatalf("memberDialable = %q, want the member refused for spent", why)
 		}
 	})
@@ -111,10 +111,10 @@ func TestPoolPick(t *testing.T) {
 	t.Run("records are per account, whatever routes it backs", func(t *testing.T) {
 		poolWorld(t, nil, "gpt-a", "gpt-b")
 		seedSpent("gpt-a", "seven_day", 429, "usage_limit_reached", time.Time{})
-		if _, ok := spentRecordOf("gpt-b", nowFn()); ok {
+		if _, ok := lan.spentRecordOf("gpt-b", nowFn()); ok {
 			t.Fatal("a record on gpt-a leaked onto gpt-b")
 		}
-		if _, ok := spentRecordOf("gpt-a", nowFn()); !ok {
+		if _, ok := lan.spentRecordOf("gpt-a", nowFn()); !ok {
 			t.Fatal("the gpt-a record did not stick")
 		}
 	})

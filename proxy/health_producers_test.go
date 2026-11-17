@@ -34,9 +34,9 @@ func withTestProviders(t *testing.T) {
 // nil-gated, so this is the test's mode switch.
 func armHealth(t *testing.T, h *healthStore) {
 	t.Helper()
-	old := health
-	health = h
-	t.Cleanup(func() { health = old })
+	old := lan.health
+	lan.health = h
+	t.Cleanup(func() { lan.health = old })
 }
 
 var (
@@ -66,7 +66,7 @@ const shape429Body = `{"type":"error","error":{"type":"rate_limit_error","messag
 
 func TestClassifyHeadRowTable(t *testing.T) {
 	withTestProviders(t)
-	bg := context.Background()
+	bg := lanCtx()
 	cases := []struct {
 		name     string
 		m        classMemberPref
@@ -147,7 +147,7 @@ func TestClassifyHeadRowTable(t *testing.T) {
 // ---- the codex exit-site table ----
 
 func TestClassifyCodexExitTable(t *testing.T) {
-	bg := context.Background()
+	bg := lanCtx()
 	cases := []struct {
 		name      string
 		a         anthStream
@@ -200,7 +200,7 @@ func tapFeed(stream bool, ctx context.Context, chunks []string, readErr error) h
 }
 
 func TestHealthTapRowTable(t *testing.T) {
-	bg := context.Background()
+	bg := lanCtx()
 	okScript := "event: message_start\ndata: {}\n\nevent: content_block_start\ndata: {}\n\nevent: message_stop\ndata: {}\n\n"
 	cases := []struct {
 		name      string
@@ -272,7 +272,7 @@ func TestHealthTapRecordsThroughStore(t *testing.T) {
 	testClock(t)
 	h := newHS()
 	armHealth(t, h)
-	cc := &classRoute{class: "helpdesk", reqID: "r-tap", classReq: classReq{origBody: []byte(`{"model":"claude-frontier"}`)}}
+	cc := &classRoute{tenant: lan, class: "helpdesk", reqID: "r-tap", classReq: classReq{origBody: []byte(`{"model":"claude-frontier"}`)}}
 	body := io.NopCloser(strings.NewReader(`{"type":"message"}`))
 	tap := newHealthTap(body, context.Background(), cc, tKey, false)
 	if _, err := io.ReadAll(tap); err != nil {
@@ -295,7 +295,7 @@ func TestHealthTapDegSampleCarriesRequestFP(t *testing.T) {
 	h := newHS()
 	armHealth(t, h)
 	reqBody := []byte(`{"model":"claude-frontier","messages":[]}`)
-	cc := &classRoute{class: "helpdesk", reqID: "r-deg", classReq: classReq{origBody: reqBody}}
+	cc := &classRoute{tenant: lan, class: "helpdesk", reqID: "r-deg", classReq: classReq{origBody: reqBody}}
 	body := io.NopCloser(strings.NewReader("event: message_start\ndata: {}\n\nevent: error\ndata: {}\n\n"))
 	tap := newHealthTap(body, context.Background(), cc, tKey, true)
 	io.Copy(io.Discard, tap)
@@ -321,7 +321,7 @@ func TestE15CancelSettlesProbeAbandoned(t *testing.T) {
 	if l == nil {
 		t.Fatal("claimProbe returned nil")
 	}
-	hs := &hopScore{ctx: context.Background(), key: tKey, cc: &classRoute{class: "helpdesk", classReq: classReq{origBody: []byte(`{}`)}}, lease: l}
+	hs := &hopScore{ctx: context.Background(), key: tKey, cc: &classRoute{tenant: lan, class: "helpdesk", classReq: classReq{origBody: []byte(`{}`)}}, lease: l}
 	// The codex cancel: pipe read half closed, stream never ended → row 1.
 	hs.settle(classifyCodexExit(&anthStream{writeErr: io.ErrClosedPipe}, nil, context.Background()))
 	st := snap(t, h, tKey)
@@ -345,7 +345,7 @@ func TestE27DoubleSettleThroughProducerIsInert(t *testing.T) {
 	if l == nil {
 		t.Fatal("claimProbe returned nil")
 	}
-	hs := &hopScore{ctx: context.Background(), key: tKey, cc: &classRoute{class: "helpdesk", classReq: classReq{origBody: []byte(`{}`)}}, lease: l}
+	hs := &hopScore{ctx: context.Background(), key: tKey, cc: &classRoute{tenant: lan, class: "helpdesk", classReq: classReq{origBody: []byte(`{}`)}}, lease: l}
 	ok := hopOutcome{row: "5", sig: sigHealthy, evidence: evOK, phase: "post_head", final: true}
 	hs.settle(ok)
 	before := snap(t, h, tKey)
@@ -367,15 +367,15 @@ func TestE27DoubleSettleThroughProducerIsInert(t *testing.T) {
 
 func TestProducersInertWhenHealthNil(t *testing.T) {
 	armHealth(t, nil)
-	if id := healthReqID(); id != "" {
+	if id := lan.healthReqID(); id != "" {
 		t.Fatalf("healthReqID = %q under off, want empty", id)
 	}
 	// A settle with no store must be a no-op, not a panic.
-	hs := &hopScore{ctx: context.Background(), key: tKey, cc: &classRoute{class: "helpdesk"}}
+	hs := &hopScore{ctx: context.Background(), key: tKey, cc: &classRoute{tenant: lan, class: "helpdesk"}}
 	hs.settle(hopOutcome{row: "5", sig: sigHealthy, evidence: evOK, final: true})
 	// The tap constructor is never even reached under off (main.go gates on
 	// health != nil), but a nil-store settle path is what recordHopHead hits.
-	recordHopHead(&classRoute{class: "helpdesk"}, memAnth, hopOutcome{row: "16", final: true, evidence: evDeg})
+	lan.recordHopHead(&classRoute{tenant: lan, class: "helpdesk"}, memAnth, hopOutcome{row: "16", final: true, evidence: evDeg})
 }
 
 // ---- the decision record's out= under a late cancel ----

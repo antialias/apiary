@@ -22,7 +22,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -47,9 +46,7 @@ var (
 	wireRPM   = 10.0 // sustained requests/minute per class; <=0 disables the limiter
 	wireBurst = 20.0 // bucket depth
 
-	wireMu      sync.Mutex
-	wireBuckets = map[string]*wireBucket{}
-	wireNow     = time.Now // test hook
+	wireNow = time.Now // test hook; the buckets are per tenant (tenant.wireMu, tenant.wireBuckets)
 )
 
 type wireBucket struct {
@@ -70,17 +67,17 @@ func wireInitFromEnv() {
 	}
 }
 
-func wireTake(class string) bool {
+func (tn *tenant) wireTake(class string) bool {
 	if wireRPM <= 0 {
 		return true
 	}
-	wireMu.Lock()
-	defer wireMu.Unlock()
+	tn.wireMu.Lock()
+	defer tn.wireMu.Unlock()
 	now := wireNow()
-	b := wireBuckets[class]
+	b := tn.wireBuckets[class]
 	if b == nil {
 		b = &wireBucket{tokens: wireBurst, last: now}
-		wireBuckets[class] = b
+		tn.wireBuckets[class] = b
 	}
 	if el := now.Sub(b.last).Minutes(); el > 0 {
 		b.tokens = min(wireBurst, b.tokens+el*wireRPM)
@@ -773,7 +770,14 @@ func openaiWireHandler(core http.Handler) http.Handler {
 			wireDeny(w, r, werr, "")
 			return
 		}
-		if !wireTake(norm.class.Class) {
+		// The OpenAI wire is the base-URL entry's, so its tenant is the lan
+		// tenant (tenantFrom); the buckets are that tenant's.
+		tn := tenantFrom(r.Context())
+		if tn == nil {
+			writeNoTenant(w, "")
+			return
+		}
+		if !tn.wireTake(norm.class.Class) {
 			wireDeny(w, r, &wireError{http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_exceeded",
 				"class " + norm.class.Class + " is over its wire rate limit"}, "30")
 			return

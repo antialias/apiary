@@ -38,21 +38,21 @@ func labelBody(thread, billing string, system []string, msgs ...string) string {
 func labelsTest(t *testing.T) {
 	t.Helper()
 	reset := func() {
-		sessionLabels.Lock()
-		sessionLabels.m = map[string]*sessionLabel{}
-		sessionLabels.Unlock()
+		lan.labelsMu.Lock()
+		lan.labels = map[string]*sessionLabel{}
+		lan.labelsMu.Unlock()
 	}
 	reset()
 	t.Cleanup(reset)
 }
 
 func labelObserve(sess, body string, now time.Time) {
-	sessionLabelsObserve(sess, parseReqFacts(http.Header{}, []byte(body)), now)
+	lan.sessionLabelsObserve(sess, parseReqFacts(http.Header{}, []byte(body)), now)
 }
 
 func wantLabel(t *testing.T, sess string, now time.Time, folder, platform string) {
 	t.Helper()
-	got := sessionLabelsLookup(sess, now)
+	got := lan.sessionLabelsLookup(sess, now)
 	if got.Folder != folder || got.Platform != platform {
 		t.Fatalf("label = %+v, want folder %q platform %q", got, folder, platform)
 	}
@@ -330,10 +330,10 @@ func TestSessionLabelPrune(t *testing.T) {
 	wantLabel(t, "s1", now.Add(5*time.Hour+sessionLabelIdle+time.Second), "", "")
 	// The next new session sweeps it out.
 	labelObserve("s3", labelBody(labelCreate, labelBilling, []string{labelEnv("/p/third", "linux")}, tapUserMsg("hi")), now.Add(5*time.Hour+sessionLabelIdle+time.Second))
-	sessionLabels.Lock()
-	_, kept := sessionLabels.m["s1"]
-	_, keptS2 := sessionLabels.m["s2"]
-	sessionLabels.Unlock()
+	lan.labelsMu.Lock()
+	_, kept := lan.labels["s1"]
+	_, keptS2 := lan.labels["s2"]
+	lan.labelsMu.Unlock()
 	if kept {
 		t.Fatal("a session idle past sessionLabelIdle survived the sweep")
 	}
@@ -347,16 +347,16 @@ func TestSessionLabelCap(t *testing.T) {
 	now := time.Now()
 	f := parseReqFacts(http.Header{}, []byte(labelBody(labelCreate, labelBilling, []string{labelEnv("/p/app", "darwin")}, tapUserMsg("hi"))))
 	for i := 0; i < sessionLabelCap; i++ {
-		sessionLabelsObserve(fmt.Sprintf("s%d", i), f, now.Add(time.Duration(i)*time.Millisecond))
+		lan.sessionLabelsObserve(fmt.Sprintf("s%d", i), f, now.Add(time.Duration(i)*time.Millisecond))
 	}
 	// s0 is the least recently seen until it is touched; touch it so s1 is.
-	sessionLabelsObserve("s0", reqFacts{Thread: "continue"}, now.Add(time.Hour))
-	sessionLabelsObserve("new", f, now.Add(time.Hour))
-	sessionLabels.Lock()
-	n := len(sessionLabels.m)
-	_, s0 := sessionLabels.m["s0"]
-	_, s1 := sessionLabels.m["s1"]
-	sessionLabels.Unlock()
+	lan.sessionLabelsObserve("s0", reqFacts{Thread: "continue"}, now.Add(time.Hour))
+	lan.sessionLabelsObserve("new", f, now.Add(time.Hour))
+	lan.labelsMu.Lock()
+	n := len(lan.labels)
+	_, s0 := lan.labels["s0"]
+	_, s1 := lan.labels["s1"]
+	lan.labelsMu.Unlock()
 	if n != sessionLabelCap || !s0 || s1 {
 		t.Fatalf("entries=%d s0=%v s1=%v, want %d with the least recently seen (s1) evicted", n, s0, s1, sessionLabelCap)
 	}
@@ -613,7 +613,7 @@ func TestEachMessageBack(t *testing.T) {
 
 func wantName(t *testing.T, sess string, now time.Time, name string) {
 	t.Helper()
-	if got := sessionLabelsLookup(sess, now); got.Name != name {
+	if got := lan.sessionLabelsLookup(sess, now); got.Name != name {
 		t.Fatalf("name = %q, want %q (label %+v)", got.Name, name, got)
 	}
 }

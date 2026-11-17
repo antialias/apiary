@@ -35,15 +35,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 _TMP = tempfile.mkdtemp(prefix="claude-usage-test-")
-os.environ["SWITCH_STATE_FILE"] = os.path.join(_TMP, "switch_state.json")
-os.environ["SWITCH_LANES_FILE"] = os.path.join(_TMP, "lanes.json")  # absent -> DEFAULT_LANES
+os.environ["SWITCH_CREDS_DIR"] = _TMP  # the tenants' dirs, classes.json and lanes.json (absent -> defaults)
+os.environ.pop("SWITCH_CREDS_KEY_FILE", None)  # the plain store; the sealed one is TestCredStore's
 os.environ["SWITCH_KEY"] = "test-switch-key"
-os.environ["KIMI_CREDS_FILE"] = os.path.join(_TMP, "kimi.json")  # absent -> env-key fallback
-os.environ["SWITCH_CONSUMERS_FILE"] = os.path.join(_TMP, "consumers.json")  # absent -> no consumers
-os.environ["SWITCH_MONEY_FILE"] = os.path.join(_TMP, "money.json")  # absent -> money defaults
-os.environ["ANTHROPIC_API_CREDS_FILE"] = os.path.join(_TMP, "anthropic-api.json")  # absent -> no api keys
-os.environ["CLAUDE_ACCOUNTS_FILE"] = os.path.join(_TMP, "accounts.json")  # absent -> no accounts until a test adds them
-os.environ["OPENAI_CODEX_CREDS_FILE"] = os.path.join(_TMP, "openai-codex.json")  # absent -> gpt poller disabled
 os.environ["LOCAL_UPSTREAM"] = ""  # unset -> local poller disabled (tests set plocal.LOCAL_UPSTREAM)
 os.environ["SWITCH_BRIDGE_URL"] = ""  # set and empty -> the prepaid notices are off (tests fake the bridge)
 
@@ -74,20 +68,50 @@ from providers import anthropic_subscription as psub  # noqa: E402
 from providers import codex as pcodex  # noqa: E402
 from providers import kimi as pkimi  # noqa: E402
 from providers import local as plocal  # noqa: E402
+import tenancy  # noqa: E402
+
+# The tenant these tests run as: the household, the one lan tenant, written to
+# the registry under _TMP before the boot (a brain refuses to start without
+# it), every route reached as /t/<T.id>/... (tp). A test that needs a second
+# tenant makes one with new_tenant() and retires it.
+TEST_TENANT = "ten_testhouseholdaaaaaaaaaaaaa"  # any well-formed id; the core names no real one
+with open(os.path.join(_TMP, "tenants.json"), "w") as _f:
+    json.dump([{"tenant": TEST_TENANT, "name": "test household", "lan": True, "tap": "content"}], _f)
+ex.boot()
+T = ex._registry.get(TEST_TENANT)
+TP = f"/t/{T.id}"
+_GLOBAL_ROUTES = ("/classes", "/tenants")
 
 
-# The account loop's accounts: the subscription driver's store, name -> token
-# facts. gen_preferred_c2.py (the proxy's fixture generator) reaches it as ex._creds.
-ACCOUNTS = psub._creds
-ex._creds = psub._creds
+def tp(path, tenant=None):
+    """A route's path as the proxy must call it: tenant routes under
+    /t/<tenant>/, the operator's (/classes, /tenants) as they are."""
+    if path.startswith(_GLOBAL_ROUTES):
+        return path
+    return f"/t/{(tenant or T).id}{path}"
+
+
+def new_tenant(name="other", lan=False, tap="metadata"):
+    """A second tenant in the registry, booted like main() boots one."""
+    t, _ = ex._registry.put({"tenant": tenancy.new_tenant_id(), "name": name, "lan": lan, "tap": tap})
+    loop = ex._account_loop()
+    if loop:
+        loop["start"](t)
+    ex._tenant_boot(t)
+    return t
+
+
+# The account loop's accounts: the subscription driver's store for T, name ->
+# token facts. gen_preferred_c2.py (the proxy's fixture generator) reaches it here.
+ACCOUNTS = psub._st(T).creds
 
 
 def _reset_subscription():
-    psub._cred_generation.clear()
-    psub._last_refresh.clear()
-    with psub._proxy_refusals_lock:
-        psub._proxy_refusals.clear()
-        psub._forced_refresh_at.clear()
+    psub._st(T).cred_generation.clear()
+    psub._st(T).last_refresh.clear()
+    with psub._st(T).proxy_refusals_lock:
+        psub._st(T).proxy_refusals.clear()
+        psub._st(T).forced_refresh_at.clear()
 
 
 # What reset() clears beside the core's state, and the reading adapters read()
@@ -148,12 +172,12 @@ def acct(name, weekly, caps=None, good_age=0, session=10):
 def reset(*results):
     """Reset all module state and install the given poll results, each read
     from its raw response."""
-    with ex._lock:
-        ex._state.clear()
+    with T.lock:
+        T.state.clear()
         for r in results:
-            ex._state[r["name"]] = read(r) if "raw" in r else r
-    with ex._plock:
-        ex._preferred.update({"account": None, "since": 0.0, "reason": "init",
+            T.state[r["name"]] = read(r) if "raw" in r else r
+    with T.plock:
+        T.preferred.update({"account": None, "since": 0.0, "reason": "init",
                               "last_switch": 0.0, "pinned": None,
                               "lanes": {ln: ex._new_lane_state() for ln in ex._lane_names},
                               "providers": {}})
@@ -165,33 +189,33 @@ def reset(*results):
         ACCOUNTS[n] = {"refresh_token": "r-" + n, "access_token": "tok-" + n,
                         "expires_at": time.time() + 9999}
     reset_ledger()
-    with ex._reports_lock:
-        ex._reported.clear()
-        ex._shut_reports.clear()
-        ex._holds.clear()
-        ex._limit_holds.clear()
-    with ex._served_lock:
-        ex._served = ex._served_fresh()
+    with T.reports_lock:
+        T.reported.clear()
+        T.shut_reports.clear()
+        T.holds.clear()
+        T.limit_holds.clear()
+    with T.served_lock:
+        T.served = ex._served_fresh()
     reset_sizing()
-    ex._notices.reset()
+    T.notices.reset()
     try:
-        os.remove(ex.STATE_FILE)
+        os.remove(T.state_file)
     except FileNotFoundError:
         pass
 
 
 def sizing_bad_files():
-    d = os.path.dirname(ex.SIZING_FILE) or "."
-    base = os.path.basename(ex.SIZING_FILE) + ".bad-"
+    d = os.path.dirname(T.sizing_file) or "."
+    base = os.path.basename(T.sizing_file) + ".bad-"
     return sorted(os.path.join(d, n) for n in os.listdir(d) if n.startswith(base))
 
 
 def reset_sizing():
     """No sizing state and no sizing file (quota-model 66)."""
-    with ex._sizing_lock:
-        ex._sizing = ex._sizing_fresh()
-        ex._sizing_gate.update(closing=False, inflight=0, frozen=None, set_aside=None)
-    for path in [ex.SIZING_FILE, ex.SIZING_FILE + ".tmp"] + sizing_bad_files():
+    with T.sizing_lock:
+        T.sizing = ex._sizing_fresh()
+        T.sizing_gate.update(closing=False, inflight=0, frozen=None, set_aside=None)
+    for path in [T.sizing_file, T.sizing_file + ".tmp"] + sizing_bad_files():
         try:
             os.remove(path)
         except FileNotFoundError:
@@ -200,10 +224,10 @@ def reset_sizing():
 
 def reset_ledger():
     """An empty ledger: no file, no entries, nothing reconciled."""
-    with ex._ledger_lock:
-        ex._ledger.update(seq=0, ids={}, spend={}, uncounted={}, unpriced={}, total={}, recon={},
+    with T.ledger_lock:
+        T.ledger.update(seq=0, ids={}, spend={}, uncounted={}, unpriced={}, total={}, recon={},
                           unreadable=0, counted_at={})
-    for f in (ex.LEDGER_FILE, ex.RECHECK_FILE):
+    for f in (T.ledger_file, T.recheck_file):
         try:
             os.remove(f)
         except FileNotFoundError:
@@ -212,6 +236,18 @@ def reset_ledger():
 
 def iso(t):
     return datetime.fromtimestamp(t, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def set_kimi_key(key, tenant=None):
+    """The tenant's enrolled kimi key: written to its kimi.json (None: no
+    file), the driver's watcher reset so the next read sees it."""
+    st = pkimi._st(tenant or T)
+    with (tenant or T).refresh_lock:
+        if key is None:
+            ex._store.remove(st.file)
+        else:
+            ex._store.write_json(st.file, {"api_key": key})
+        st.file_key, st.file_mtime = None, None
 
 
 def kimi_window(pct, reset_at, limit=100.0):
@@ -255,14 +291,14 @@ def kimi_result(five_hour=8.0, weekly=2.0, total_limit=100.0, total_remaining=99
 
 def age_lanes(seconds=ex.SW_DWELL + 100):
     """Push every lane's last_switch into the past so the dwell gate opens."""
-    with ex._plock:
-        for s in ex._preferred["lanes"].values():
+    with T.plock:
+        for s in T.preferred["lanes"].values():
             s["last_switch"] = time.time() - seconds
 
 
 def lane_account(lane):
-    with ex._plock:
-        return ex._preferred["lanes"][lane]["account"]
+    with T.plock:
+        return T.preferred["lanes"][lane]["account"]
 
 
 class TestLaneEffective(unittest.TestCase):
@@ -342,12 +378,12 @@ class TestLaneEffective(unittest.TestCase):
             r = read(r)
             self.assertNotIn("five_hour", ex._reading_windows(r["reading"]), five)
             self.assertEqual(ex._lane_effective(r, ex._lanes[0]), 99, five)
-            st = ex._account_standing(ACCT_A, r, "anthropic", time.time())
+            st = ex._account_standing(T, ACCT_A, r, "anthropic", time.time())
             c = ex.dial_check({"id": "lane:default", "pay": []}, ACCT_A, st, {}, time.time())
             self.assertEqual(c["check"], "included", (five, c))
             reset(r)
-            ex.compute_preferred()
-            out = [l for l in ex.render().splitlines()
+            ex.compute_preferred(T)
+            out = [l for l in ex.render([T]).splitlines()
                    if f'account="{ACCT_A}"' in l and "five_hour" in l]
             self.assertEqual(out, [], five)
 
@@ -369,42 +405,42 @@ class TestIncumbentUntilForced(unittest.TestCase):
         # Fable-scoped cap spikes to 96% (hard) while its overall weekly stays cool at
         # 30%. Only the Fable lane may evict; every other lane keeps the cool incumbent.
         reset(acct(ACCT_A, 30), acct(ACCT_B, 45))
-        ex.compute_preferred()  # bootstrap: A is coolest -> incumbent on every lane
+        ex.compute_preferred(T)  # bootstrap: A is coolest -> incumbent on every lane
         for ln in ex._lane_names:
             self.assertEqual(lane_account(ln), ACCT_A, f"lane {ln} should bootstrap onto the coolest account")
-        with ex._lock:
-            ex._state[ACCT_A] = acct(ACCT_A, 30, caps={"Fable": 96})
+        with T.lock:
+            T.state[ACCT_A] = acct(ACCT_A, 30, caps={"Fable": 96})
         age_lanes()
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(lane_account("fable"), ACCT_B, "the maxed lane evicts to the coolest alt")
         for ln in ("opus", "sonnet", "haiku", "default"):
             self.assertEqual(lane_account(ln), ACCT_A, f"lane {ln}: incumbent wins while still cool")
 
     def test_legacy_mirror_tracks_default_lane(self):
         reset(acct(ACCT_A, 30), acct(ACCT_B, 45))
-        ex.compute_preferred()
-        with ex._lock:
-            ex._state[ACCT_A] = acct(ACCT_A, 30, caps={"Fable": 96})
+        ex.compute_preferred(T)
+        with T.lock:
+            T.state[ACCT_A] = acct(ACCT_A, 30, caps={"Fable": 96})
         age_lanes()
-        ex.compute_preferred()
-        with ex._plock:
-            self.assertEqual(ex._preferred["account"], ACCT_A)  # default lane, not fable
+        ex.compute_preferred(T)
+        with T.plock:
+            self.assertEqual(T.preferred["account"], ACCT_A)  # default lane, not fable
 
     def test_no_drift_back_after_recovery(self):
         # The flapping regression: once Fable evicts to B, a later recovery of A's cap
         # must NOT pull the lane back. Incumbent B wins until IT is forced out.
         reset(acct(ACCT_A, 30), acct(ACCT_B, 45))
-        ex.compute_preferred()
-        with ex._lock:
-            ex._state[ACCT_A] = acct(ACCT_A, 30, caps={"Fable": 96})
+        ex.compute_preferred(T)
+        with T.lock:
+            T.state[ACCT_A] = acct(ACCT_A, 30, caps={"Fable": 96})
         age_lanes()
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(lane_account("fable"), ACCT_B)
         # A's Fable cap fully recovers (A fable-effective back to 30, B sits at 45).
-        with ex._lock:
-            ex._state[ACCT_A] = acct(ACCT_A, 30)
+        with T.lock:
+            T.state[ACCT_A] = acct(ACCT_A, 30)
         age_lanes()
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(lane_account("fable"), ACCT_B,
                          "no drift back to a now-cooler account — incumbent wins")
 
@@ -420,9 +456,9 @@ class TestSessionAwareRouting(unittest.TestCase):
         # effective, B reads 100% and we correctly STAY on A — a 90% weekly account still
         # serves requests; a 100% session account does not.
         reset(acct(ACCT_A, 90), acct(ACCT_B, 30, session=100))
-        ex.compute_preferred()          # bootstrap: A coolest (B session=100) -> incumbent A
+        ex.compute_preferred(T)          # bootstrap: A coolest (B session=100) -> incumbent A
         age_lanes()
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(lane_account("default"), ACCT_A,
                          "must not route onto a session-exhausted account")
 
@@ -431,13 +467,13 @@ class TestSessionAwareRouting(unittest.TestCase):
         # can't serve a request right now (lane-effective = 100, hard). Every lane must
         # evict to the healthy account even though A looks fine on the weekly gauges.
         reset(acct(ACCT_A, 20), acct(ACCT_B, 35, session=20))
-        ex.compute_preferred()          # A coolest -> incumbent on every lane
+        ex.compute_preferred(T)          # A coolest -> incumbent on every lane
         for ln in ex._lane_names:
             self.assertEqual(lane_account(ln), ACCT_A)
-        with ex._lock:
-            ex._state[ACCT_A] = acct(ACCT_A, 20, session=100)
+        with T.lock:
+            T.state[ACCT_A] = acct(ACCT_A, 20, session=100)
         age_lanes()
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         for ln in ex._lane_names:
             self.assertEqual(lane_account(ln), ACCT_B,
                              f"lane {ln} must evict off a session-dead incumbent")
@@ -489,7 +525,7 @@ class TestIncumbentPolicy(unittest.TestCase):
 
     def test_bootstrap_picks_coolest(self):
         reset(acct(ACCT_A, 60), acct(ACCT_B, 30))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         for ln in ex._lane_names:
             self.assertEqual(lane_account(ln), ACCT_B, "bootstrap seeds the coolest account")
 
@@ -497,14 +533,14 @@ class TestIncumbentPolicy(unittest.TestCase):
         # Once seeded on the coolest account, flip which one is cooler and poll several
         # times: a comfortable incumbent (< SW_HIGH) must never oscillate.
         reset(acct(ACCT_A, 30), acct(ACCT_B, 45))
-        ex.compute_preferred()                       # A coolest -> incumbent A
+        ex.compute_preferred(T)                       # A coolest -> incumbent A
         self.assertEqual(lane_account("default"), ACCT_A)
-        with ex._lock:
-            ex._state[ACCT_A] = acct(ACCT_A, 50)     # now B is the cooler one, A still cool
-            ex._state[ACCT_B] = acct(ACCT_B, 20)
+        with T.lock:
+            T.state[ACCT_A] = acct(ACCT_A, 50)     # now B is the cooler one, A still cool
+            T.state[ACCT_B] = acct(ACCT_B, 20)
         for _ in range(3):
             age_lanes()
-            ex.compute_preferred()
+            ex.compute_preferred(T)
         self.assertEqual(lane_account("default"), ACCT_A,
                          "cool incumbent must not drift toward a cooler account (no flap)")
 
@@ -521,7 +557,7 @@ class HTTPBase(unittest.TestCase):
         cls.srv.shutdown()
 
     def get(self, path, key=None):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}")
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{tp(path)}")
         if key:
             req.add_header("X-Switch-Key", key)
         try:
@@ -537,7 +573,7 @@ class TestPinEndpoint(HTTPBase):
         # A is the coolest -> bootstrap seeds every lane onto A (the incumbent), so a
         # single-lane pin visibly moves only that lane off A.
         reset(acct(ACCT_A, 30), acct(ACCT_B, 45))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
 
     def test_lane_pin_moves_only_that_lane(self):
         code, p = self.get(f"/pin?account={ACCT_B}&lane=fable", key="test-switch-key")
@@ -562,8 +598,8 @@ class TestPinEndpoint(HTTPBase):
         code, body = self.get(f"/pin?account={ACCT_B}&lane=fable5", key="test-switch-key")
         self.assertEqual(code, 404)
         self.assertIn("lanes", body)
-        with ex._plock:
-            self.assertNotIn("fable5", ex._preferred["lanes"])
+        with T.plock:
+            self.assertNotIn("fable5", T.preferred["lanes"])
 
     def test_unknown_account_404s(self):
         code, _ = self.get("/pin?account=nobody@nowhere&lane=fable", key="test-switch-key")
@@ -589,7 +625,7 @@ class TestPreferredContract(HTTPBase):
 
     def setUp(self):
         reset(acct(ACCT_A, 41, caps={"Fable": 85}), acct(ACCT_B, 30))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
 
     def test_legacy_shape_frozen(self):
         code, p = self.get("/preferred")
@@ -649,12 +685,12 @@ class TestStateMigration(unittest.TestCase):
     def test_rollback_a_v1_reader_sees_the_default_lane(self):
         # New brain saves v2; a rolled-back v1 brain copies only the keys it knows.
         reset(acct(ACCT_A, 41, caps={"Fable": 85}), acct(ACCT_B, 30))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         age_lanes()
-        ex.compute_preferred()
-        with ex._plock:
-            ex._save_state()
-        with open(ex.STATE_FILE) as f:
+        ex.compute_preferred(T)
+        with T.plock:
+            ex._save_state(T)
+        with open(T.state_file) as f:
             saved = json.load(f)
         v1_view = {k: saved[k] for k in
                    ("account", "since", "reason", "last_switch", "pinned") if k in saved}
@@ -668,9 +704,9 @@ class TestRenderMetrics(unittest.TestCase):
         # A is coolest on every lane except fable (A's Fable cap 85 > B's 60), so
         # bootstrap seeds fable onto B and default/opus/… onto A.
         reset(acct(ACCT_A, 41, caps={"Fable": 85}), acct(ACCT_B, 60))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         age_lanes()
-        ex.compute_preferred()  # fable -> ACCT_B, default stays on ACCT_A
+        ex.compute_preferred(T)  # fable -> ACCT_B, default stays on ACCT_A
 
     def line(self, text, metric, **labels):
         want = [f'{k}="{v}"' for k, v in labels.items()]
@@ -680,7 +716,7 @@ class TestRenderMetrics(unittest.TestCase):
         return None
 
     def test_lane_matrix_and_legacy_mirror(self):
-        t = ex.render()
+        t = ex.render([T])
         self.assertEqual(self.line(t, "claude_usage_lane_preferred", lane="fable", account=ACCT_B), 1)
         self.assertEqual(self.line(t, "claude_usage_lane_preferred", lane="fable", account=ACCT_A), 0)
         self.assertEqual(self.line(t, "claude_usage_lane_preferred", lane="default", account=ACCT_A), 1)
@@ -689,7 +725,7 @@ class TestRenderMetrics(unittest.TestCase):
         self.assertEqual(self.line(t, "claude_usage_preferred", account=ACCT_B), 0)
 
     def test_lane_effective_and_join_health(self):
-        t = ex.render()
+        t = ex.render([T])
         self.assertEqual(self.line(t, "claude_usage_lane_effective_percent", lane="fable", account=ACCT_A), 85)
         self.assertEqual(self.line(t, "claude_usage_lane_effective_percent", lane="default", account=ACCT_A), 41)
         self.assertEqual(self.line(t, "claude_usage_lane_scoped_cap_found", lane="fable", account=ACCT_A), 1)
@@ -698,12 +734,12 @@ class TestRenderMetrics(unittest.TestCase):
         self.assertIsNone(self.line(t, "claude_usage_lane_scoped_cap_found", lane="default", account=ACCT_A))
 
     def test_global_switch_ts_is_max_over_lanes(self):
-        t = ex.render()
-        with ex._plock:
-            want = max(s["last_switch"] for s in ex._preferred["lanes"].values())
+        t = ex.render([T])
+        with T.plock:
+            want = max(s["last_switch"] for s in T.preferred["lanes"].values())
         got = None
         for ln in t.splitlines():
-            if ln.startswith("claude_usage_switch_last_timestamp_seconds "):
+            if ln.startswith("claude_usage_switch_last_timestamp_seconds{"):
                 got = float(ln.rsplit(" ", 1)[1])
         self.assertEqual(got, round(want))
 
@@ -712,7 +748,7 @@ class TestStaleExclusion(unittest.TestCase):
     def test_stale_account_is_excluded(self):
         # ACCT_B looks cool but its data is an hour old — bootstrap must not pick it.
         reset(acct(ACCT_A, 60), acct(ACCT_B, 5, good_age=3600))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         for ln in ex._lane_names:
             self.assertEqual(lane_account(ln), ACCT_A)
 
@@ -725,7 +761,7 @@ class TestStaleExclusion(unittest.TestCase):
         for r in (a, b):
             r["raw"]["extra_usage"] = {"is_enabled": False}
         reset(a, b)
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(lane_account("default"), ACCT_B)
 
     def test_all_stale_with_credits_on_holds_the_lane(self):
@@ -736,9 +772,9 @@ class TestStaleExclusion(unittest.TestCase):
         for r in (a, b):
             r["raw"]["extra_usage"] = {"is_enabled": True}
         reset(a, b)
-        with ex._plock:
-            ex._preferred["lanes"]["default"]["account"] = ACCT_A
-        ex.compute_preferred()
+        with T.plock:
+            T.preferred["lanes"]["default"]["account"] = ACCT_A
+        ex.compute_preferred(T)
         self.assertEqual(lane_account("default"), ACCT_A)
         self.assertIsNone(lane_account("opus"), "never bootstrapped onto an unknown account")
 
@@ -766,11 +802,10 @@ class TestLaneConfig(unittest.TestCase):
 class TestKimiPollNormalization(unittest.TestCase):
     def setUp(self):
         # Ensure we never hit the live Kimi endpoint during these tests.
-        self._orig_key = pkimi.KIMI_API_KEY
-        pkimi.KIMI_API_KEY = "sk-kimi-testdeadbeef"
+        set_kimi_key("sk-kimi-testdeadbeef")
 
     def tearDown(self):
-        pkimi.KIMI_API_KEY = self._orig_key
+        set_kimi_key(None)
 
     def _patch_get(self, raw):
         self._orig_get = pkimi._get_kimi_usages
@@ -796,7 +831,7 @@ class TestKimiPollNormalization(unittest.TestCase):
         }
         self._patch_get(raw)
         try:
-            res = pkimi.poll_kimi()
+            res = pkimi.poll_kimi(T)
             self.assertEqual(res["ok"], 1)
             self.assertNotIn("usage", res, "the reading replaces the usage contract")
             w = ex._reading_windows(res["reading"])
@@ -845,7 +880,7 @@ class TestKimiPollNormalization(unittest.TestCase):
         # binding on the 5-hour window alone, not a failed poll.
         self._patch_get(kimi_raw(five_hour=8.0, weekly=None))
         try:
-            res = pkimi.poll_kimi()
+            res = pkimi.poll_kimi(T)
             self.assertEqual(res["ok"], 1, res["err"])
             self.assertEqual(list(ex._reading_windows(res["reading"])), ["five_hour"])
             self.assertEqual(ex._provider_effective(res), 8.0)
@@ -863,7 +898,7 @@ class TestKimiPollNormalization(unittest.TestCase):
         # reading, never a reading of nothing.
         self._patch_get({})
         try:
-            res = pkimi.poll_kimi()
+            res = pkimi.poll_kimi(T)
             self.assertEqual(res["ok"], 0)
             self.assertIsNone(res["reading"])
             self.assertIn("no window", res["err"])
@@ -891,7 +926,7 @@ class TestKimiPollNormalization(unittest.TestCase):
         }
         self._patch_get(raw)
         try:
-            res = pkimi.poll_kimi()
+            res = pkimi.poll_kimi(T)
             w = ex._reading_windows(res["reading"])["seven_day"]
             self.assertEqual(w["used"], 7.5)
             self.assertEqual(w["limit"], 100.0)
@@ -905,7 +940,7 @@ class TestKimiPollNormalization(unittest.TestCase):
         }
         self._patch_get(raw)
         try:
-            res = pkimi.poll_kimi()
+            res = pkimi.poll_kimi(T)
             rs = ex._reading_windows(res["reading"])["seven_day"]["resets_at"]
             self.assertIsInstance(rs, int)
             self.assertGreater(rs, 1_000_000_000)
@@ -916,7 +951,7 @@ class TestKimiPollNormalization(unittest.TestCase):
 class TestKimiMetricsRender(unittest.TestCase):
     def test_provider_metrics_present(self):
         reset(kimi_result(five_hour=8.0, weekly=2.0))
-        t = ex.render()
+        t = ex.render([T])
         self.assertIsNotNone(TestRenderMetrics().line(t, "provider_effective_percent", provider="kimi"))
         self.assertEqual(TestRenderMetrics().line(t, "provider_effective_percent", provider="kimi"), 8.0)
         self.assertEqual(TestRenderMetrics().line(t, "provider_quota_utilization_percent",
@@ -927,7 +962,7 @@ class TestKimiMetricsRender(unittest.TestCase):
 
     def test_provider_failure_shown(self):
         reset(kimi_result(ok=0, http=503, err="usage HTTP 503", good_age=120))
-        t = ex.render()
+        t = ex.render([T])
         self.assertEqual(TestRenderMetrics().line(t, "provider_poll_success", provider="kimi"), 0)
         self.assertEqual(TestRenderMetrics().line(t, "provider_poll_http_code", provider="kimi"), 503)
         age = TestRenderMetrics().line(t, "provider_data_age_seconds", provider="kimi")
@@ -938,8 +973,8 @@ class TestKimiMetricsRender(unittest.TestCase):
 class TestKimiPreferredContract(unittest.TestCase):
     def test_kimi_does_not_appear_in_preferred(self):
         reset(acct(ACCT_A, 41, caps={"Fable": 85}), acct(ACCT_B, 30), kimi_result())
-        ex.compute_preferred()
-        p = ex._preferred_payload()
+        ex.compute_preferred(T)
+        p = ex._preferred_payload(T)
         self.assertNotIn("kimi", p["weekly"])
         for ln, s in p["lanes"].items():
             self.assertNotIn("kimi", s.get("effective") or {})
@@ -948,31 +983,27 @@ class TestKimiPreferredContract(unittest.TestCase):
         # Kimi looking cool must NOT move lanes off Anthropic accounts — providers
         # are Phase 1 metrics only and have no usable account in the switchover.
         reset(acct(ACCT_A, 99), acct(ACCT_B, 98), kimi_result(weekly=5.0))
-        ex.compute_preferred()  # bootstrap -> coolest Anthropic account (B), never kimi
+        ex.compute_preferred(T)  # bootstrap -> coolest Anthropic account (B), never kimi
         age_lanes()
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         # Both Anthropic accounts are basically maxed; kimi looks cool but without the
         # provider filter this would route to "kimi" and break the proxy.
         self.assertEqual(lane_account("default"), ACCT_B)
         self.assertNotEqual(lane_account("default"), "kimi")
-        with ex._plock:
-            self.assertNotIn("kimi", ex._preferred["lanes"]["default"].get("account", ""))
+        with T.plock:
+            self.assertNotIn("kimi", T.preferred["lanes"]["default"].get("account", ""))
 
 
 class TestKimiDisabledWhenNoKey(unittest.TestCase):
     def test_no_provider_state_or_metrics_without_key(self):
-        with ex._lock:
-            ex._state.pop("kimi", None)
-        old_key = pkimi.KIMI_API_KEY
-        pkimi.KIMI_API_KEY = ""
-        try:
-            res = pkimi.poll_kimi()
-            self.assertEqual(res["ok"], 0)
-            self.assertIn("not configured", res["err"])
-            t = ex.render()
-            self.assertIsNone(TestRenderMetrics().line(t, "provider_poll_success", provider="kimi"))
-        finally:
-            pkimi.KIMI_API_KEY = old_key
+        with T.lock:
+            T.state.pop("kimi", None)
+        set_kimi_key(None)
+        res = pkimi.poll_kimi(T)
+        self.assertEqual(res["ok"], 0)
+        self.assertIn("not configured", res["err"])
+        t = ex.render([T])
+        self.assertIsNone(TestRenderMetrics().line(t, "provider_poll_success", provider="kimi"))
 
 
 class TestKimiUsedDerivation(unittest.TestCase):
@@ -1033,7 +1064,7 @@ def standing_windows(r, provider="anthropic"):
     accounts{} publishes them."""
     if "reading" not in r:
         read(r)
-    return ex._account_standing(r["name"], r, provider, time.time())["allowance"]["windows"]
+    return ex._account_standing(T, r["name"], r, provider, time.time())["allowance"]["windows"]
 
 
 class TestTargetContract(unittest.TestCase):
@@ -1127,7 +1158,7 @@ class TestScopeAliases(unittest.TestCase):
 
     def test_lane_rules_publish_each_lanes_scope(self):
         reset(acct(ACCT_A, 41, caps={"Fable": 85}))
-        p = ex._preferred_payload()
+        p = ex._preferred_payload(T)
         scopes = {r["lane"]: r["scope"] for r in p["lane_rules"]}
         self.assertEqual(scopes, {"fable": "Fable", "opus": "Opus", "sonnet": "Sonnet",
                                   "haiku": "Haiku", "default": None})
@@ -1144,14 +1175,14 @@ class TestPreferredHasNoTargets(HTTPBase):
 
     def test_no_targets_key(self):
         reset(acct(ACCT_A, 41), kimi_result())
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         _, p = self.get("/preferred")
         self.assertNotIn("targets", p)
         self.assertLessEqual({ACCT_A, "kimi"}, set(p["accounts"]))
 
     def test_providers_do_not_leak_into_legacy_keys(self):
         reset(acct(ACCT_A, 41), kimi_result(five_hour=8.0, weekly=2.0))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         _, p = self.get("/preferred")
         self.assertNotIn("kimi", p["weekly"])
         for s in p["lanes"].values():
@@ -1494,7 +1525,7 @@ class TestPreferredClassesPayload(HTTPBase):
         reset(acct(ACCT_A, 41, caps={"Opus": 55}),
               acct(ACCT_B, 30, caps={"Opus": 20}),
               kimi_result(five_hour=8.0, weekly=2.0))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
 
     def tearDown(self):
         ex._classes = []
@@ -1581,20 +1612,20 @@ def opus_acct(cap, resets=False):
 def class_verdicts(idx=0):
     """The live verdicts of one class: {member id: {route, checks, account,
     check, effective}}."""
-    with ex._lock:
-        snap = list(ex._state.values())
-    with ex._plock:
-        ctx = ex._policy_ctx(snap, time.time())
-        return ex._class_verdicts(ex._classes[idx], ctx)
+    with T.lock:
+        snap = list(T.state.values())
+    with T.plock:
+        ctx = ex._policy_ctx(T, snap, time.time())
+        return ex._class_verdicts(T, ex._classes[idx], ctx)
 
 
 def classes_reset(*results, cfg=None):
     """Install a class config + snapshots, clear class-session state, seed lanes."""
     ex._classes = load_classes(cfg if cfg is not None else frontier_cfg())
     reset(*results)
-    with ex._plock:
-        ex._preferred["classes"] = {}
-    ex.compute_preferred()
+    with T.plock:
+        T.preferred["classes"] = {}
+    ex.compute_preferred(T)
 
 
 def boot_brain(entry, classes_doc, windows=None):
@@ -1606,13 +1637,13 @@ def boot_brain(entry, classes_doc, windows=None):
     d = tempfile.mkdtemp(prefix="brain-boot-")
     try:
         files = {k: os.path.join(d, v) for k, v in (
-            ("SWITCH_CLASSES_FILE", "classes.json"), ("SWITCH_STATE_FILE", "switch_state.json"),
-            ("SWITCH_LANES_FILE", "lanes.json"), ("CLAUDE_ACCOUNTS_FILE", "accounts.json"),
-            ("OPENAI_CODEX_CREDS_FILE", "openai-codex.json"), ("KIMI_CREDS_FILE", "kimi.json"),
-            ("ANTHROPIC_API_CREDS_FILE", "anthropic-api.json"), ("RUNWAY_CREDS_FILE", "runway.json"),
-            ("ELEVENLABS_CREDS_FILE", "elevenlabs.json"), ("TYPESAFE_CREDS_FILE", "typesafe.json"),
-            ("SWITCH_KEY_FILE", "switch_key"), ("SWITCH_HARNESS_FILE", "harness.json"),
+            ("SWITCH_CREDS_DIR", ""), ("SWITCH_CLASSES_FILE", "classes.json"),
+            ("SWITCH_LANES_FILE", "lanes.json"), ("SWITCH_KEY_FILE", "switch_key"),
             ("SWITCH_HARNESS_KEY_FILE", "harness_key"))}
+        files["SWITCH_CREDS_DIR"] = d
+        with open(os.path.join(d, "tenants.json"), "w") as f:
+            json.dump([{"tenant": TEST_TENANT, "name": "household", "lan": True,
+                        "tap": "content"}], f)
         with open(files["SWITCH_CLASSES_FILE"], "w") as f:
             json.dump(classes_doc, f)
         if windows is not None:
@@ -1633,7 +1664,7 @@ def boot_brain(entry, classes_doc, windows=None):
             pref = None
             for _ in range(100):
                 try:
-                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/preferred", timeout=2) as r:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/t/{TEST_TENANT}/preferred", timeout=2) as r:
                         pref = json.load(r)
                     break
                 except (OSError, ValueError):
@@ -1823,16 +1854,16 @@ class TestConsumersValidation(unittest.TestCase):
         self.assertEqual(view[1]["members"][0]["status"], "ok", "a warn is not dangling")
 
     def test_unreadable_file_loads_none_with_warning(self):
-        with open(ex.CONSUMERS_FILE, "w") as f:
+        with open(T.consumers_file, "w") as f:
             f.write("{nope")
         try:
-            out = ex._load_consumers()
+            out = ex._load_consumers(T)
             self.assertEqual(out, [])
-            self.assertTrue(ex._consumers_warnings)
+            self.assertTrue(T.consumers_warnings)
         finally:
-            os.remove(ex.CONSUMERS_FILE)
-            ex._consumers = []
-            ex._load_consumers()
+            os.remove(T.consumers_file)
+            T.consumers = []
+            ex._load_consumers(T)
 
 
 GOLDEN = proxy_testdata("dialcheck_golden.json")
@@ -1874,15 +1905,15 @@ def pay_cfg(opus=None, gpt=None, kimi=None, opus_stop=None, lanes=None):
 
 def install_money(doc):
     _, _, m = ex._normalize_money(doc, strict=False)
-    with ex._plock:
-        ex._money = m
+    with T.plock:
+        T.money = m
 
 
 def route_check(rid, account):
-    with ex._lock:
-        snap = list(ex._state.values())
-    with ex._plock:
-        return ex._policy_ctx(snap, time.time())["checks"][rid][account]
+    with T.lock:
+        snap = list(T.state.values())
+    with T.plock:
+        return ex._policy_ctx(T, snap, time.time())["checks"][rid][account]
 
 
 class PayBase(unittest.TestCase):
@@ -1892,11 +1923,11 @@ class PayBase(unittest.TestCase):
         ex._classes = []
         ex._lane_settings = {}
         install_money({})
-        with ex._poll_health_lock:
-            ex._poll_schedule.clear()
+        with T.poll_health_lock:
+            T.poll_schedule.clear()
 
     def bind(self, sid="s1", cname="frontier"):
-        return ex._bind_class_session(cname, sid, time.time())
+        return ex._bind_class_session(T, cname, sid, time.time())
 
 
 class TestStopAt(PayBase):
@@ -2020,7 +2051,7 @@ class DialCheckGoldenTest(unittest.TestCase):
 # ---- C2 review fixes (brain) ---------------------------------------------------
 
 def payload_member(cname, mid):
-    p = ex._preferred_payload()
+    p = ex._preferred_payload(T)
     return next(m for m in p["classes"][cname]["members"] if m["id"] == mid)
 
 
@@ -2042,9 +2073,9 @@ class TestLaneSettingsStayOnTheLane(PayBase):
         a["raw"]["seven_day"]["resets_at"] = "2099-08-01T00:00:00Z"
         cfg = pay_cfg(lanes={"opus": {"stop_at": {"window": "7d", "level": 30}}})
         classes_reset(a, acct(ACCT_B, 50), cfg=cfg)
-        with ex._plock:
-            ex._preferred["lanes"]["opus"]["account"] = ACCT_A
-        ex.compute_preferred()
+        with T.plock:
+            T.preferred["lanes"]["opus"]["account"] = ACCT_A
+        ex.compute_preferred(T)
         self.assertEqual(lane_account("opus"), ACCT_A, "no lane account may move: frozen")
         m = payload_member("frontier", "lane:opus")
         self.assertEqual(m["incumbent"], ACCT_B)
@@ -2066,8 +2097,8 @@ class TestLaneSettingsStayOnTheLane(PayBase):
 
     def test_same_settings_keep_the_lane_incumbent(self):
         classes_reset(acct(ACCT_A, 70), acct(ACCT_B, 40), cfg=pay_cfg())
-        with ex._plock:
-            ex._preferred["lanes"]["opus"]["account"] = ACCT_A
+        with T.plock:
+            T.preferred["lanes"]["opus"]["account"] = ACCT_A
         self.assertEqual(payload_member("frontier", "lane:opus")["incumbent"], ACCT_A,
                          "incumbent-wins, as the lane decides it")
 
@@ -2079,8 +2110,8 @@ class TestPerLimitStanding(PayBase, HTTPBase):
     def test_windows_carry_their_reading_time(self):
         a = acct(ACCT_A, 30, good_age=120)
         reset(a)
-        with ex._plock:
-            st = ex._policy_ctx(list(ex._state.values()), time.time())["standings"][ACCT_A]
+        with T.plock:
+            st = ex._policy_ctx(T, list(T.state.values()), time.time())["standings"][ACCT_A]
         self.assertTrue(st["allowance"]["windows"])
         for w in st["allowance"]["windows"].values():
             self.assertEqual(w["as_of"], st["as_of"])
@@ -2101,8 +2132,8 @@ class TestCreditsByIsEnabledAlone(PayBase):
         a["raw"]["extra_usage"] = {"is_enabled": True, "monthly_limit": 100,
                                      "used_credits": 100, "utilization": 100.0}
         reset(a)
-        with ex._plock:
-            st = ex._policy_ctx(list(ex._state.values()), time.time())["standings"][ACCT_A]
+        with T.plock:
+            st = ex._policy_ctx(T, list(T.state.values()), time.time())["standings"][ACCT_A]
         self.assertIs(st["money"]["credits"]["open"], True)
 
 
@@ -2131,18 +2162,18 @@ class TestReadingsAcrossTheC6Restart(_LogCapture, PayBase):
         old = {"name": ACCT_A, "kind": "anthropic_account", "good_ts": time.time() - 60,
                "usage": {"five_hour": {"utilization": 10}, "seven_day": {"utilization": 20}}}
         new = dict(acct(ACCT_B, 30, good_age=60))
-        with ex._lock:
-            ex._state.clear()
+        with T.lock:
+            T.state.clear()
         saved = [old, {k: new[k] for k in ex._READING_KEYS if k in new}]
         self.capture_log()
-        n = ex._restore_readings(saved)
+        n = ex._restore_readings(T, saved)
         logged = self.logged
         self.assertEqual(n, 1)
-        with ex._lock:
-            self.assertNotIn(ACCT_A, ex._state)
-            self.assertEqual(ex._state[ACCT_B]["stale"], 1)
+        with T.lock:
+            self.assertNotIn(ACCT_A, T.state)
+            self.assertEqual(T.state[ACCT_B]["stale"], 1)
         self.assertTrue(any("predate the normalized reading" in ln and ACCT_A in ln for ln in logged))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(route_check("lane:opus", ACCT_A)["reason"], "unknown",
                          "never measured until its first poll")
 
@@ -2156,10 +2187,10 @@ def results(res):
 class SSE:
     """A /events subscriber: reads the stream block by block."""
 
-    def __init__(self, port, timeout=5):
+    def __init__(self, port, timeout=5, path=None):
         import http.client
         self.conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-        self.conn.request("GET", "/events", headers={"Last-Event-ID": "0-999"})
+        self.conn.request("GET", path or f"{TP}/events", headers={"Last-Event-ID": "0-999"})
         self.resp = self.conn.getresponse()
 
     def block(self):
@@ -2211,8 +2242,8 @@ class TestEventStream(HTTPBase):
 
     def setUp(self):
         reset(acct(ACCT_A, 30), acct(ACCT_B, 45))
-        ex.compute_preferred()
-        ex._events_publish()  # the document for this state is the published one
+        ex.compute_preferred(T)
+        ex._events_publish(T)  # the document for this state is the published one
         self.streams = []
 
     def tearDown(self):
@@ -2225,8 +2256,8 @@ class TestEventStream(HTTPBase):
         return s
 
     def published(self):
-        with ex._events_cond:
-            return ex._events_pub["seq"], ex._events_pub["data"]
+        with T.events_cond:
+            return T.events_pub["seq"], T.events_pub["data"]
 
     def wait_for(self, cond, what, timeout=5):
         deadline = time.monotonic() + timeout
@@ -2248,7 +2279,7 @@ class TestEventStream(HTTPBase):
                          "the current document at once; Last-Event-ID is ignored")
         doc = json.loads(ev["data"])
         self.assertEqual(doc["account"], ACCT_A)
-        self.assertEqual(set(doc), set(ex._preferred_payload()), "the /preferred document")
+        self.assertEqual(set(doc), set(ex._preferred_payload(T)), "the /preferred document")
 
     def test_a_mutation_publishes(self):
         s = self.connect()
@@ -2263,16 +2294,16 @@ class TestEventStream(HTTPBase):
 
     def test_no_change_publishes_nothing(self):
         seq, _ = self.published()
-        self.assertFalse(ex._events_publish(), "same state, same document")
+        self.assertFalse(ex._events_publish(T), "same state, same document")
         with mock.patch("time.time", return_value=time.time() + 60):
-            self.assertFalse(ex._events_publish(), "only the clock moved")
+            self.assertFalse(ex._events_publish(T), "only the clock moved")
         self.assertEqual(self.published()[0], seq)
         # End to end: a recompute that moves nothing reaches the stream as a keepalive.
         with mock.patch.object(ex, "EVENTS_KEEPALIVE_S", 0.5):
             s = self.connect()
             s.block()
             s.event()
-            ex.compute_preferred()
+            ex.compute_preferred(T)
             self.assertEqual(s.event(), {"comment": "keepalive"})
         self.assertEqual(self.published()[0], seq)
 
@@ -2280,9 +2311,10 @@ class TestEventStream(HTTPBase):
         # A request marks once it is answered, so each check waits for the
         # handler to finish rather than counting at the reply.
         with mock.patch.object(ex, "_events_mark") as mark:
-            for path in ("/preferred", "/metrics", "/"):
+            for path in (f"{TP}/preferred", f"{TP}/metrics", f"{TP}", "/metrics"):
                 with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}", timeout=5) as r:
                     r.read()
+            self.assertEqual(self.get("/tenants", key="test-switch-key")[0], 200)
             time.sleep(0.2)
             self.assertEqual(mark.call_count, 0, "the pure reads mark nothing")
             for what, send in (
@@ -2291,9 +2323,9 @@ class TestEventStream(HTTPBase):
                     ("an unknown GET", lambda: self.get("/no-such-path")),
                     ("a POST", lambda: self.assertRaises(urllib.error.HTTPError, urllib.request.urlopen,
                                                          urllib.request.Request(
-                                                             f"http://127.0.0.1:{self.port}/no-such-path",
+                                                             f"http://127.0.0.1:{self.port}{TP}/no-such-path",
                                                              data=b"{}", method="POST"), timeout=5)),
-                    ("compute_preferred", ex.compute_preferred)):
+                    ("compute_preferred", lambda: ex.compute_preferred(T))):
                 with self.subTest(what):
                     n = mark.call_count
                     send()
@@ -2315,35 +2347,35 @@ class TestEventStream(HTTPBase):
             s.block()
             s.event()
             # Hold the stream off its next read while three documents publish.
-            with ex._events_publish_lock, ex._events_cond:
+            with T.events_publish_lock, T.events_cond:
                 for acct_, lane in ((ACCT_B, "fable"), (ACCT_B, "opus"), (ACCT_B, "haiku")):
-                    with ex._plock:
-                        for ls in ex._preferred["lanes"].values():
+                    with T.plock:
+                        for ls in T.preferred["lanes"].values():
                             ls["pinned"] = None
-                        ex._preferred["lanes"][lane]["pinned"] = acct_
-                    self.assertTrue(ex._events_publish())
-                newest = ex._events_pub["seq"]
+                        T.preferred["lanes"][lane]["pinned"] = acct_
+                    self.assertTrue(ex._events_publish(T))
+                newest = T.events_pub["seq"]
             ev = s.event()
             self.assertEqual(ev["id"], f"{ex._EVENTS_BOOT}-{newest}", "skips to the newest")
             self.assertEqual(json.loads(ev["data"])["lanes"]["haiku"]["pinned"], ACCT_B)
             self.assertEqual(s.event(), {"comment": "keepalive"}, "nothing older follows")
 
     def test_a_disconnect_is_cleaned_up(self):
-        with ex._events_cond:
-            before = len(ex._events_subs)
+        with T.events_cond:
+            before = len(T.events_subs)
         with mock.patch.object(ex, "EVENTS_KEEPALIVE_S", 0.05):
             s = self.connect()
             s.block()
             s.event()
-            with ex._events_cond:
-                self.assertEqual(len(ex._events_subs), before + 1)
+            with T.events_cond:
+                self.assertEqual(len(T.events_subs), before + 1)
             s.resp.close()
             s.conn.sock and s.conn.sock.close()
             s.close()
 
             def gone():
-                with ex._events_cond:
-                    return len(ex._events_subs) == before
+                with T.events_cond:
+                    return len(T.events_subs) == before
             self.wait_for(gone, "the stream's subscriber to be dropped")
 
 
@@ -2367,9 +2399,9 @@ def anth_polled(t, weekly=30.0, session=10.0, five_hour=True, week_reset=None, n
 
 def poll_lands(res):
     """A poll result replaces the account's, as the poller does, and the loop recomputes."""
-    with ex._lock:
-        ex._state[res["name"]] = res
-    ex.compute_preferred()
+    with T.lock:
+        T.state[res["name"]] = res
+    ex.compute_preferred(T)
 
 
 def rep_reading(i, at, window="seven_day", used=None, resets=None, account=ACCT_A):
@@ -2394,15 +2426,15 @@ def rep_refusal(i, at, until=None, by_reading=True, used=100.0, resets=None, win
 
 def post_reports(*events, now=None, reporter="test-host"):
     """-> [(result, why)] in order, and the body."""
-    body, _ = ex.reports_post(list(events), reporter, time.time() if now is None else now)
+    body, _ = ex.reports_post(T, list(events), reporter, time.time() if now is None else now)
     return [(r["result"], r["why"]) for r in body["results"]], body
 
 
 def live_ctx(now=None):
-    with ex._lock:
-        snap = list(ex._state.values())
-    with ex._plock:
-        return ex._policy_ctx(snap, time.time() if now is None else now)
+    with T.lock:
+        snap = list(T.state.values())
+    with T.plock:
+        return ex._policy_ctx(T, snap, time.time() if now is None else now)
 
 
 def live_window(wid, account=ACCT_A, now=None):
@@ -2459,21 +2491,21 @@ class TestReportFreshness(PayBase):
         self.assertIsNone(class_verdicts()["lane:opus"]["effective"], "the poll alone is stale")
         now = time.time()
         post_reports(rep_reading(1, now, used=40.0), rep_reading(2, now, window="five_hour", used=12.0))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         v = class_verdicts()["lane:opus"]
         self.assertEqual((v["check"]["check"], v["check"]["basis"]), ("included", "fresh"))
         self.assertEqual(v["effective"], 40.0, "ranks as fresh")
-        m = next(m for m in ex._preferred_payload()["classes"]["frontier"]["members"]
+        m = next(m for m in ex._preferred_payload(T)["classes"]["frontier"]["members"]
                  if m["id"] == "lane:opus")
         self.assertEqual((m["status"], m["usable"], m["effective"]), ("ok", True, 40.0))
-        st = ex._preferred_payload()["accounts"][ACCT_A]
+        st = ex._preferred_payload(T)["accounts"][ACCT_A]
         self.assertEqual(st["as_of"], old, "the account's own age stays the poll's")
 
     def test_settings_problems_read_the_reports(self):
         t0 = time.time() - 100
         reset(anth_polled(t0, five_hour=False))
         classes = load_classes(pay_cfg(opus_stop={"window": "5h", "level": 80}))
-        dangling = lambda: [w for w in ex._settings_problems(classes, {})[1]
+        dangling = lambda: [w for w in ex._settings_problems(T, classes, {})[1]
                             if "stop_at window '5h'" in w]
         self.assertTrue(dangling(), "no reading carries 5h yet")
         post_reports(rep_reading(1, t0 + 10, window="five_hour", used=12.0))
@@ -2487,13 +2519,13 @@ class TestHolds(PayBase):
         self.t0 = time.time() - 100
         self.r7 = round(self.t0 + 3 * 86400)
         reset(anth_polled(self.t0, weekly=97.0, week_reset=self.r7))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.at = self.t0 + 10  # the refusal
 
     def tearDown(self):
         super().tearDown()
-        with ex._poll_health_lock:
-            ex._recheck_epochs.clear()
+        with T.poll_health_lock:
+            T.recheck_epochs.clear()
         ex._poll_wakeup.clear()
 
     def check(self, now=None):
@@ -2507,20 +2539,20 @@ class TestHolds(PayBase):
         self.assertEqual((w["used_pct"], w["resets_at"], w["reset_basis"], w["as_of"]),
                          (100.0, until, "record", self.at), "no named reset: record")
         self.assertEqual(self.check()["check"], "no")
-        self.assertEqual(ex._preferred_payload()["accounts"][ACCT_A]["allowance"]["windows"]
+        self.assertEqual(ex._preferred_payload(T)["accounts"][ACCT_A]["allowance"]["windows"]
                          ["seven_day"]["used_pct"], 100.0, "the document shows the hold")
-        self.assertEqual(ex._state[ACCT_A]["reading"]["pots"][0]["limits"][1]["used_pct"], 97.0,
+        self.assertEqual(T.state[ACCT_A]["reading"]["pots"][0]["limits"][1]["used_pct"], 97.0,
                          "the poll is untouched")
         self.assertEqual(live_window("seven_day", now=until + 1)["used_pct"], 97.0,
                          "past its until the hold no longer applies")
         with mock.patch("time.time", return_value=until + 1):
-            ex.compute_preferred()
-        self.assertEqual(ex._holds, {}, "and is pruned")
+            ex.compute_preferred(T)
+        self.assertEqual(T.holds, {}, "and is pruned")
 
     def test_an_until_already_past_is_ignored(self):
         res, _ = post_reports(rep_refusal(1, self.at, until=time.time() - 1))
         self.assertEqual(res[0], ("ignored", "its until has passed"))
-        self.assertEqual(ex._holds, {})
+        self.assertEqual(T.holds, {})
 
     def test_no_until_ends_on_open_and_changed(self):
         post_reports(rep_refusal(1, self.at, used=97.0, resets=self.r7))
@@ -2528,29 +2560,29 @@ class TestHolds(PayBase):
         self.assertEqual((w["used_pct"], w["resets_at"]), (100.0, self.r7),
                          "held by reading: the reading's own reset while ahead")
         post_reports(rep_reading(2, self.at + 5, used=97.0))
-        ex.compute_preferred()
-        self.assertIn((ACCT_A, "seven_day"), ex._holds,
+        ex.compute_preferred(T)
+        self.assertIn((ACCT_A, "seven_day"), T.holds,
                       "the same period at the same use keeps holding")
-        self.assertEqual(ex._holds[(ACCT_A, "seven_day")]["until"], self.r7,
+        self.assertEqual(T.holds[(ACCT_A, "seven_day")]["until"], self.r7,
                          "and learns the reading's reset")
         self.assertEqual(live_window("seven_day")["used_pct"], 100.0)
         nxt = self.r7 + 7 * 86400
         post_reports(rep_reading(3, self.at + 6, used=0.0, resets=nxt))
         self.assertEqual(live_window("seven_day")["used_pct"], 0.0, "a new period, open")
-        ex.compute_preferred()
-        self.assertEqual(ex._holds, {})
+        ex.compute_preferred(T)
+        self.assertEqual(T.holds, {})
 
     def test_a_poll_that_is_open_and_changed_ends_it(self):
         post_reports(rep_refusal(1, self.at, used=97.0, resets=self.r7))
         poll_lands(anth_polled(self.at + 1, weekly=40.0, week_reset=self.r7))
-        self.assertEqual(ex._holds, {})
+        self.assertEqual(T.holds, {})
         self.assertEqual(live_window("seven_day")["used_pct"], 40.0)
 
     def test_the_owners_recheck_ends_it(self):
         post_reports(rep_refusal(1, self.at, until=time.time() + 3600))
-        self.assertIsNotNone(ex.recheck(ACCT_A, time.time()))
-        ex.compute_preferred()
-        self.assertEqual(ex._holds, {})
+        self.assertIsNotNone(ex.recheck(T, ACCT_A, time.time()))
+        ex.compute_preferred(T)
+        self.assertEqual(T.holds, {})
         self.assertEqual(live_window("seven_day")["used_pct"], 97.0)
         res, _ = post_reports(rep_refusal(2, self.at, until=time.time() + 3600))
         self.assertEqual(res[0], ("ignored", "older than the owner's re-check"))
@@ -2559,12 +2591,12 @@ class TestHolds(PayBase):
         post_reports(rep_refusal(1, self.at, until=time.time() + 3600))
         res, _ = post_reports(rep_refusal(2, self.at - 1, ended=True))
         self.assertEqual(res[0][0], "ignored")
-        self.assertIn((ACCT_A, "seven_day"), ex._holds)
+        self.assertIn((ACCT_A, "seven_day"), T.holds)
         res, _ = post_reports(rep_refusal(3, self.at, ended=True))
         self.assertEqual(res[0][0], "ignored", "an end at the refusal's own instant is not newer")
         res, _ = post_reports(rep_refusal(4, self.at + 1, ended=True))
         self.assertEqual(res[0], ("applied", None))
-        self.assertEqual(ex._holds, {})
+        self.assertEqual(T.holds, {})
         self.assertEqual(self.check()["check"], "included")
 
     def test_an_older_refusal_is_ignored(self):
@@ -2599,10 +2631,10 @@ class TestHolds(PayBase):
 
     def test_a_hold_reads_100_everywhere(self):
         post_reports(rep_reading(1, self.at - 1, used=10.0))
-        ex.compute_preferred()
-        self.assertEqual(ex._preferred_payload()["weekly"][ACCT_A], 10.0)
+        ex.compute_preferred(T)
+        self.assertEqual(ex._preferred_payload(T)["weekly"][ACCT_A], 10.0)
         post_reports(rep_refusal(2, self.at, until=time.time() + 3600))
-        doc = ex._preferred_payload()
+        doc = ex._preferred_payload(T)
         self.assertEqual(doc["accounts"][ACCT_A]["allowance"]["windows"]["seven_day"]["used_pct"], 100.0)
         self.assertEqual(doc["routes"]["lane:opus"]["checks"][ACCT_A]["check"], "no")
         self.assertEqual(doc["weekly"][ACCT_A], 100.0)
@@ -2633,17 +2665,17 @@ class TestHoldAgainstAPointBelow(PayBase):
         self.t0 = time.time() - 1200  # the poll, inside STALE_MAX
         self.r7 = round(self.t0 + 3 * 86400)
         reset(anth_polled(self.t0, weekly=98.0, week_reset=self.r7))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.at = self.t0 + 10  # the refusal
         self.refresh = self.at + ex.STALE_MAX / 2  # the proxy's stale_max/2 re-send
 
     def reported_use(self):
-        return ex._reported[ACCT_A]["windows"]["seven_day"]["used_pct"]
+        return T.reported[ACCT_A]["windows"]["seven_day"]["used_pct"]
 
     def held(self):
-        ex.compute_preferred()
-        doc = ex._preferred_payload()
-        return ((ACCT_A, "seven_day") in ex._holds,
+        ex.compute_preferred(T)
+        doc = ex._preferred_payload(T)
+        return ((ACCT_A, "seven_day") in T.holds,
                 doc["accounts"][ACCT_A]["allowance"]["windows"]["seven_day"]["used_pct"])
 
     def test_the_refusals_header_at_100_then_a_99_holds(self):
@@ -2672,7 +2704,7 @@ class TestHoldAgainstAPointBelow(PayBase):
         """What a brain restart does to the reports: forget them and every
         hold; the poll's 98 is all it holds until the proxy's resync."""
         reset(anth_polled(self.t0, weekly=98.0, week_reset=self.r7))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
 
     def test_a_restarted_brain_keeps_a_hold_seen_at_100_against_a_99(self):
         # The restart edge (64 §8). The live brain holds the refusal's 100 ...
@@ -2722,9 +2754,9 @@ class TestPreferredPrices(PayBase):
 
     def doc(self):
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         # As a subscriber reads it: the document through JSON, NaN refused.
-        return json.loads(json.dumps(ex._preferred_payload(), allow_nan=False))
+        return json.loads(json.dumps(ex._preferred_payload(T), allow_nan=False))
 
     def test_the_key_is_on_the_document(self):
         d = self.doc()
@@ -2811,7 +2843,7 @@ class TestPublisherRate(unittest.TestCase):
         state = {"n": 0}
         published = []
 
-        def publish():
+        def publish(t):
             published.append((time.monotonic(), state["n"]))
             return True
 
@@ -2885,11 +2917,11 @@ def fleet_case_figure(case):
     models = {f"{c['class']}/{ex._member_id(m)}": m["model"] for c in classes for m in c["members"]}
     # The limits the brain has no window for (67 §9), as POST /reports holds
     # them, judged live by the brain's own rule (_limit_snap).
-    with mock.patch.dict(ex._limit_holds, {
+    with mock.patch.dict(T.limit_holds, {
             (a, lm["limit"]): {"refused_at": now - lm.get("refused_ago", 60),
                                "until": now + lm["until_in"], "class": lm.get("class", "spent")}
             for a, lms in case.get("limits", {}).items() for lm in lms}, clear=True):
-        limits = ex._limit_snap(standings, now)
+        limits = ex._limit_snap(T, standings, now)
     health = {a: {"kind": h["kind"], "sign_in": h.get("sign_in")}
               for a, h in case.get("health", {}).items()}
     return ex._fleet_figure(standings, routes, models, case["sizing"], limits, now, ex.STALE_MAX,
@@ -3573,15 +3605,15 @@ class TestLocalPoller(unittest.TestCase):
 
     def test_unset_disabled(self):
         plocal.LOCAL_UPSTREAM = ""
-        self.assertFalse(ex.PROVIDERS["local"]["enabled"]())
-        r = plocal.poll_local()
+        self.assertFalse(ex.PROVIDERS["local"]["enabled"](T))
+        r = plocal.poll_local(T)
         self.assertEqual((r["ok"], r["reading"]), (0, None))
         self.assertEqual(r["err"], "LOCAL_UPSTREAM is not set")
 
     def test_ok(self):
         server = self.serve(dict(LOCAL_HELD))
-        self.assertTrue(ex.PROVIDERS["local"]["enabled"]())
-        r = plocal.poll_local()
+        self.assertTrue(ex.PROVIDERS["local"]["enabled"](T))
+        r = plocal.poll_local(T)
         self.assertEqual((r["ok"], r["err"], r["name"], r["provider"]), (1, "", "local", "local"))
         self.assertEqual(server.requests, [("GET", "/models")])
         rd = r["reading"]
@@ -3597,7 +3629,7 @@ class TestLocalPoller(unittest.TestCase):
         port = s.getsockname()[1]
         s.close()  # nothing listens: connection refused
         plocal.LOCAL_UPSTREAM = f"http://127.0.0.1:{port}"
-        r = plocal.poll_local()
+        r = plocal.poll_local(T)
         self.assertEqual((r["ok"], r["reading"]), (0, None))
         self.assertEqual(r["err"], f"http://127.0.0.1:{port}: connection refused — "
                                    "check that llama-server is running there")
@@ -3606,7 +3638,7 @@ class TestLocalPoller(unittest.TestCase):
         held = dict(LOCAL_HELD)
         held["local-qwen3-coder-30b"] = 32768
         self.serve(held)
-        r = plocal.poll_local()
+        r = plocal.poll_local(T)
         self.assertEqual((r["ok"], r["reading"]), (0, None))
         self.assertEqual(r["err"], "local-qwen3-coder-30b: llama-server configures context 32768, "
                                    "the class declares context_window 131072")
@@ -3615,7 +3647,7 @@ class TestLocalPoller(unittest.TestCase):
         held = dict(LOCAL_HELD)
         held["local-gemma4-12b"] = None
         self.serve(held)
-        r = plocal.poll_local()
+        r = plocal.poll_local(T)
         self.assertEqual(r["err"], "local-gemma4-12b: llama-server configures context unset, "
                                    "the class declares context_window 65536")
 
@@ -3623,14 +3655,14 @@ class TestLocalPoller(unittest.TestCase):
         held = dict(LOCAL_HELD)
         del held["local-gpt-oss-20b"]
         self.serve(held)
-        r = plocal.poll_local()
+        r = plocal.poll_local(T)
         self.assertEqual((r["ok"], r["reading"]), (0, None))
         self.assertEqual(r["err"], "local-gpt-oss-20b is declared but llama-server does not hold it")
 
     def test_no_class_declared_polls_models_only(self):
         ex._classes = []
         self.serve({})
-        self.assertEqual(plocal.poll_local()["ok"], 1)
+        self.assertEqual(plocal.poll_local(T)["ok"], 1)
 
 
 class TestLocalRouterContext(unittest.TestCase):
@@ -3669,7 +3701,7 @@ class TestKeyedPages(HTTPBase):
     loads the page with it. The read-only surfaces stay open."""
 
     def fetch(self, path, key=None):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}")
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{tp(path)}")
         if key:
             req.add_header("X-Switch-Key", key)
         try:
@@ -3744,9 +3776,9 @@ class TestTokenEndpoint(HTTPBase):
         # A is coolest on every lane EXCEPT fable (its Fable cap is maxed), so bootstrap
         # seeds fable onto B and every other lane (incl. default) onto A.
         reset(acct(ACCT_A, 30, caps={"Fable": 96}), acct(ACCT_B, 45))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         age_lanes()
-        ex.compute_preferred()  # fable -> ACCT_B, default stays on ACCT_A
+        ex.compute_preferred(T)  # fable -> ACCT_B, default stays on ACCT_A
 
     def test_account_preferred_resolves_to_default_lane(self):
         code, d = self.get("/token?account=preferred", key="test-switch-key")
@@ -3815,15 +3847,15 @@ class TestRefreshLog(HTTPBase):
         self.assertEqual(psub._token_fp(""), "(none)")
 
     def test_the_quota_poll_says_poll(self):
-        psub._creds[ACCT_A]["expires_at"] = time.time() + 30
-        self.assertEqual(psub.poll_account(ACCT_A)["ok"], 1)
+        psub._st(T).creds[ACCT_A]["expires_at"] = time.time() + 30
+        self.assertEqual(psub.poll_account(T, ACCT_A)["ok"], 1)
         [line] = self.refreshed()
         self.assertTrue(line.startswith(f"{ACCT_A}: token refreshed (poll) — old had 0m left, "),
                         line)
-        self.assertEqual(psub._last_refresh[ACCT_A]["why"], "poll")
+        self.assertEqual(psub._st(T).last_refresh[ACCT_A]["why"], "poll")
 
     def test_the_proxys_fetch_says_token(self):
-        psub._creds[ACCT_A]["expires_at"] = time.time() + 30
+        psub._st(T).creds[ACCT_A]["expires_at"] = time.time() + 30
         code, d = self.get(f"/token?account={ACCT_A}", key="test-switch-key")
         self.assertEqual((code, d["access_token"]), (200, "fresh-1"))
         [line] = self.refreshed()
@@ -3831,16 +3863,16 @@ class TestRefreshLog(HTTPBase):
         self.assertTrue(line.endswith(", fp " + hashlib.sha256(b"fresh-1").hexdigest()[:8]), line)
 
     def test_no_old_token_has_no_time_left(self):
-        psub._creds[ACCT_A].update(access_token=None, expires_at=0)
-        psub._ensure_token(ACCT_A, why="token")
+        psub._st(T).creds[ACCT_A].update(access_token=None, expires_at=0)
+        psub._ensure_token(T, ACCT_A, why="token")
         [line] = self.refreshed()
         self.assertIn("old had 0m left", line)
-        self.assertIsNone(psub._last_refresh[ACCT_A]["old_left_s"])
+        self.assertIsNone(psub._st(T).last_refresh[ACCT_A]["old_left_s"])
 
     def test_a_token_with_time_left_is_not_refreshed_or_logged(self):
-        self.assertEqual(psub._ensure_token(ACCT_A, why="token"), "tok-" + ACCT_A)
+        self.assertEqual(psub._ensure_token(T, ACCT_A, why="token"), "tok-" + ACCT_A)
         self.assertEqual((self.calls, self.refreshed()), ([], []))
-        self.assertNotIn(ACCT_A, psub._last_refresh)
+        self.assertNotIn(ACCT_A, psub._st(T).last_refresh)
 
 
 def _fp(token):
@@ -3864,9 +3896,9 @@ class TestTokenRefusedFp(HTTPBase):
         orig = ex.urlopen
         self.addCleanup(setattr, ex, "urlopen", orig)
         ex.urlopen = self.stub
-        with ex._poll_health_lock:
-            ex._poll_schedule[ACCT_A] = time.time() + 900
-        self.addCleanup(ex._poll_schedule.clear)
+        with T.poll_health_lock:
+            T.poll_schedule[ACCT_A] = time.time() + 900
+        self.addCleanup(T.poll_schedule.clear)
 
     def stub(self, req, timeout=0):
         if req.full_url == psub.TOKEN_URL:
@@ -3887,20 +3919,20 @@ class TestTokenRefusedFp(HTTPBase):
         return self.get(q, key="test-switch-key")
 
     def woken(self):
-        with ex._poll_health_lock:
-            return ex._poll_wakeup.is_set() and ACCT_A not in ex._poll_schedule
+        with T.poll_health_lock:
+            return ex._poll_wakeup.is_set() and ACCT_A not in T.poll_schedule
 
     def test_without_it_token_is_unchanged(self):
         code, d = self.token()
         self.assertEqual((code, d["access_token"]), (200, "tok-" + ACCT_A))
-        self.assertEqual((self.calls, self.logged, psub._proxy_refusals), ([], [], {}))
+        self.assertEqual((self.calls, self.logged, psub._st(T).proxy_refusals), ([], [], {}))
         self.assertFalse(self.woken())
 
     def test_a_stale_copy_is_recorded_and_the_current_token_dispensed(self):
         code, d = self.token(_fp("the-revoked-copy"))
         self.assertEqual((code, d["access_token"]), (200, "tok-" + ACCT_A))
         self.assertEqual(self.calls, [], "no check, no refresh")
-        rec = psub._proxy_refusals[ACCT_A]
+        rec = psub._st(T).proxy_refusals[ACCT_A]
         self.assertEqual((rec["fp"], rec["matched_current"]), (_fp("the-revoked-copy"), False))
         self.assertAlmostEqual(rec["at"], time.time(), delta=5)
         self.assertEqual(self.logged, [
@@ -3913,7 +3945,7 @@ class TestTokenRefusedFp(HTTPBase):
         self.assertEqual((code, d["access_token"]), (200, "tok-" + ACCT_A))
         self.assertEqual(self.calls, ["/api/oauth/usage"])
         self.assertEqual(self.bearers, ["Bearer tok-" + ACCT_A], "the check uses the current token")
-        self.assertTrue(psub._proxy_refusals[ACCT_A]["matched_current"])
+        self.assertTrue(psub._st(T).proxy_refusals[ACCT_A]["matched_current"])
         self.assertEqual(self.logged, [f"{ACCT_A}: proxy refused fp {_fp('tok-' + ACCT_A)} — "
                                        "the current token; usage check HTTP 200: not refreshing"])
         self.assertTrue(self.woken(), "the poll re-checks at once")
@@ -3936,7 +3968,7 @@ class TestTokenRefusedFp(HTTPBase):
         self.assertEqual(self.logged[0], f"{ACCT_A}: proxy refused fp {_fp('tok-' + ACCT_A)} — "
                                          "the current token; usage check HTTP 401: refreshing")
         self.assertIn(f"{ACCT_A}: token refreshed (forced: proxy refused) — ", self.logged[1])
-        self.assertEqual(psub._last_refresh[ACCT_A]["why"], "forced: proxy refused")
+        self.assertEqual(psub._st(T).last_refresh[ACCT_A]["why"], "forced: proxy refused")
         self.assertTrue(self.woken())
         # The new token refused too, inside the minute: checked, not refreshed.
         self.calls.clear()
@@ -3947,8 +3979,8 @@ class TestTokenRefusedFp(HTTPBase):
         self.assertRegex(self.logged[-1], r"usage check HTTP 401: refreshed \d+s ago, not again yet$")
         self.assertTrue(ex._poll_wakeup.is_set(), "the poll is woken either way")
         # A minute on, it may refresh again.
-        with psub._proxy_refusals_lock:
-            psub._forced_refresh_at[ACCT_A] -= psub.FORCED_REFRESH_MIN_S
+        with psub._st(T).proxy_refusals_lock:
+            psub._st(T).forced_refresh_at[ACCT_A] -= psub.FORCED_REFRESH_MIN_S
         self.calls.clear()
         self.token(_fp("fresh"))
         self.assertEqual(self.calls, ["/api/oauth/usage", "refresh"])
@@ -3964,7 +3996,7 @@ class TestTokenRefusedFp(HTTPBase):
     def test_another_accounts_refusal_is_its_own(self):
         code, d = self.token(_fp("tok-" + ACCT_B), account=ACCT_B)
         self.assertEqual((code, d["access_token"]), (200, "tok-" + ACCT_B))
-        self.assertEqual(set(psub._proxy_refusals), {ACCT_B})
+        self.assertEqual(set(psub._st(T).proxy_refusals), {ACCT_B})
 
 
 class TestOpenAITokenEndpoint(HTTPBase):
@@ -4009,9 +4041,9 @@ class TestOpenAITokenEndpoint(HTTPBase):
         # already proves for the poller path.
         seed_openai_creds(refresh_token="rt-new", access_token="at-new",
                           expires_at=time.time() + 999999)
-        pcodex._openai_pool = {"gpt": {"refresh_token": "rt-dead", "access_token": "at-dead",
+        pcodex._st(T).pool = {"gpt": {"refresh_token": "rt-dead", "access_token": "at-dead",
                                    "expires_at": 0, "account_id": "acct-uuid-test"}}
-        pcodex._openai_pool_shape = "legacy"
+        pcodex._st(T).pool_shape = "legacy"
         pin_openai_cache_mtime()  # defeat the mtime auto-adopt; force the 401 path
         orig = pcodex._oauth_refresh
 
@@ -4055,30 +4087,26 @@ class TestProviderRegistry(unittest.TestCase):
         # poll=None would be a None(...) call in the poller thread; the dispatch
         # builder and the pool-id set must both skip the facade row.
         self.assertIsNone(ex.PROVIDERS["anthropic"]["poll"])
-        self.assertTrue(ex.PROVIDERS["anthropic"]["enabled"]())
-        self.assertNotIn("anthropic", ex._provider_poll_targets())
+        self.assertTrue(ex.PROVIDERS["anthropic"]["enabled"](T))
+        self.assertNotIn("anthropic", ex._provider_poll_targets(T))
         self.assertEqual(set(ex._pollable_provider_ids()), {"kimi", "gpt", "local"})
 
     def test_kimi_enabled_is_live(self):
-        old = pkimi.KIMI_API_KEY
-        try:
-            pkimi.KIMI_API_KEY = "sk-kimi-testdeadbeef"
-            self.assertTrue(ex.PROVIDERS["kimi"]["enabled"]())
-            pkimi.KIMI_API_KEY = ""
-            self.assertFalse(ex.PROVIDERS["kimi"]["enabled"]())
-        finally:
-            pkimi.KIMI_API_KEY = old
+        set_kimi_key("sk-kimi-testdeadbeef")
+        self.assertTrue(ex.PROVIDERS["kimi"]["enabled"](T))
+        set_kimi_key(None)
+        self.assertFalse(ex.PROVIDERS["kimi"]["enabled"](T))
 
     def test_gpt_enabled_is_live(self):
-        path = pcodex.OPENAI_CODEX_CREDS_FILE
-        self.assertFalse(ex.PROVIDERS["gpt"]["enabled"]())
+        path = pcodex._st(T).file
+        self.assertFalse(ex.PROVIDERS["gpt"]["enabled"](T))
         try:
             with open(path, "w") as f:
                 f.write("{}")
-            self.assertTrue(ex.PROVIDERS["gpt"]["enabled"]())
+            self.assertTrue(ex.PROVIDERS["gpt"]["enabled"](T))
         finally:
             os.unlink(path)
-        self.assertFalse(ex.PROVIDERS["gpt"]["enabled"]())
+        self.assertFalse(ex.PROVIDERS["gpt"]["enabled"](T))
 
 
 class TestAccountHealth(HTTPBase):
@@ -4087,10 +4115,10 @@ class TestAccountHealth(HTTPBase):
     `docker logs`, and the router keeps trusting a frozen last-good reading."""
 
     def setUp(self):
-        ex._poll_fails.clear()
-        ex._poll_schedule.clear()
-        self.addCleanup(ex._poll_fails.clear)
-        self.addCleanup(ex._poll_schedule.clear)
+        T.poll_fails.clear()
+        T.poll_schedule.clear()
+        self.addCleanup(T.poll_fails.clear)
+        self.addCleanup(T.poll_schedule.clear)
         # The unified roster spans every authority: a creds file leaked by
         # another class would add gpt/kimi rows and break the exact-set asserts.
         clear_openai_creds()
@@ -4107,7 +4135,7 @@ class TestAccountHealth(HTTPBase):
 
     def test_healthy_account_reports_ok(self):
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         _, p = self.get("/preferred")
         t = {a["name"]: a for a in p["account_health"]["accounts"]}[ACCT_A]
         self.assertEqual(t["poll_ok"], 1)
@@ -4124,9 +4152,9 @@ class TestAccountHealth(HTTPBase):
                 "http": 400, "err": "refresh HTTP 400 (refresh token dead?)",
                 "retry_after": None, "good_ts": time.time() - 7200, "stale": 1}
         reset(dead, acct(ACCT_B, 100))
-        ex._poll_fails[ACCT_A] = 3
-        ex._poll_schedule[ACCT_A] = time.time() + 3600
-        ex.compute_preferred()
+        T.poll_fails[ACCT_A] = 3
+        T.poll_schedule[ACCT_A] = time.time() + 3600
+        ex.compute_preferred(T)
         _, p = self.get("/preferred")
         t = {a["name"]: a for a in p["account_health"]["accounts"]}[ACCT_A]
         self.assertEqual(t["poll_ok"], 0)
@@ -4148,7 +4176,7 @@ class TestAccountHealth(HTTPBase):
                    "http": 429, "err": "usage HTTP 429", "retry_after": 120,
                    "good_ts": time.time() - 600, "stale": 1}
         reset(limited, acct(ACCT_B, 30))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         _, p = self.get("/preferred")
         h = p["account_health"]
         self.assertEqual(h["worst"], "degraded",
@@ -4164,13 +4192,10 @@ class TestAccountHealth(HTTPBase):
         (Without a key the kimi authority reports an empty roster and the strip
         is anthropic-only, which the other tests in this class rely on.)"""
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30), kimi_result())
-        old = pkimi.KIMI_API_KEY
-        pkimi.KIMI_API_KEY = "sk-kimi-testdeadbeef"
-        try:
-            ex.compute_preferred()
-            _, p = self.get("/preferred")
-        finally:
-            pkimi.KIMI_API_KEY = old
+        set_kimi_key("sk-kimi-testdeadbeef")
+        self.addCleanup(set_kimi_key, None)
+        ex.compute_preferred(T)
+        _, p = self.get("/preferred")
         rows = {a["name"]: a for a in p["account_health"]["accounts"]}
         self.assertIn("kimi", rows)
         self.assertEqual(rows["kimi"]["provider"], "kimi")
@@ -4182,13 +4207,10 @@ class TestAccountHealth(HTTPBase):
         fingerprint, token expiries) are /auth/providers material (key-guarded)
         and must not ride along into the public payload."""
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30), kimi_result())
-        old = pkimi.KIMI_API_KEY
-        pkimi.KIMI_API_KEY = "sk-kimi-testdeadbeef"
-        try:
-            ex.compute_preferred()
-            _, p = self.get("/preferred")
-        finally:
-            pkimi.KIMI_API_KEY = old
+        set_kimi_key("sk-kimi-testdeadbeef")
+        self.addCleanup(set_kimi_key, None)
+        ex.compute_preferred(T)
+        _, p = self.get("/preferred")
         allowed = set(ex._HEALTH_ROW_KEYS) | {"provider"}
         for a in p["account_health"]["accounts"]:
             self.assertLessEqual(set(a), allowed, a["name"])
@@ -4204,7 +4226,7 @@ class TestAccountHealth(HTTPBase):
         dead = gpt_result(name="gpt-a", http=401, ok=0, good_age=7200,
                           err="refresh HTTP 401")
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30), dead, gpt_result(name="gpt-b"))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         _, p = self.get("/preferred")
         h = p["account_health"]
         self.assertEqual(h["worst"], "auth_dead")
@@ -4222,17 +4244,17 @@ class TestReauthFlow(HTTPBase):
     splice is tested against a real accounts.json in the temp dir."""
 
     def setUp(self):
-        ex._reauth_pending.clear()
-        self.addCleanup(ex._reauth_pending.clear)
+        T.reauth_pending.clear()
+        self.addCleanup(T.reauth_pending.clear)
         # A real accounts.json holding BOTH accounts — the splice must not clobber.
         self.accounts = [{"name": ACCT_A, "refresh_token": "old-rt-a"},
                          {"name": ACCT_B, "refresh_token": "old-rt-b",
                           "access_token": "tok-b", "expires_at": 1}]
-        with open(psub.ACCOUNTS_FILE, "w") as f:
+        with open(psub._st(T).file, "w") as f:
             json.dump(self.accounts, f)
 
     def post(self, path, obj, key=None):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}",
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{tp(path)}",
                                      data=json.dumps(obj).encode(), method="POST")
         req.add_header("Content-Type", "application/json")
         if key:
@@ -4246,9 +4268,9 @@ class TestReauthFlow(HTTPBase):
 
     def test_splice_replaces_only_the_named_disk_and_live_entry(self):
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30))
-        old_b = dict(psub._creds[ACCT_B])
-        psub._splice_refresh_token(ACCT_A, "new-rt-a")
-        arr = json.load(open(psub.ACCOUNTS_FILE))
+        old_b = dict(psub._st(T).creds[ACCT_B])
+        psub._splice_refresh_token(T, ACCT_A, "new-rt-a")
+        arr = json.load(open(psub._st(T).file))
         a = next(x for x in arr if x["name"] == ACCT_A)
         b = next(x for x in arr if x["name"] == ACCT_B)
         self.assertEqual(a["refresh_token"], "new-rt-a")
@@ -4257,45 +4279,45 @@ class TestReauthFlow(HTTPBase):
         self.assertEqual(b["refresh_token"], "old-rt-b", "must not clobber the other account")
         self.assertEqual(b["access_token"], "tok-b", "untouched entry keeps its fields")
         self.assertEqual(len(arr), 2)
-        self.assertEqual(psub._creds[ACCT_A], {
+        self.assertEqual(psub._st(T).creds[ACCT_A], {
             "refresh_token": "new-rt-a", "access_token": None, "expires_at": 0,
         }, "the next poll must not retain the dead in-memory credential")
-        self.assertEqual(psub._creds[ACCT_B], old_b)
-        self.assertEqual(psub._cred_generation[ACCT_A], 1)
+        self.assertEqual(psub._st(T).creds[ACCT_B], old_b)
+        self.assertEqual(psub._st(T).cred_generation[ACCT_A], 1)
 
     def test_splice_refuses_an_unconfigured_email(self):
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30))
-        before = {n: dict(c) for n, c in psub._creds.items()}
+        before = {n: dict(c) for n, c in psub._st(T).creds.items()}
         with self.assertRaises(ValueError):
-            psub._splice_refresh_token("mallory@example.com", "rt")
-        arr = json.load(open(psub.ACCOUNTS_FILE))
+            psub._splice_refresh_token(T, "mallory@example.com", "rt")
+        arr = json.load(open(psub._st(T).file))
         self.assertEqual(len(arr), 2, "an unconfigured email must not add an account")
-        self.assertEqual(psub._creds, before, "failed validation must not change live credentials")
+        self.assertEqual(psub._st(T).creds, before, "failed validation must not change live credentials")
 
     def test_splice_persistence_failure_leaves_live_cache_unchanged(self):
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30))
-        before = {n: dict(c) for n, c in psub._creds.items()}
+        before = {n: dict(c) for n, c in psub._st(T).creds.items()}
         orig_replace = ex.os.replace
         ex.os.replace = lambda src, dst: (_ for _ in ()).throw(OSError("disk full"))
         self.addCleanup(setattr, ex.os, "replace", orig_replace)
 
         with self.assertRaisesRegex(ValueError, "cannot update"):
-            psub._splice_refresh_token(ACCT_A, "new-rt-a")
+            psub._splice_refresh_token(T, ACCT_A, "new-rt-a")
 
-        self.assertEqual(psub._creds, before)
-        self.assertNotIn(ACCT_A, psub._cred_generation)
+        self.assertEqual(psub._st(T).creds, before)
+        self.assertNotIn(ACCT_A, psub._st(T).cred_generation)
 
     def test_begin_mints_a_one_shot_pending_grant(self):
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30))
-        url, state = psub._reauth_begin(ACCT_A)
+        url, state = psub._reauth_begin(T, ACCT_A)
         self.assertIn("code_challenge=", url)
         self.assertIn("user%3Aprofile", url, "the scope set must include user:profile")
-        self.assertIn(state, ex._reauth_pending)
+        self.assertIn(state, T.reauth_pending)
         # TTL: a stale grant is pruned
-        ex._reauth_pending[state]["minted_at"] = time.time() - ex.REAUTH_TTL - 1
-        with ex._reauth_lock:
-            ex._reauth_prune(time.time())
-        self.assertNotIn(state, ex._reauth_pending)
+        T.reauth_pending[state]["minted_at"] = time.time() - ex.REAUTH_TTL - 1
+        with T.reauth_lock:
+            ex._reauth_prune(T, time.time())
+        self.assertNotIn(state, T.reauth_pending)
 
     def test_begin_endpoint_requires_key_and_known_account(self):
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30))
@@ -4307,8 +4329,8 @@ class TestReauthFlow(HTTPBase):
 
     def test_complete_consumes_grant_and_writes_creds(self):
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30))
-        ex._poll_fails[ACCT_A] = 5
-        ex._poll_schedule[ACCT_A] = time.time() + 3600
+        T.poll_fails[ACCT_A] = 5
+        T.poll_schedule[ACCT_A] = time.time() + 3600
         # Stub the two Anthropic calls: token exchange + profile verify. Patch the
         # module-local name, NOT urllib.request.urlopen globally — the test's own
         # HTTP client (self.post) uses the real one.
@@ -4329,20 +4351,20 @@ class TestReauthFlow(HTTPBase):
 
         ex.urlopen = fake_urlopen
         self.addCleanup(setattr, ex, "urlopen", orig_post)
-        _, state = psub._reauth_begin(ACCT_A)
+        _, state = psub._reauth_begin(T, ACCT_A)
         code, d = self.post("/reauth/complete", {"state": state, "code": "the-code"},
                             key="test-switch-key")
         self.assertEqual(code, 200, d)
         self.assertEqual(d["account"], ACCT_A)
-        arr = json.load(open(psub.ACCOUNTS_FILE))
+        arr = json.load(open(psub._st(T).file))
         a = next(x for x in arr if x["name"] == ACCT_A)
         self.assertEqual(a["refresh_token"], "fresh-rt")
-        self.assertNotIn(state, ex._reauth_pending, "grant must be one-shot")
-        self.assertNotIn(ACCT_A, ex._poll_fails, "backoff cleared — due immediately")
-        self.assertNotIn(ACCT_A, ex._poll_schedule)
+        self.assertNotIn(state, T.reauth_pending, "grant must be one-shot")
+        self.assertNotIn(ACCT_A, T.poll_fails, "backoff cleared — due immediately")
+        self.assertNotIn(ACCT_A, T.poll_schedule)
         self.assertTrue(ex._poll_wakeup.is_set(), "sleeping poller must be woken")
-        self.assertEqual(psub._creds[ACCT_A]["refresh_token"], "fresh-rt")
-        self.assertIsNone(psub._creds[ACCT_A]["access_token"])
+        self.assertEqual(psub._st(T).creds[ACCT_A]["refresh_token"], "fresh-rt")
+        self.assertIsNone(psub._st(T).creds[ACCT_A]["access_token"])
 
     def test_complete_with_unknown_state_422s(self):
         code, d = self.post("/reauth/complete", {"state": "nope", "code": "c"},
@@ -4365,12 +4387,12 @@ class TestReauthFlow(HTTPBase):
 
         ex.urlopen = lambda req, timeout=0: R()
         self.addCleanup(setattr, ex, "urlopen", orig_post)
-        _, state = psub._reauth_begin(ACCT_A)
+        _, state = psub._reauth_begin(T, ACCT_A)
         code, d = self.post("/reauth/complete", {"state": state, "code": "c"},
                             key="test-switch-key")
         self.assertEqual(code, 422)
         self.assertIn("user:profile", d["error"])
-        arr = json.load(open(psub.ACCOUNTS_FILE))
+        arr = json.load(open(psub._st(T).file))
         a = next(x for x in arr if x["name"] == ACCT_A)
         self.assertEqual(a["refresh_token"], "old-rt-a",
                          "a profile-less grant must not touch the creds file")
@@ -4384,7 +4406,7 @@ class TestReauthFlow(HTTPBase):
         self.assertIn("accounts", d)
 
     def test_page_loads_accounts_without_exposing_the_switch_key(self):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/reauth",
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{TP}/reauth",
                                      headers={"X-Switch-Key": "test-switch-key"})
         with urllib.request.urlopen(req, timeout=5) as r:
             body = r.read().decode()
@@ -4435,35 +4457,35 @@ def provider_result(provider, five_hour=8.0, weekly=2.0, good_age=0, ts=None):
 
 def class_pointer(idx=0):
     """The live pointer of one class, computed exactly as the policy does."""
-    with ex._lock:
-        snap = list(ex._state.values())
-    with ex._plock:
-        ctx = ex._policy_ctx(snap, time.time())
+    with T.lock:
+        snap = list(T.state.values())
+    with T.plock:
+        ctx = ex._policy_ctx(T, snap, time.time())
         cls = ex._classes[idx]
-        return ex._class_pointer(cls, ex._class_verdicts(cls, ctx), ctx["money"]["pay_order"])
+        return ex._class_pointer(cls, ex._class_verdicts(T, cls, ctx), ctx["money"]["pay_order"])
 
 
 def set_opus(cap=None, fh_reset=None):
     """Mutate the single account's Opus cap and/or 5h resets_at, then recompute."""
-    with ex._lock:
-        r = ex._state[ACCT_A]
+    with T.lock:
+        r = T.state[ACCT_A]
         if cap is not None:
             r["raw"]["limits"][0]["percent"] = cap
         if fh_reset is not None:
             r["raw"]["five_hour"]["resets_at"] = fh_reset
         read(r)
-    ex.compute_preferred()
+    ex.compute_preferred(T)
 
 
 def bound_member(sid, cname="frontier"):
-    with ex._plock:
-        s = ex._preferred["classes"].get(cname, {}).get("sessions", {}).get(sid)
+    with T.plock:
+        s = T.preferred["classes"].get(cname, {}).get("sessions", {}).get(sid)
         return s["member"] if s else None
 
 
 def age_session(sid, cname="frontier", seconds=ex.SW_DWELL + 100):
-    with ex._plock:
-        ex._preferred["classes"][cname]["sessions"][sid]["last_switch"] = \
+    with T.plock:
+        T.preferred["classes"][cname]["sessions"][sid]["last_switch"] = \
             time.time() - seconds
 
 
@@ -4492,59 +4514,59 @@ class TestClassPointer(ClassPolicyBase):
         self.assertEqual(self.pointer(), "gpt/gpt-5.6")
 
     def test_unknown_member_skipped(self):
-        with ex._lock:
-            del ex._state["gpt"]
+        with T.lock:
+            del T.state["gpt"]
         set_opus(cap=85)
         self.assertEqual(self.pointer(), "kimi/kimi-k3")
 
     def test_stale_member_skipped(self):
         set_opus(cap=85)
-        with ex._lock:
-            ex._state["gpt"] = provider_result("gpt", good_age=ex.STALE_MAX + 100)
+        with T.lock:
+            T.state["gpt"] = provider_result("gpt", good_age=ex.STALE_MAX + 100)
         self.assertEqual(self.pointer(), "kimi/kimi-k3")
 
     def test_all_hot_binds_the_coolest_known_member(self):
         """#88: SW_HIGH is a preference, not an admission filter. Every member
         over 80 with real quota left -> the coolest one, not a 503."""
         set_opus(cap=85)
-        with ex._lock:
-            ex._state["gpt"] = provider_result("gpt", five_hour=90.0)
-            ex._state["kimi"] = kimi_result(five_hour=95.0)
+        with T.lock:
+            T.state["gpt"] = provider_result("gpt", five_hour=90.0)
+            T.state["kimi"] = kimi_result(five_hour=95.0)
         self.assertEqual(self.pointer(), "lane:opus", "85 < 90 < 95: coolest wins")
 
     def test_all_hot_ties_break_by_priority(self):
         set_opus(cap=90)
-        with ex._lock:
-            ex._state["gpt"] = provider_result("gpt", five_hour=90.0)
-            ex._state["kimi"] = kimi_result(five_hour=90.0)
+        with T.lock:
+            T.state["gpt"] = provider_result("gpt", five_hour=90.0)
+            T.state["kimi"] = kimi_result(five_hour=90.0)
         self.assertEqual(self.pointer(), "lane:opus", "equal heat: priority order")
 
     def test_spent_members_are_never_the_last_resort(self):
         """A member at 100 has nothing to spend; seating a session there can only
         429. All spent -> None (typed 503), the case the ladder cannot fix."""
         set_opus(cap=100)
-        with ex._lock:
-            ex._state["gpt"] = provider_result("gpt", five_hour=100.0)
-            ex._state["kimi"] = kimi_result(five_hour=100.0)
+        with T.lock:
+            T.state["gpt"] = provider_result("gpt", five_hour=100.0)
+            T.state["kimi"] = kimi_result(five_hour=100.0)
         self.assertIsNone(self.pointer())
-        with ex._lock:
-            ex._state["kimi"] = kimi_result(five_hour=99.0)
+        with T.lock:
+            T.state["kimi"] = kimi_result(five_hour=99.0)
         self.assertEqual(self.pointer(), "kimi/kimi-k3", "99 is still spendable")
 
     def test_all_unknown_is_none(self):
         set_opus(cap=85)
-        with ex._lock:
-            del ex._state["gpt"]
-            del ex._state["kimi"]
-        with ex._lock:
-            ex._state["gpt"] = provider_result("gpt", good_age=ex.STALE_MAX + 100)
+        with T.lock:
+            del T.state["gpt"]
+            del T.state["kimi"]
+        with T.lock:
+            T.state["gpt"] = provider_result("gpt", good_age=ex.STALE_MAX + 100)
         # opus is the only known member -> last resort binds it even at 85
         self.assertEqual(self.pointer(), "lane:opus")
 
 
 class TestClassBind(ClassPolicyBase):
     def test_bind_creates_at_pointer(self):
-        code, p = ex._bind_class_session("frontier", "s1", time.time())
+        code, p = ex._bind_class_session(T, "frontier", "s1", time.time())
         self.assertEqual(code, 200)
         self.assertTrue(p["created"])
         self.assertIs(p["pinned"], False)
@@ -4553,30 +4575,30 @@ class TestClassBind(ClassPolicyBase):
 
     def test_rebind_is_sticky_and_touches_last_seen(self):
         now = time.time()
-        ex._bind_class_session("frontier", "s1", now - 100)
-        code, p = ex._bind_class_session("frontier", "s1", now)
+        ex._bind_class_session(T, "frontier", "s1", now - 100)
+        code, p = ex._bind_class_session(T, "frontier", "s1", now)
         self.assertEqual(code, 200)
         self.assertFalse(p["created"])
-        with ex._plock:
-            s = ex._preferred["classes"]["frontier"]["sessions"]["s1"]
+        with T.plock:
+            s = T.preferred["classes"]["frontier"]["sessions"]["s1"]
             self.assertEqual(s["last_seen"], now)
 
     def test_bind_honors_pin(self):
-        with ex._plock:
-            ex._preferred["classes"].setdefault("frontier", ex._new_class_state())
-            ex._preferred["classes"]["frontier"]["pinned"] = "kimi/kimi-k3"
-        code, p = ex._bind_class_session("frontier", "s1", time.time())
+        with T.plock:
+            T.preferred["classes"].setdefault("frontier", ex._new_class_state())
+            T.preferred["classes"]["frontier"]["pinned"] = "kimi/kimi-k3"
+        code, p = ex._bind_class_session(T, "frontier", "s1", time.time())
         self.assertEqual(code, 200)
         self.assertEqual(p["member"]["id"], "kimi/kimi-k3")
         self.assertIs(p["pinned"], True)
-        with ex._plock:
-            ex._preferred["classes"]["frontier"]["pinned"] = None
-        code, p = ex._bind_class_session("frontier", "s1", time.time())
+        with T.plock:
+            T.preferred["classes"]["frontier"]["pinned"] = None
+        code, p = ex._bind_class_session(T, "frontier", "s1", time.time())
         self.assertEqual(code, 200)
         self.assertIs(p["pinned"], False, "unpin must override a stale binding reason")
 
     def test_unknown_class_404(self):
-        code, p = ex._bind_class_session("nope", "s1", time.time())
+        code, p = ex._bind_class_session(T, "nope", "s1", time.time())
         self.assertEqual(code, 404)
         self.assertIn("frontier", p["classes"])
 
@@ -4588,19 +4610,19 @@ class TestClassBind(ClassPolicyBase):
             {"priority": 1, "kind": "provider", "provider": "nobody", "model": "m-1",
              "context_window": 400000, "anthropic_token_ratio": 0.6}]}]
         classes_reset(opus_acct(30), cfg=cfg)
-        code, p = ex._bind_class_session("frontier", "s1", time.time())
+        code, p = ex._bind_class_session(T, "frontier", "s1", time.time())
         self.assertEqual(code, 503)
         self.assertEqual(p, {"error": "no member of class 'frontier' has an account",
                              "class": "frontier", "routes": ["frontier/nobody/m-1"]})
-        with ex._plock:
-            self.assertNotIn("s1", ex._preferred["classes"]["frontier"]["sessions"], "nothing is bound")
+        with T.plock:
+            self.assertNotIn("s1", T.preferred["classes"]["frontier"]["sessions"], "nothing is bound")
 
     def test_binding_survives_state_roundtrip(self):
-        ex._bind_class_session("frontier", "s1", time.time())
-        with ex._plock:
-            ex._preferred["classes"]["frontier"]["sessions"]["s1"]["member"] = "kimi/kimi-k3"
-            ex._save_state()
-        ex._load_state()
+        ex._bind_class_session(T, "frontier", "s1", time.time())
+        with T.plock:
+            T.preferred["classes"]["frontier"]["sessions"]["s1"]["member"] = "kimi/kimi-k3"
+            ex._save_state(T)
+        ex._load_state(T)
         self.assertEqual(bound_member("s1"), "kimi/kimi-k3")
 
 
@@ -4609,7 +4631,7 @@ class TestSessionStickyFlapRegression(ClassPolicyBase):
     pull a bound session back — only a window reset can (once)."""
 
     def test_recovered_p1_never_pulls_session_without_reset(self):
-        ex._bind_class_session("frontier", "s1", time.time())
+        ex._bind_class_session(T, "frontier", "s1", time.time())
         set_opus(cap=96)                       # hard-forced off opus
         self.assertEqual(bound_member("s1"), "gpt/gpt-5.6",
                          "forced-down goes to the highest-priority acceptable")
@@ -4620,11 +4642,11 @@ class TestSessionStickyFlapRegression(ClassPolicyBase):
                              f"no movement on recovery alone (opus at {cap}%)")
 
     def test_new_session_takes_the_pointer_while_old_stays(self):
-        ex._bind_class_session("frontier", "s1", time.time())
+        ex._bind_class_session(T, "frontier", "s1", time.time())
         set_opus(cap=96)
         age_session("s1")
         set_opus(cap=30)                       # recovered: pointer back to opus
-        code, p = ex._bind_class_session("frontier", "s2", time.time())
+        code, p = ex._bind_class_session(T, "frontier", "s2", time.time())
         self.assertEqual(p["member"]["id"], "lane:opus",
                          "priority re-honored at the session boundary")
         self.assertEqual(bound_member("s1"), "gpt/gpt-5.6", "old session sticky")
@@ -4632,35 +4654,35 @@ class TestSessionStickyFlapRegression(ClassPolicyBase):
 
 class TestForcedDown(ClassPolicyBase):
     def test_hard_prefers_highest_priority_not_coolest(self):
-        ex._bind_class_session("frontier", "s1", time.time())
-        with ex._lock:  # gpt 50, kimi 8 — kimi is coolest, gpt outranks it
-            ex._state["gpt"] = provider_result("gpt", five_hour=50.0)
+        ex._bind_class_session(T, "frontier", "s1", time.time())
+        with T.lock:  # gpt 50, kimi 8 — kimi is coolest, gpt outranks it
+            T.state["gpt"] = provider_result("gpt", five_hour=50.0)
         set_opus(cap=96)
         self.assertEqual(bound_member("s1"), "gpt/gpt-5.6")
 
     def test_hot_margin_skips_inadequate_higher_member(self):
-        ex._bind_class_session("frontier", "s1", time.time())
-        with ex._lock:  # gpt only 13pts cooler (fails margin), kimi 25pts cooler
-            ex._state["gpt"] = provider_result("gpt", five_hour=72.0)
-            ex._state["kimi"] = kimi_result(five_hour=60.0)
+        ex._bind_class_session(T, "frontier", "s1", time.time())
+        with T.lock:  # gpt only 13pts cooler (fails margin), kimi 25pts cooler
+            T.state["gpt"] = provider_result("gpt", five_hour=72.0)
+            T.state["kimi"] = kimi_result(five_hour=60.0)
         set_opus(cap=85)
         self.assertEqual(bound_member("s1"), "kimi/kimi-k3",
                          "highest-priority member MEETING the margin wins")
 
     def test_dwell_gates_forced_down(self):
-        ex._bind_class_session("frontier", "s1", time.time())
-        with ex._plock:
-            ex._preferred["classes"]["frontier"]["sessions"]["s1"]["last_switch"] = time.time()
+        ex._bind_class_session(T, "frontier", "s1", time.time())
+        with T.plock:
+            T.preferred["classes"]["frontier"]["sessions"]["s1"]["last_switch"] = time.time()
         set_opus(cap=96)
         self.assertEqual(bound_member("s1"), "lane:opus", "dwell holds the move")
         age_session("s1")
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(bound_member("s1"), "gpt/gpt-5.6", "fires once dwell opens")
 
 
 class TestDriftUp(ClassPolicyBase):
     def force_down(self, sid="s1"):
-        ex._bind_class_session("frontier", sid, time.time())
+        ex._bind_class_session(T, "frontier", sid, time.time())
         set_opus(cap=96)
         self.assertEqual(bound_member(sid), "gpt/gpt-5.6")
         age_session(sid)
@@ -4698,12 +4720,12 @@ class TestDriftUp(ClassPolicyBase):
 
     def test_dwell_defers_but_does_not_cancel_drift_up(self):
         self.force_down()
-        with ex._plock:
-            ex._preferred["classes"]["frontier"]["sessions"]["s1"]["last_switch"] = time.time()
+        with T.plock:
+            T.preferred["classes"]["frontier"]["sessions"]["s1"]["last_switch"] = time.time()
         set_opus(cap=30, fh_reset="2026-07-28T23:00:00Z")
         self.assertEqual(bound_member("s1"), "gpt/gpt-5.6", "dwell holds it")
         age_session("s1")
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(bound_member("s1"), "lane:opus",
                          "unconsumed boundary fires after dwell opens")
 
@@ -4725,10 +4747,10 @@ class CeilingBase(ClassPolicyBase):
         return class_pointer()
 
     def set_provider(self, name, five_hour):
-        with ex._lock:
-            ex._state[name] = (kimi_result(five_hour=five_hour) if name == "kimi"
+        with T.lock:
+            T.state[name] = (kimi_result(five_hour=five_hour) if name == "kimi"
                                else provider_result(name, five_hour=five_hour))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
 
 
 class TestCeilingPointer(CeilingBase):
@@ -4754,7 +4776,7 @@ class TestCeilingPointer(CeilingBase):
         """The load-bearing availability test: ceilings must not manufacture a
         503 while real quota remains."""
         self.install(opus=10, gpt=5, kimi=5)     # 30/8/12 — all over, all < SW_HIGH
-        code, p = ex._bind_class_session("frontier", "s1", time.time())
+        code, p = ex._bind_class_session(T, "frontier", "s1", time.time())
         self.assertEqual(code, 200)
         self.assertEqual(p["member"]["id"], "lane:opus", "falls back to priority order")
 
@@ -4785,14 +4807,14 @@ class TestCeilingPointer(CeilingBase):
 class TestCeilingForcedDown(CeilingBase):
     def test_hot_prefers_a_target_inside_its_reserve(self):
         self.install(gpt=5)
-        ex._bind_class_session("frontier", "s1", time.time())
+        ex._bind_class_session(T, "frontier", "s1", time.time())
         set_opus(cap=85)                         # gpt and kimi both clear SW_MARGIN
         self.assertEqual(bound_member("s1"), "kimi/kimi-k3",
                          "without the ceiling gpt would win on priority")
 
     def test_hot_falls_back_to_a_reserved_target(self):
         self.install(gpt=5)
-        ex._bind_class_session("frontier", "s1", time.time())
+        ex._bind_class_session(T, "frontier", "s1", time.time())
         self.set_provider("kimi", 75.0)          # only 10pts cooler — fails margin
         set_opus(cap=85)
         self.assertEqual(bound_member("s1"), "gpt/gpt-5.6",
@@ -4800,15 +4822,15 @@ class TestCeilingForcedDown(CeilingBase):
 
     def test_hard_prefers_a_target_inside_its_reserve(self):
         self.install(gpt=5)
-        ex._bind_class_session("frontier", "s1", time.time())
+        ex._bind_class_session(T, "frontier", "s1", time.time())
         set_opus(cap=96)
         self.assertEqual(bound_member("s1"), "kimi/kimi-k3")
 
     def test_hard_falls_back_to_a_reserved_target(self):
         self.install(gpt=5)
-        ex._bind_class_session("frontier", "s1", time.time())
-        with ex._lock:
-            del ex._state["kimi"]                # nothing else usable at all
+        ex._bind_class_session(T, "frontier", "s1", time.time())
+        with T.lock:
+            del T.state["kimi"]                # nothing else usable at all
         set_opus(cap=96)
         self.assertEqual(bound_member("s1"), "gpt/gpt-5.6",
                          "a hard-forced session never stays on a 96% member")
@@ -4821,7 +4843,7 @@ class TestCeilingEviction(CeilingBase):
 
     def land_on_gpt(self, sid="s1", **ceilings):
         self.install(**ceilings)
-        ex._bind_class_session("frontier", sid, time.time())
+        ex._bind_class_session(T, "frontier", sid, time.time())
         set_opus(cap=96)
         self.assertEqual(bound_member(sid), "gpt/gpt-5.6")
         age_session(sid)
@@ -4833,12 +4855,12 @@ class TestCeilingEviction(CeilingBase):
 
     def test_dwell_gates_eviction(self):
         self.land_on_gpt(gpt=10)
-        with ex._plock:
-            ex._preferred["classes"]["frontier"]["sessions"]["s1"]["last_switch"] = time.time()
+        with T.plock:
+            T.preferred["classes"]["frontier"]["sessions"]["s1"]["last_switch"] = time.time()
         self.set_provider("gpt", 20.0)
         self.assertEqual(bound_member("s1"), "gpt/gpt-5.6", "dwell holds the move")
         age_session("s1")
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(bound_member("s1"), "kimi/kimi-k3", "fires once dwell opens")
 
     def test_no_target_below_means_stay_put(self):
@@ -4857,13 +4879,13 @@ class TestCeilingEviction(CeilingBase):
 
     def test_pin_beats_the_ceiling(self):
         self.install(gpt=5)                      # gpt at 8 is already over
-        with ex._plock:
-            ex._preferred["classes"].setdefault("frontier", ex._new_class_state())
-            ex._preferred["classes"]["frontier"]["pinned"] = "gpt/gpt-5.6"
-        code, p = ex._bind_class_session("frontier", "s1", time.time())
+        with T.plock:
+            T.preferred["classes"].setdefault("frontier", ex._new_class_state())
+            T.preferred["classes"]["frontier"]["pinned"] = "gpt/gpt-5.6"
+        code, p = ex._bind_class_session(T, "frontier", "s1", time.time())
         self.assertEqual(p["member"]["id"], "gpt/gpt-5.6")
         age_session("s1")
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(bound_member("s1"), "gpt/gpt-5.6",
                          "an explicit human override outranks the reserve")
 
@@ -4871,14 +4893,14 @@ class TestCeilingEviction(CeilingBase):
 class TestCeilingDriftUp(CeilingBase):
     def force_down(self, **ceilings):
         self.install(**ceilings)
-        ex._bind_class_session("frontier", "s1", time.time())
+        ex._bind_class_session(T, "frontier", "s1", time.time())
         set_opus(cap=96)
         self.assertEqual(bound_member("s1"), "gpt/gpt-5.6")
         age_session("s1")
 
     def marks(self, mid="lane:opus"):
-        with ex._plock:
-            return ex._preferred["classes"]["frontier"]["sessions"]["s1"]["marks"][mid]
+        with T.plock:
+            return T.preferred["classes"]["frontier"]["sessions"]["s1"]["marks"][mid]
 
     def test_reserved_member_is_not_drifted_up_to_but_consumes_its_boundary(self):
         self.force_down(opus=20)
@@ -4900,18 +4922,18 @@ class TestCeilingDriftUp(CeilingBase):
 
 class TestClassSessionLifecycle(ClassPolicyBase):
     def test_idle_session_pruned(self):
-        ex._bind_class_session("frontier", "s1", time.time())
-        with ex._plock:
-            ex._preferred["classes"]["frontier"]["sessions"]["s1"]["last_seen"] = \
+        ex._bind_class_session(T, "frontier", "s1", time.time())
+        with T.plock:
+            T.preferred["classes"]["frontier"]["sessions"]["s1"]["last_seen"] = \
                 time.time() - ex.SESSION_IDLE - 100
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertIsNone(bound_member("s1"))
 
     def test_unusable_member_rebinds_to_pointer(self):
-        ex._bind_class_session("frontier", "s1", time.time())
-        with ex._plock:  # simulate a config edit orphaning the binding
-            ex._preferred["classes"]["frontier"]["sessions"]["s1"]["member"] = "gone/x"
-        ex.compute_preferred()
+        ex._bind_class_session(T, "frontier", "s1", time.time())
+        with T.plock:  # simulate a config edit orphaning the binding
+            T.preferred["classes"]["frontier"]["sessions"]["s1"]["member"] = "gone/x"
+        ex.compute_preferred(T)
         self.assertEqual(bound_member("s1"), "lane:opus")
 
     def test_migrate_carries_and_filters(self):
@@ -5089,17 +5111,17 @@ def seed_openai_creds(**over):
     data = {"refresh_token": "rt-test-1", "access_token": "at-test-1",
             "expires_at": time.time() + 999999, "account_id": "acct-uuid-test"}
     data.update(over)
-    with open(pcodex.OPENAI_CODEX_CREDS_FILE, "w") as f:
+    with open(pcodex._st(T).file, "w") as f:
         json.dump(data, f)
     return data
 
 
 def clear_openai_creds():
-    pcodex._openai_pool = None
-    pcodex._openai_pool_mtime = None
-    pcodex._openai_pool_shape = "legacy"
+    pcodex._st(T).pool = None
+    pcodex._st(T).pool_mtime = None
+    pcodex._st(T).pool_shape = "legacy"
     try:
-        os.remove(pcodex.OPENAI_CODEX_CREDS_FILE)
+        os.remove(pcodex._st(T).file)
     except FileNotFoundError:
         pass
 
@@ -5114,10 +5136,10 @@ def seed_openai_pool(*entries):
                 "expires_at": time.time() + 999999, "account_id": f"acct-{n}"}
         base.update(e)
         data.append(base)
-    with open(pcodex.OPENAI_CODEX_CREDS_FILE, "w") as f:
+    with open(pcodex._st(T).file, "w") as f:
         json.dump(data, f)
-    pcodex._openai_pool = None
-    pcodex._openai_pool_mtime = None
+    pcodex._st(T).pool = None
+    pcodex._st(T).pool_mtime = None
     return data
 
 
@@ -5126,7 +5148,7 @@ def pin_openai_cache_mtime():
     non-force load serves the in-memory pool — the escape-hatch scenario
     (dead in-memory chain, force=True re-read) stays constructible now that
     the loader adopts out-of-band rewrites via the mtime guard."""
-    pcodex._openai_pool_mtime = os.stat(pcodex.OPENAI_CODEX_CREDS_FILE).st_mtime
+    pcodex._st(T).pool_mtime = os.stat(pcodex._st(T).file).st_mtime
 
 
 def gpt_result(weekly=12.0, ok=1, good_age=0, http=0, err="", ts=None, name="gpt",
@@ -5159,7 +5181,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
 
     def setUp(self):
         seed_openai_creds()
-        pcodex._openai_pool = None
+        pcodex._st(T).pool = None
         self.capture_log()
 
     def tearDown(self):
@@ -5170,7 +5192,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
 
     def test_pro_single_weekly_window(self):
         patch_codex_reads(self, wham_usage(primary=12.0, reset_at=1790000000))
-        res = pcodex.poll_gpt()
+        res = pcodex.poll_gpt(T)
         self.assertEqual(res["ok"], 1)
         self.assertEqual(res["name"], "gpt")
         self.assertEqual(res["provider"], "gpt")
@@ -5199,7 +5221,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
         mapping (primary → seven_day) swapped them."""
         patch_codex_reads(self, wham_usage(primary=30.0, primary_secs=18000,
                                            secondary=55.0, secondary_secs=604800))
-        w = self.windows(pcodex.poll_gpt())
+        w = self.windows(pcodex.poll_gpt(T))
         self.assertEqual(w["five_hour"]["used_pct"], 30.0)
         self.assertEqual(w["five_hour"]["period_s"], 18000)
         self.assertEqual(w["seven_day"]["used_pct"], 55.0)
@@ -5207,18 +5229,18 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
         # ...and the same windows in the other order land in the same slots.
         patch_codex_reads(self, wham_usage(primary=55.0, primary_secs=604800,
                                            secondary=30.0, secondary_secs=18000))
-        res = pcodex.poll_gpt()
+        res = pcodex.poll_gpt(T)
         self.assertEqual(self.windows(res)["five_hour"]["used_pct"], 30.0)
         self.assertEqual(self.windows(res)["seven_day"]["used_pct"], 55.0)
         self.assertEqual(ex._provider_effective(res), 55.0)
 
     def test_rounded_length_takes_its_slot(self):
         patch_codex_reads(self, wham_usage(primary=20.0, primary_secs=604800 - 60))
-        self.assertEqual(list(self.windows(pcodex.poll_gpt())), ["seven_day"])
+        self.assertEqual(list(self.windows(pcodex.poll_gpt(T))), ["seven_day"])
 
     def test_zero_length_window_does_not_apply(self):
         patch_codex_reads(self, wham_usage(primary=12.0, secondary=44.0, secondary_secs=0))
-        res = pcodex.poll_gpt()
+        res = pcodex.poll_gpt(T)
         self.assertEqual(list(self.windows(res)), ["seven_day"])
         self.assertEqual(ex._provider_effective(res), 12.0)
 
@@ -5228,7 +5250,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
         # route like the others (§1.5).
         patch_codex_reads(self, wham_usage(primary=12.0, secondary=90.0,
                                            secondary_secs=86400))
-        res = pcodex.poll_gpt()
+        res = pcodex.poll_gpt(T)
         w = self.windows(res)
         self.assertEqual(list(w), ["seven_day", "window:1d"])
         self.assertEqual((w["window:1d"]["period_s"], w["window:1d"]["scope"]), (86400, None))
@@ -5237,7 +5259,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
     def test_allowed_false_closes_the_allowance_below_100(self):
         """The provider's gate wins over the percent (50 §1.5)."""
         patch_codex_reads(self, wham_usage(primary=40.0, allowed=False))
-        res = pcodex.poll_gpt()
+        res = pcodex.poll_gpt(T)
         pot = ex._reading_pot(res["reading"], ex.ALLOWANCE_POT)
         self.assertIs(pot["open"], False)
         self.assertIs(pot["limit_reached"], True)
@@ -5247,7 +5269,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
 
     def test_overrun_past_100_is_kept(self):
         patch_codex_reads(self, wham_usage(primary=100.08, allowed=False))
-        res = pcodex.poll_gpt()
+        res = pcodex.poll_gpt(T)
         self.assertEqual(self.windows(res)["seven_day"]["remaining"], 0.0)
         self.assertEqual(ex._provider_effective(res), 100.08)
 
@@ -5255,7 +5277,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
         patch_codex_reads(self, wham_usage(
             primary=100.0, allowed=False, spend_reached=False,
             credits={"has_credits": True, "balance": "250.5000000000"}))
-        pot = ex._reading_pot(pcodex.poll_gpt()["reading"], ex.MONEY_POT)
+        pot = ex._reading_pot(pcodex.poll_gpt(T)["reading"], ex.MONEY_POT)
         self.assertEqual((pot["unit"], pot["open"], pot["open_basis"]),
                          ("codex_credit", True, "derived"))
         self.assertEqual(ex._reading_limit(pot, "balance"),
@@ -5277,7 +5299,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
         for credits, spend, want in cases:
             with self.subTest(credits=credits, spend=spend):
                 patch_codex_reads(self, wham_usage(credits=credits, spend_reached=spend))
-                pot = ex._reading_pot(pcodex.poll_gpt()["reading"], ex.MONEY_POT)
+                pot = ex._reading_pot(pcodex.poll_gpt(T)["reading"], ex.MONEY_POT)
                 self.assertIs(pot["open"], want)
 
     def test_unparseable_balance_is_unknown_not_zero(self):
@@ -5285,7 +5307,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
             with self.subTest(balance=bal):
                 patch_codex_reads(self, wham_usage(credits={"has_credits": True,
                                                             "balance": bal}))
-                pot = ex._reading_pot(pcodex.poll_gpt()["reading"], ex.MONEY_POT)
+                pot = ex._reading_pot(pcodex.poll_gpt(T)["reading"], ex.MONEY_POT)
                 b = ex._reading_limit(pot, "balance")
                 self.assertEqual((b["amount"], b["basis"]), (None, "unknown"))
                 self.assertIs(pot["open"], True, "the balance never gates (11 S4)")
@@ -5294,7 +5316,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
         body = wham_usage(credits={"has_credits": True})
         body["spend_control"] = None
         patch_codex_reads(self, body)
-        pot = ex._reading_pot(pcodex.poll_gpt()["reading"], ex.MONEY_POT)
+        pot = ex._reading_pot(pcodex.poll_gpt(T)["reading"], ex.MONEY_POT)
         self.assertEqual(ex._reading_limit(pot, "spend_control")["basis"], "unknown")
 
     def test_additional_rate_limits_are_scoped_windows_with_their_own_gate(self):
@@ -5306,7 +5328,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
                                  "primary_window": wham_window(77.0, 604800),
                                  "secondary_window": None}}]
         patch_codex_reads(self, wham_usage(primary=12.0, additional=extra))
-        res = pcodex.poll_gpt()
+        res = pcodex.poll_gpt(T)
         w = self.windows(res)["scoped:test_cap:7d"]
         self.assertEqual((w["scope"], w["used_pct"], w["open"], w["open_basis"]),
                          ("test_cap", 77.0, False, "exact"))
@@ -5320,20 +5342,20 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
         extra = [{"limit_name": "gate_only",
                   "rate_limit": {"allowed": False, "primary_window": None}}]
         patch_codex_reads(self, wham_usage(primary=12.0, additional=extra))
-        res = pcodex.poll_gpt()
+        res = pcodex.poll_gpt(T)
         w = self.windows(res)["scoped:gate_only"]
         self.assertEqual((w["used_pct"], w["basis"], w["open"]), (None, "unknown", False))
         self.assertEqual(ex._reading_effective(res, "gate_only"), 100.0)
 
     def test_malformed_additional_limit_is_logged_not_read(self):
         patch_codex_reads(self, wham_usage(primary=12.0, additional=["junk"]))
-        res = pcodex.poll_gpt()
+        res = pcodex.poll_gpt(T)
         self.assertEqual(list(self.windows(res)), ["seven_day"])
         self.assertTrue(any("additional_rate_limits[0]" in ln for ln in self.logged))
 
     def test_reset_options_come_from_the_second_read(self):
         patch_codex_reads(self, wham_usage(), wham_reset_credits(available=2, eligible=False))
-        pot = ex._reading_pot(pcodex.poll_gpt()["reading"], ex.ALLOWANCE_POT)
+        pot = ex._reading_pot(pcodex.poll_gpt(T)["reading"], ex.ALLOWANCE_POT)
         self.assertEqual(pot["reset_options"],
                          {"reset_credits": 2, "purchase_eligible": False, "basis": "exact"})
 
@@ -5341,7 +5363,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
         def boom(tok, acct_id):
             raise urllib.error.HTTPError(pcodex.OPENAI_RESET_CREDITS_URL, 503, "x", {}, None)
         patch_codex_reads(self, wham_usage(primary=12.0), boom)
-        res = pcodex.poll_gpt()
+        res = pcodex.poll_gpt(T)
         self.assertEqual(res["ok"], 1, "the usage read already measured")
         ro = ex._reading_pot(res["reading"], ex.ALLOWANCE_POT)["reset_options"]
         self.assertEqual((ro["basis"], ro["reset_credits"], ro["err"]),
@@ -5352,7 +5374,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
         body = wham_usage()
         del body["rate_limit"]
         patch_codex_reads(self, body)
-        res = pcodex.poll_gpt()
+        res = pcodex.poll_gpt(T)
         self.assertEqual(res["ok"], 0)
         self.assertIn("rate_limit.allowed", res["err"])
 
@@ -5360,7 +5382,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
         # A plan with only a 5-hour window reads as one: the provider's gate
         # and that window, nothing invented for the slot it lacks.
         patch_codex_reads(self, wham_usage(primary=10.0, primary_secs=18000))
-        res = pcodex.poll_gpt()
+        res = pcodex.poll_gpt(T)
         self.assertEqual(res["ok"], 1, res["err"])
         self.assertEqual(list(self.windows(res)), ["five_hour"])
         self.assertEqual(ex._provider_effective(res), 10.0)
@@ -5374,7 +5396,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
                     raise urllib.error.HTTPError(pcodex.OPENAI_USAGE_URL, c, "no",
                                                  {"Retry-After": "120"}, None)
                 patch_codex_reads(self, boom)
-                res = pcodex.poll_gpt()
+                res = pcodex.poll_gpt(T)
                 self.assertEqual(res["ok"], 0)
                 self.assertEqual(res["http"], code)
                 self.assertIn(f"usage HTTP {code}", res["err"])
@@ -5400,7 +5422,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
             seen["tok"] = tok
             raise urllib.error.HTTPError(pcodex.OPENAI_RESET_CREDITS_URL, 401, "no", {}, None)
         patch_codex_reads(self, usage, resets)
-        res = pcodex.poll_gpt()
+        res = pcodex.poll_gpt(T)
         self.assertEqual(calls, ["at-test-1", "at-refreshed"])
         self.assertEqual(len(refreshes), 1)
         self.assertEqual(seen["tok"], "at-refreshed", "the second read rides the new token")
@@ -5432,7 +5454,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
         orig = ex.urlopen
         self.addCleanup(setattr, ex, "urlopen", orig)
         ex.urlopen = fake
-        self.assertEqual(pcodex.poll_gpt()["ok"], 1)
+        self.assertEqual(pcodex.poll_gpt(T)["ok"], 1)
         self.assertEqual([r.full_url for r in seen],
                          [pcodex.OPENAI_USAGE_URL, pcodex.OPENAI_RESET_CREDITS_URL])
         for r in seen:
@@ -5445,7 +5467,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
 
     def test_no_creds_file_is_disabled(self):
         clear_openai_creds()
-        res = pcodex.poll_gpt()
+        res = pcodex.poll_gpt(T)
         self.assertEqual(res["ok"], 0)
         self.assertIn("no codex creds", res["err"])
 
@@ -5504,7 +5526,7 @@ class TestCodexMoneyGate(unittest.TestCase):
         del body["credits"]
         r = pcodex._codex_reading(body, None, time.time())[0]
         self.assertIsNone(ex._reading_pot(r, ex.MONEY_POT))
-        st = ex._account_standing("gpt", {"name": "gpt", "kind": "provider", "provider": "gpt",
+        st = ex._account_standing(T, "gpt", {"name": "gpt", "kind": "provider", "provider": "gpt",
                                           "good_ts": time.time(), "reading": r},
                                   "gpt", time.time())
         self.assertIsNone(st["money"]["credits"]["open"])
@@ -5521,7 +5543,7 @@ class TestGptMetricsRender(unittest.TestCase):
 
     def test_gpt_series_alongside_kimi(self):
         reset(kimi_result(five_hour=8.0, weekly=2.0), gpt_result(weekly=12.0))
-        t = ex.render()
+        t = ex.render([T])
         L = self.L
         self.assertEqual(L(t, "provider_poll_success", provider="gpt"), 1)
         self.assertEqual(L(t, "provider_effective_percent", provider="gpt"), 12.0)
@@ -5539,15 +5561,15 @@ class TestGptMetricsRender(unittest.TestCase):
         a = acct(ACCT_A, 30)
         a["raw"]["seven_day"]["resets_at"] = "2027-01-01T00:00:00Z"
         reset(a, gpt_result(weekly=12.0, five_hour=5.0), kimi_result())
-        t = ex.render()
+        t = ex.render([T])
         resets = [ln for ln in t.splitlines() if ln.startswith("claude_usage_window_resets_at_seconds{")]
         self.assertTrue(any(f'account="{ACCT_A}"' in ln for ln in resets), resets)
         self.assertEqual([ln for ln in resets if 'account="gpt"' in ln or 'account="kimi"' in ln], [])
-        self.assertIn('provider_quota_window_resets_at_seconds{provider="gpt"', t)
+        self.assertIn(f'provider_quota_window_resets_at_seconds{{tenant="{T.id}",provider="gpt"', t)
 
     def test_gpt_failure_retains_last_good(self):
         reset(gpt_result(ok=0, http=401, err="token refresh HTTP 401", good_age=120))
-        t = ex.render()
+        t = ex.render([T])
         L = self.L
         self.assertEqual(L(t, "provider_poll_success", provider="gpt"), 0)
         self.assertEqual(L(t, "provider_poll_http_code", provider="gpt"), 401)
@@ -5559,7 +5581,7 @@ class TestGptMetricsRender(unittest.TestCase):
         reset(gpt_result(weekly=100.0, allowed=False,
                          credits={"has_credits": True, "balance": 250.5}),
               kimi_result())
-        t = ex.render()
+        t = ex.render([T])
         self.assertIn("# TYPE money_balance gauge", t)
         self.assertEqual(self.L(t, "money_balance", provider="gpt", account="gpt",
                                 pot="credits", unit="codex_credit"), 250.5)
@@ -5568,11 +5590,11 @@ class TestGptMetricsRender(unittest.TestCase):
 
     def test_unknown_balance_is_absent_not_zero(self):
         reset(gpt_result(credits={"has_credits": True, "balance": None}))
-        self.assertIsNone(self.L(ex.render(), "money_balance", provider="gpt"))
+        self.assertIsNone(self.L(ex.render([T]), "money_balance", provider="gpt"))
 
     def test_allowed_false_reads_spent_on_metrics(self):
         reset(gpt_result(weekly=40.0, allowed=False))
-        t = ex.render()
+        t = ex.render([T])
         self.assertEqual(self.L(t, "provider_effective_percent", provider="gpt"), 100.0)
         self.assertEqual(self.L(t, "provider_account_effective_percent",
                                 provider="gpt", account="gpt"), 100.0)
@@ -5634,8 +5656,8 @@ class TestOAuthMachinery(unittest.TestCase):
 
     def setUp(self):
         seed_openai_creds()
-        pcodex._openai_pool = None
-        self.creds = pcodex._load_openai_creds()["gpt"]
+        pcodex._st(T).pool = None
+        self.creds = pcodex._load_openai_creds(T)["gpt"]
         self._orig_urlopen = ex.urlopen
         self.calls = []
 
@@ -5659,12 +5681,12 @@ class TestOAuthMachinery(unittest.TestCase):
         self._patch_token({"access_token": "at-2", "refresh_token": "rt-2",
                            "expires_in": 864000})
         tok = pcodex._oauth_refresh(self.creds, pcodex.OPENAI_TOKEN_URL, pcodex.OPENAI_CLIENT_ID,
-                                pcodex._persist_openai_creds)
+                                lambda: pcodex._persist_openai_creds(T))
         self.assertEqual(tok, "at-2")
         self.assertEqual(self.creds["refresh_token"], "rt-2")
         self.assertEqual(self.calls[0]["refresh_token"], "rt-test-1")
         self.assertEqual(self.calls[0]["client_id"], pcodex.OPENAI_CLIENT_ID)
-        with open(pcodex.OPENAI_CODEX_CREDS_FILE) as f:
+        with open(pcodex._st(T).file) as f:
             on_disk = json.load(f)
         self.assertEqual(on_disk["refresh_token"], "rt-2",
                          "rotation persisted atomically — losing it kills the chain")
@@ -5672,8 +5694,8 @@ class TestOAuthMachinery(unittest.TestCase):
 
     def test_ensure_cached_outside_margin(self):
         self._patch_refuse()
-        tok = pcodex._oauth_ensure_token(self.creds, pcodex.OPENAI_TOKEN_URL,
-                                     pcodex.OPENAI_CLIENT_ID, pcodex._persist_openai_creds,
+        tok = pcodex._oauth_ensure_token(T, self.creds, pcodex.OPENAI_TOKEN_URL,
+                                     pcodex.OPENAI_CLIENT_ID, lambda: pcodex._persist_openai_creds(T),
                                      margin=3600)
         self.assertEqual(tok, "at-test-1")
         self.assertEqual(self.calls, [], "no network when the token is comfortably fresh")
@@ -5681,8 +5703,8 @@ class TestOAuthMachinery(unittest.TestCase):
     def test_ensure_refreshes_inside_margin(self):
         self.creds["expires_at"] = time.time() + 60
         self._patch_token({"access_token": "at-3", "refresh_token": "rt-3"})
-        tok = pcodex._oauth_ensure_token(self.creds, pcodex.OPENAI_TOKEN_URL,
-                                     pcodex.OPENAI_CLIENT_ID, pcodex._persist_openai_creds,
+        tok = pcodex._oauth_ensure_token(T, self.creds, pcodex.OPENAI_TOKEN_URL,
+                                     pcodex.OPENAI_CLIENT_ID, lambda: pcodex._persist_openai_creds(T),
                                      margin=3600)
         self.assertEqual(tok, "at-3")
 
@@ -5690,8 +5712,8 @@ class TestOAuthMachinery(unittest.TestCase):
         self.creds["expires_at"] = time.time() + 1800       # inside margin...
         self.creds["earliest_refresh_at"] = time.time() + 900  # ...but throttled
         self._patch_refuse()
-        tok = pcodex._oauth_ensure_token(self.creds, pcodex.OPENAI_TOKEN_URL,
-                                     pcodex.OPENAI_CLIENT_ID, pcodex._persist_openai_creds,
+        tok = pcodex._oauth_ensure_token(T, self.creds, pcodex.OPENAI_TOKEN_URL,
+                                     pcodex.OPENAI_CLIENT_ID, lambda: pcodex._persist_openai_creds(T),
                                      margin=3600)
         self.assertEqual(tok, "at-test-1", "still-valid token rides out the throttle")
         self.assertEqual(self.calls, [])
@@ -5700,8 +5722,8 @@ class TestOAuthMachinery(unittest.TestCase):
         self.creds["expires_at"] = time.time() - 10
         self.creds["earliest_refresh_at"] = time.time() + 900
         self._patch_token({"access_token": "at-4", "refresh_token": "rt-4"})
-        tok = pcodex._oauth_ensure_token(self.creds, pcodex.OPENAI_TOKEN_URL,
-                                     pcodex.OPENAI_CLIENT_ID, pcodex._persist_openai_creds,
+        tok = pcodex._oauth_ensure_token(T, self.creds, pcodex.OPENAI_TOKEN_URL,
+                                     pcodex.OPENAI_CLIENT_ID, lambda: pcodex._persist_openai_creds(T),
                                      margin=3600)
         self.assertEqual(tok, "at-4", "hard-expired refreshes regardless of throttle")
 
@@ -5710,9 +5732,9 @@ class TestOAuthMachinery(unittest.TestCase):
         # poll_gpt's 401 escape hatch must adopt it without a restart.
         seed_openai_creds(refresh_token="rt-new", access_token="at-new",
                           account_id="acct-new")
-        pcodex._openai_pool = {"gpt": {"refresh_token": "rt-dead", "access_token": "",
+        pcodex._st(T).pool = {"gpt": {"refresh_token": "rt-dead", "access_token": "",
                                    "expires_at": 0, "account_id": "acct-old"}}
-        pcodex._openai_pool_shape = "legacy"
+        pcodex._st(T).pool_shape = "legacy"
         pin_openai_cache_mtime()  # defeat the mtime auto-adopt; force the 401 path
         self._patch_refuse(401)  # the rt-dead refresh 401s
         seen = {}
@@ -5721,7 +5743,7 @@ class TestOAuthMachinery(unittest.TestCase):
             seen["tok"], seen["acct"] = tok, acct_id
             return wham_usage(primary=9.0)
         patch_codex_reads(self, fake_usage)
-        res = pcodex.poll_gpt()
+        res = pcodex.poll_gpt(T)
         self.assertEqual(res["ok"], 1)
         self.assertEqual(seen["tok"], "at-new")
         self.assertEqual(seen["acct"], "acct-new")
@@ -5736,7 +5758,7 @@ class TestGptMemberUsableIntegration(HTTPBase):
         ex._classes = load_classes(frontier_cfg())
         reset(acct(ACCT_A, 41, caps={"Opus": 55}), acct(ACCT_B, 30, caps={"Opus": 20}),
               kimi_result(five_hour=8.0, weekly=2.0), gpt_result(weekly=12.0))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
 
     def tearDown(self):
         ex._classes = []
@@ -5768,19 +5790,19 @@ class TestOpenAICredsPool(unittest.TestCase):
 
     def test_legacy_dict_is_a_pool_of_one_named_gpt(self):
         seed_openai_creds()
-        pool = pcodex._load_openai_creds()
+        pool = pcodex._load_openai_creds(T)
         self.assertEqual(set(pool), {"gpt"})
         self.assertEqual(pool["gpt"]["refresh_token"], "rt-test-1")
-        self.assertEqual(pcodex._openai_pool_shape, "legacy")
-        self.assertIsNone(pcodex._openai_account_names(),
+        self.assertEqual(pcodex._st(T).pool_shape, "legacy")
+        self.assertIsNone(pcodex._openai_account_names(T),
                           "legacy shape = single-target poll mode")
 
     def test_array_form_keys_by_name(self):
         seed_openai_pool({"name": "gpt-a"}, {"name": "gpt-b"})
-        pool = pcodex._load_openai_creds()
+        pool = pcodex._load_openai_creds(T)
         self.assertEqual(set(pool), {"gpt-a", "gpt-b"})
-        self.assertEqual(pcodex._openai_pool_shape, "array")
-        self.assertEqual(pcodex._openai_account_names(), ["gpt-a", "gpt-b"])
+        self.assertEqual(pcodex._st(T).pool_shape, "array")
+        self.assertEqual(pcodex._openai_account_names(T), ["gpt-a", "gpt-b"])
 
     def test_array_entries_validated_and_collisions_skipped(self):
         reset()  # installs ACCT_A/ACCT_B into psub._creds
@@ -5790,34 +5812,34 @@ class TestOpenAICredsPool(unittest.TestCase):
                          {"name": "gpt-a"},                  # duplicate
                          {"name": ACCT_A},                   # anthropic collision
                          {"name": "kimi"})                   # provider collision
-        pool = pcodex._load_openai_creds()
+        pool = pcodex._load_openai_creds(T)
         self.assertEqual(set(pool), {"gpt-a"})
 
     def test_out_of_band_rewrite_adopted_via_mtime(self):
         seed_openai_creds()
-        self.assertEqual(set(pcodex._load_openai_creds()), {"gpt"})
+        self.assertEqual(set(pcodex._load_openai_creds(T)), {"gpt"})
         # Operator converts legacy -> array to add an account: next non-force
         # load must see it — live adoption, no restart, no force flag.
         seed_openai_pool({"name": "gpt-a"}, {"name": "gpt-b"})
-        pcodex._openai_pool = {"gpt": {"refresh_token": "stale"}}  # warm wrong cache
-        self.assertEqual(set(pcodex._load_openai_creds()), {"gpt-a", "gpt-b"})
+        pcodex._st(T).pool = {"gpt": {"refresh_token": "stale"}}  # warm wrong cache
+        self.assertEqual(set(pcodex._load_openai_creds(T)), {"gpt-a", "gpt-b"})
 
     def test_persist_preserves_legacy_shape(self):
         seed_openai_creds()
-        pool = pcodex._load_openai_creds()
+        pool = pcodex._load_openai_creds(T)
         pool["gpt"]["refresh_token"] = "rt-rotated"
-        pcodex._persist_openai_creds()
-        with open(pcodex.OPENAI_CODEX_CREDS_FILE) as f:
+        pcodex._persist_openai_creds(T)
+        with open(pcodex._st(T).file) as f:
             on_disk = json.load(f)
         self.assertIsInstance(on_disk, dict, "legacy file must NEVER become a list")
         self.assertEqual(on_disk["refresh_token"], "rt-rotated")
 
     def test_persist_preserves_array_shape_and_sibling_chains(self):
         seed_openai_pool({"name": "gpt-a"}, {"name": "gpt-b"})
-        pool = pcodex._load_openai_creds()
+        pool = pcodex._load_openai_creds(T)
         pool["gpt-a"]["refresh_token"] = "rt-a-rotated"
-        pcodex._persist_openai_creds()
-        with open(pcodex.OPENAI_CODEX_CREDS_FILE) as f:
+        pcodex._persist_openai_creds(T)
+        with open(pcodex._st(T).file) as f:
             on_disk = json.load(f)
         self.assertIsInstance(on_disk, list)
         by_name = {e["name"]: e for e in on_disk}
@@ -5833,7 +5855,7 @@ class TestOpenAICredsPool(unittest.TestCase):
             seen["tok"], seen["acct"] = tok, acct_id
             return wham_usage(primary=7.0)
         patch_codex_reads(self, fake_usage)
-        res = pcodex.poll_gpt(account="gpt-b")
+        res = pcodex.poll_gpt(T, account="gpt-b")
         self.assertEqual(res["ok"], 1)
         self.assertEqual(res["name"], "gpt-b")
         self.assertEqual(res["provider"], "gpt")
@@ -5843,7 +5865,7 @@ class TestOpenAICredsPool(unittest.TestCase):
 
     def test_poll_gpt_unknown_account_fails_loud(self):
         seed_openai_pool({"name": "gpt-a"})
-        res = pcodex.poll_gpt(account="gpt-nope")
+        res = pcodex.poll_gpt(T, account="gpt-nope")
         self.assertEqual(res["ok"], 0)
         self.assertEqual(res["name"], "gpt-nope", "the target keeps its identity")
         self.assertIn("no codex creds", res["err"])
@@ -5854,64 +5876,64 @@ class TestProviderPoolPolicy(unittest.TestCase):
     provider:<id>, over each provider's polled targets."""
 
     def pool_state(self, pid="gpt"):
-        with ex._plock:
-            return dict(ex._preferred["providers"].get(pid) or {})
+        with T.plock:
+            return dict(T.preferred["providers"].get(pid) or {})
 
     def age_pools(self, seconds=ex.SW_DWELL + 100):
-        with ex._plock:
-            for s in ex._preferred["providers"].values():
+        with T.plock:
+            for s in T.preferred["providers"].values():
                 s["last_switch"] = time.time() - seconds
 
     def test_pool_of_one_bootstraps_and_stays(self):
         reset(gpt_result(weekly=12.0))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(self.pool_state()["account"], "gpt")
         self.age_pools()
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(self.pool_state()["account"], "gpt")
 
     def test_bootstrap_picks_coolest(self):
         reset(gpt_result(weekly=60.0, name="gpt-a"), gpt_result(weekly=10.0, name="gpt-b"))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(self.pool_state()["account"], "gpt-b")
 
     def test_incumbent_wins_until_forced(self):
         reset(gpt_result(weekly=10.0, name="gpt-a"), gpt_result(weekly=60.0, name="gpt-b"))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(self.pool_state()["account"], "gpt-a")
         # a is warmer now but below HIGH — no drift toward the cooler account
-        with ex._lock:
-            ex._state["gpt-a"] = gpt_result(weekly=70.0, name="gpt-a")
-            ex._state["gpt-b"] = gpt_result(weekly=20.0, name="gpt-b")
+        with T.lock:
+            T.state["gpt-a"] = gpt_result(weekly=70.0, name="gpt-a")
+            T.state["gpt-b"] = gpt_result(weekly=20.0, name="gpt-b")
         self.age_pools()
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(self.pool_state()["account"], "gpt-a")
 
     def test_hot_plus_margin_evicts_to_coolest(self):
         reset(gpt_result(weekly=10.0, name="gpt-a"), gpt_result(weekly=20.0, name="gpt-b"))
-        ex.compute_preferred()
-        with ex._lock:
-            ex._state["gpt-a"] = gpt_result(weekly=ex.SW_HIGH + 5, name="gpt-a")
+        ex.compute_preferred(T)
+        with T.lock:
+            T.state["gpt-a"] = gpt_result(weekly=ex.SW_HIGH + 5, name="gpt-a")
         self.age_pools()
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(self.pool_state()["account"], "gpt-b")
 
     def test_dwell_gates_the_flip(self):
         reset(gpt_result(weekly=10.0, name="gpt-a"), gpt_result(weekly=20.0, name="gpt-b"))
-        ex.compute_preferred()
-        with ex._plock:  # bootstrap leaves last_switch=0; simulate a recent switch
-            ex._preferred["providers"]["gpt"]["last_switch"] = time.time()
-        with ex._lock:
-            ex._state["gpt-a"] = gpt_result(weekly=ex.SW_HIGH + 5, name="gpt-a")
-        ex.compute_preferred()  # dwell has NOT elapsed
+        ex.compute_preferred(T)
+        with T.plock:  # bootstrap leaves last_switch=0; simulate a recent switch
+            T.preferred["providers"]["gpt"]["last_switch"] = time.time()
+        with T.lock:
+            T.state["gpt-a"] = gpt_result(weekly=ex.SW_HIGH + 5, name="gpt-a")
+        ex.compute_preferred(T)  # dwell has NOT elapsed
         self.assertEqual(self.pool_state()["account"], "gpt-a")
         self.age_pools()
-        ex.compute_preferred()  # dwell elapsed -> eviction proceeds
+        ex.compute_preferred(T)  # dwell elapsed -> eviction proceeds
         self.assertEqual(self.pool_state()["account"], "gpt-b")
 
     def test_kimi_is_a_pool_of_one_through_the_same_path(self):
         reset(kimi_result())
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(self.pool_state("kimi")["account"], "kimi")
 
     def test_member_backing_follows_pool_incumbent(self):
@@ -5919,12 +5941,12 @@ class TestProviderPoolPolicy(unittest.TestCase):
         self.addCleanup(setattr, ex, "_classes", [])
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30),
               gpt_result(weekly=10.0, name="gpt-a"), gpt_result(weekly=60.0, name="gpt-b"))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         member = next(m for m in ex._classes[0]["members"] if m.get("provider") == "gpt")
-        with ex._lock:
-            snap = list(ex._state.values())
-        with ex._plock:
-            backing = ex._member_backing(member, snap)
+        with T.lock:
+            snap = list(T.state.values())
+        with T.plock:
+            backing = ex._member_backing(T, member, snap)
             self.assertEqual(backing["name"], "gpt-a", "the pool incumbent speaks")
         v = class_verdicts()["gpt/gpt-5.6"]
         self.assertEqual((v["account"], v["effective"]), ("gpt-a", 10.0),
@@ -5932,10 +5954,10 @@ class TestProviderPoolPolicy(unittest.TestCase):
 
     def test_state_v4_roundtrip_and_rollback_view(self):
         reset(gpt_result(weekly=12.0, name="gpt-a"), gpt_result(weekly=50.0, name="gpt-b"))
-        ex.compute_preferred()
-        with ex._plock:
-            ex._save_state()
-        with open(ex.STATE_FILE) as f:
+        ex.compute_preferred(T)
+        with T.plock:
+            ex._save_state(T)
+        with open(T.state_file) as f:
             saved = json.load(f)
         self.assertEqual(saved["providers"]["gpt"]["account"], "gpt-a")
         # roll-forward restore keeps the incumbent; unconfigured providers drop
@@ -5974,7 +5996,7 @@ class TestOpenAITokenPool(HTTPBase):
     def test_no_param_follows_pool_incumbent(self):
         seed_openai_pool({"name": "gpt-a"}, {"name": "gpt-b"})
         reset(gpt_result(weekly=60.0, name="gpt-a"), gpt_result(weekly=10.0, name="gpt-b"))
-        ex.compute_preferred()  # bootstrap -> coolest = gpt-b
+        ex.compute_preferred(T)  # bootstrap -> coolest = gpt-b
         code, d = self.get("/openai-token", key="test-switch-key")
         self.assertEqual(code, 200)
         self.assertEqual(d["name"], "gpt-b")
@@ -5998,7 +6020,7 @@ class TestPoolPayloadAndMetrics(HTTPBase):
         self.addCleanup(setattr, ex, "_classes", [])
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30), kimi_result(),
               gpt_result(weekly=10.0, name="gpt-a"), gpt_result(weekly=60.0, name="gpt-b"))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
 
     def test_preferred_publishes_member_incumbents(self):
         _, p = self.get("/preferred")
@@ -6018,16 +6040,16 @@ class TestPoolPayloadAndMetrics(HTTPBase):
         self.assertEqual(p["providers"]["kimi"]["pool"], {"kimi": 8.0})
 
     def test_render_emits_legacy_series_once_per_provider(self):
-        t = ex.render()
+        t = ex.render([T])
         gpt_eff = [ln for ln in t.splitlines()
-                   if ln.startswith('provider_effective_percent{provider="gpt"}')]
+                   if ln.startswith(f'provider_effective_percent{{tenant="{T.id}",provider="gpt"}}')]
         self.assertEqual(len(gpt_eff), 1,
                          "duplicate samples of one series kill the whole scrape")
         self.assertEqual(float(gpt_eff[0].rsplit(" ", 1)[1]), 10.0,
                          "the legacy series speaks with the incumbent's numbers")
 
     def test_render_emits_per_account_family(self):
-        t = ex.render()
+        t = ex.render([T])
 
         def val(metric, **labels):
             want = [f'{k}="{v}"' for k, v in labels.items()]
@@ -6051,14 +6073,9 @@ class TestPoolPayloadAndMetrics(HTTPBase):
 # ---- #72 unified provider auth ----------------------------------------------
 
 def clear_kimi_creds():
-    """Remove the enrolled kimi key file and reset the module's mtime cache so
-    _kimi_key() falls back to the (test-empty) env var."""
-    pkimi._kimi_file_key = None
-    pkimi._kimi_file_mtime = None
-    try:
-        os.remove(pkimi.KIMI_CREDS_FILE)
-    except FileNotFoundError:
-        pass
+    """Remove the tenant's enrolled kimi key file and reset the watcher, so
+    _kimi_key() reads no key."""
+    set_kimi_key(None)
 
 
 def fake_id_token(account_id="ws-uuid-1"):
@@ -6076,7 +6093,7 @@ class AuthHTTP(HTTPBase):
     way it found them."""
 
     def post(self, path, obj, key=None):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}",
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{tp(path)}",
                                      data=json.dumps(obj).encode(), method="POST")
         req.add_header("Content-Type", "application/json")
         if key:
@@ -6089,8 +6106,8 @@ class AuthHTTP(HTTPBase):
             return e.code, (json.loads(body) if body else None)
 
     def setUp(self):
-        ex._reauth_pending.clear()
-        self.addCleanup(ex._reauth_pending.clear)
+        T.reauth_pending.clear()
+        self.addCleanup(T.reauth_pending.clear)
         self.addCleanup(clear_openai_creds)
         self.addCleanup(clear_kimi_creds)
 
@@ -6139,7 +6156,7 @@ class TestAuthRegistryShape(unittest.TestCase):
         self.assertEqual(ex.PROVIDERS["kimi"]["auth"]["custody"]["rotation"], "none")
 
     def test_declared_data_is_json_serializable_without_callables(self):
-        payload = ex._auth_providers_payload(time.time())
+        payload = ex._auth_providers_payload(T, time.time())
         json.dumps(payload)  # a callable leaking in raises TypeError here
 
 
@@ -6150,7 +6167,7 @@ class TestPreferredProvidersRollbackSafety(AuthHTTP):
 
     def test_facade_never_reaches_the_preferred_payload(self):
         reset(acct(ACCT_A, 30), acct(ACCT_B, 45), kimi_result())
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         _, p = self.get("/preferred")
         self.assertNotIn("anthropic", p["providers"])
         self.assertLessEqual(set(p["providers"]), {"kimi", "gpt"})
@@ -6205,7 +6222,7 @@ class TestAuthProvidersEndpoint(AuthHTTP):
         # live anthropic tokens, pool refresh tokens, and the enrolled kimi key
         # must all be absent — fingerprints only.
         seed_openai_pool({"name": "gpt-a"})
-        pkimi._persist_kimi_key("sk-kimi-super-secret-123")
+        pkimi._persist_kimi_key(T, "sk-kimi-super-secret-123")
         code, d = self.get("/auth/providers", key="test-switch-key")
         blob = json.dumps(d)
         for secret in ("r-" + ACCT_A, "tok-" + ACCT_A, "rt-gpt-a", "at-gpt-a",
@@ -6232,8 +6249,8 @@ class TestAuthProvidersEndpoint(AuthHTTP):
         self.addCleanup(setattr, ex, "urlopen", orig)
         ex.urlopen = lambda req, timeout=0: _Resp({"access_token": "fresh", "expires_in": 28800})
         with mock.patch.object(ex, "log", lambda m: None):
-            psub._refresh(ACCT_A, why="harness-login min_ttl=3600s")
-            psub._proxy_refused(ACCT_A, _fp("tok-" + ACCT_A))  # the copy the refresh revoked
+            psub._refresh(T, ACCT_A, why="harness-login min_ttl=3600s")
+            psub._proxy_refused(T, ACCT_A, _fp("tok-" + ACCT_A))  # the copy the refresh revoked
         row = self.anthropic_row()
         ref = row["proxy_refusal"]
         self.assertEqual(set(ref), {"at", "fp", "matched_current"})
@@ -6241,7 +6258,7 @@ class TestAuthProvidersEndpoint(AuthHTTP):
         self.assertIsNone(row["served_at"], "refused, and not served since: still refused")
         self.assertEqual(set(row["last_refresh"]), {"at", "why"})
         self.assertEqual(row["last_refresh"]["why"], "harness-login min_ttl=3600s")
-        self.assertEqual(row["token_expires_at"], psub._creds[ACCT_A]["expires_at"])
+        self.assertEqual(row["token_expires_at"], psub._st(T).creds[ACCT_A]["expires_at"])
         self.assertEqual(row["health"], "ok")
         # The proxy's retry on the fresh token is served: the refusal is behind it.
         [(res, why)], _ = post_reports(served(1, at=ref["at"] + 1))
@@ -6255,20 +6272,20 @@ class TestAuthProvidersEndpoint(AuthHTTP):
         self.assertEqual(self.anthropic_row()["served_at"], row["served_at"])
 
     def test_a_refusal_changes_no_health_and_nothing_public(self):
-        before = {a["name"]: a["health"] for a in psub._anthropic_auth_status(time.time())}
+        before = {a["name"]: a["health"] for a in psub._anthropic_auth_status(T, time.time())}
         with mock.patch.object(ex, "log", lambda m: None):
-            psub._proxy_refused(ACCT_A, _fp("a-stale-copy"))
+            psub._proxy_refused(T, ACCT_A, _fp("a-stale-copy"))
             with mock.patch.object(psub, "_get", lambda path, token: {}):
-                psub._proxy_refused(ACCT_B, _fp("tok-" + ACCT_B))
-        rows = psub._anthropic_auth_status(time.time())
+                psub._proxy_refused(T, ACCT_B, _fp("tok-" + ACCT_B))
+        rows = psub._anthropic_auth_status(T, time.time())
         self.assertEqual({a["name"]: a["health"] for a in rows}, before)
         self.assertEqual(set(before.values()), {"ok"})
-        self.assertEqual(ex._account_health([ACCT_A, ACCT_B], time.time())["worst"], "ok")
+        self.assertEqual(ex._account_health(T, [ACCT_A, ACCT_B], time.time())["worst"], "ok")
         allowed = set(ex._HEALTH_ROW_KEYS) | {"provider"}
-        for a in ex._unified_account_health(time.time())["accounts"]:
+        for a in ex._unified_account_health(T, time.time())["accounts"]:
             self.assertLessEqual(set(a), allowed, a["name"])
-        with ex._poll_health_lock:
-            ex._poll_schedule.clear()
+        with T.poll_health_lock:
+            T.poll_schedule.clear()
 
 
 class TestReauthAliasFrozen(AuthHTTP):
@@ -6278,19 +6295,19 @@ class TestReauthAliasFrozen(AuthHTTP):
 
     def test_reauth_begin_mints_an_anthropic_reauth_grant(self):
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30))
-        _, state = psub._reauth_begin(ACCT_A)
-        g = ex._reauth_pending[state]
+        _, state = psub._reauth_begin(T, ACCT_A)
+        g = T.reauth_pending[state]
         self.assertEqual(g["provider"], "anthropic")
         self.assertEqual(g["mode"], "reauth")
         self.assertEqual(g["state"], state)
 
     def test_reauth_complete_refuses_a_foreign_providers_state(self):
-        _, state = pkimi._kimi_auth_begin()
+        _, state = pkimi._kimi_auth_begin(T)
         code, d = self.post("/reauth/complete", {"state": state, "code": "c"},
                             key="test-switch-key")
         self.assertEqual(code, 422)
         self.assertIn("started for kimi", d["error"])
-        self.assertNotIn(state, ex._reauth_pending, "consumed even on refusal — one-shot")
+        self.assertNotIn(state, T.reauth_pending, "consumed even on refusal — one-shot")
 
 
 class TestAuthPendingIsolation(AuthHTTP):
@@ -6298,7 +6315,7 @@ class TestAuthPendingIsolation(AuthHTTP):
     never complete on another, and every take is one-shot."""
 
     def test_cross_provider_complete_422s(self):
-        _, state = pkimi._kimi_auth_begin()
+        _, state = pkimi._kimi_auth_begin(T)
         code, d = self.post("/auth/gpt/complete", {"state": state,
                                                    "name": "gpt-b", "redirect_url": "x"},
                             key="test-switch-key")
@@ -6306,7 +6323,7 @@ class TestAuthPendingIsolation(AuthHTTP):
         self.assertIn("started for kimi", d["error"])
 
     def test_grants_are_one_shot(self):
-        _, state = pkimi._kimi_auth_begin()
+        _, state = pkimi._kimi_auth_begin(T)
         self.post("/auth/kimi/complete", {"state": state, "api_key": ""},
                   key="test-switch-key")
         code, d = self.post("/auth/kimi/complete", {"state": state, "api_key": "x"},
@@ -6336,10 +6353,10 @@ class TestAnthropicEnrollAppends(AuthHTTP):
     def setUp(self):
         super().setUp()
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30))
-        with open(psub.ACCOUNTS_FILE, "w") as f:
+        with open(psub._st(T).file, "w") as f:
             json.dump([{"name": ACCT_A, "refresh_token": "old-rt-a"},
                        {"name": ACCT_B, "refresh_token": "old-rt-b"}], f)
-        self.addCleanup(os.remove, psub.ACCOUNTS_FILE)
+        self.addCleanup(os.remove, psub._st(T).file)
 
     def _stub_exchange(self, email):
         orig = ex.urlopen
@@ -6362,11 +6379,11 @@ class TestAnthropicEnrollAppends(AuthHTTP):
                             key="test-switch-key")
         self.assertEqual(code, 200, r)
         self.assertEqual(r, {"account": self.NEW, "enrolled": True, "reauthorized": False})
-        arr = json.load(open(psub.ACCOUNTS_FILE))
+        arr = json.load(open(psub._st(T).file))
         self.assertEqual([a["name"] for a in arr], [ACCT_A, ACCT_B, self.NEW])
         self.assertEqual(arr[2]["refresh_token"], "fresh-rt")
-        self.assertEqual(psub._creds[self.NEW]["refresh_token"], "fresh-rt")
-        self.assertEqual(psub._cred_generation[self.NEW], 1)
+        self.assertEqual(psub._st(T).creds[self.NEW]["refresh_token"], "fresh-rt")
+        self.assertEqual(psub._st(T).cred_generation[self.NEW], 1)
         self.assertTrue(ex._poll_wakeup.is_set(), "the new account is polled immediately")
 
     def test_add_mode_with_a_configured_email_splices_instead(self):
@@ -6378,7 +6395,7 @@ class TestAnthropicEnrollAppends(AuthHTTP):
                             {"state": d["state"], "code": "c"}, key="test-switch-key")
         self.assertEqual(code, 200, r)
         self.assertEqual(r, {"account": ACCT_A, "enrolled": False, "reauthorized": True})
-        arr = json.load(open(psub.ACCOUNTS_FILE))
+        arr = json.load(open(psub._st(T).file))
         self.assertEqual(len(arr), 2)
         self.assertEqual(arr[0]["refresh_token"], "fresh-rt")
 
@@ -6393,8 +6410,8 @@ class TestAnthropicEnrollAppends(AuthHTTP):
                             {"state": d["state"], "code": "c"}, key="test-switch-key")
         self.assertEqual(code, 422)
         self.assertIn("not a configured account", r["error"])
-        self.assertEqual(len(json.load(open(psub.ACCOUNTS_FILE))), 2)
-        self.assertNotIn("mallory@example.com", psub._creds)
+        self.assertEqual(len(json.load(open(psub._st(T).file))), 2)
+        self.assertNotIn("mallory@example.com", psub._st(T).creds)
 
     def test_begin_with_unknown_account_404s(self):
         code, _ = self.post("/auth/anthropic/begin", {"account": "nobody@x"},
@@ -6410,7 +6427,7 @@ class TestAnthropicEnrollAppends(AuthHTTP):
                             {"state": d["state"], "code": "c"}, key="test-switch-key")
         self.assertEqual(code, 422)
         self.assertIn("collides", r["error"])
-        self.assertEqual(len(json.load(open(psub.ACCOUNTS_FILE))), 2)
+        self.assertEqual(len(json.load(open(psub._st(T).file))), 2)
 
     def test_missing_code_is_a_422_not_a_burned_exchange(self):
         _, d = self.post("/auth/anthropic/begin", {}, key="test-switch-key")
@@ -6425,7 +6442,7 @@ class TestCodexEnrollBegin(AuthHTTP):
     ASSUMED, fail-visible), minted against the shared grant store."""
 
     def test_begin_mints_the_codex_cli_authorize_url(self):
-        url, state = pcodex._codex_auth_begin()
+        url, state = pcodex._codex_auth_begin(T)
         self.assertTrue(url.startswith(pcodex.CODEX_AUTHORIZE + "?"))
         q = {k: v[0] for k, v in
              urllib.parse.parse_qs(urllib.parse.urlparse(url).query).items()}
@@ -6436,7 +6453,7 @@ class TestCodexEnrollBegin(AuthHTTP):
         self.assertEqual(q["code_challenge_method"], "S256")
         self.assertEqual(q["codex_cli_simplified_flow"], "true")
         self.assertEqual(q["id_token_add_organizations"], "false")
-        g = ex._reauth_pending[state]
+        g = T.reauth_pending[state]
         self.assertEqual((g["provider"], g["mode"]), ("gpt", "add"))
 
     def test_begin_against_a_pool_name_is_reauth_mode(self):
@@ -6484,11 +6501,11 @@ class TestCodexEnrollComplete(AuthHTTP):
         self._stub({"refresh_token": "rt-new", "access_token": "at-new",
                     "expires_in": 600, "id_token": fake_id_token("ws-42")},
                    probe=lambda tok, acct: wham_usage(primary=12.0))
-        _, state = pcodex._codex_auth_begin()
+        _, state = pcodex._codex_auth_begin(T)
         code, r = self._complete(state)
         self.assertEqual(code, 200, r)
         self.assertEqual(r, {"account": "gpt-b", "enrolled": True, "reauthorized": False})
-        on_disk = json.load(open(pcodex.OPENAI_CODEX_CREDS_FILE))
+        on_disk = json.load(open(pcodex._st(T).file))
         self.assertIsInstance(on_disk, list, "a fresh enrollment persists ARRAY form")
         entry = on_disk[0]
         self.assertEqual((entry["name"], entry["refresh_token"], entry["account_id"]),
@@ -6496,7 +6513,7 @@ class TestCodexEnrollComplete(AuthHTTP):
         self.assertEqual(self.exchanges[0]["grant_type"], "authorization_code")
         self.assertEqual(self.exchanges[0]["redirect_uri"], pcodex.CODEX_REDIRECT)
         self.assertTrue(ex._poll_wakeup.is_set())
-        self.assertIn("gpt-b", ex._provider_poll_targets(),
+        self.assertIn("gpt-b", ex._provider_poll_targets(T),
                       "the new chain becomes a poll target immediately")
 
     def test_probe_is_the_pollers_free_get(self):
@@ -6518,7 +6535,7 @@ class TestCodexEnrollComplete(AuthHTTP):
                              "id_token": fake_id_token("ws-42")})
             return Resp(wham_usage(primary=12.0))
         ex.urlopen = fake
-        _, state = pcodex._codex_auth_begin()
+        _, state = pcodex._codex_auth_begin(T)
         code, r = self._complete(state)
         self.assertEqual(code, 200, r)
         probe = seen[1]
@@ -6534,7 +6551,7 @@ class TestCodexEnrollComplete(AuthHTTP):
         self._stub({"refresh_token": "rt", "access_token": "at",
                     "id_token": fake_id_token()},
                    probe=lambda t, a: wham_usage(primary=100.0, allowed=False))
-        _, state = pcodex._codex_auth_begin()
+        _, state = pcodex._codex_auth_begin(T)
         code, r = self._complete(state)
         self.assertEqual(code, 200, r)
 
@@ -6546,15 +6563,15 @@ class TestCodexEnrollComplete(AuthHTTP):
             with self.subTest(why=why):
                 self._stub({"refresh_token": "rt", "access_token": "at",
                             "id_token": fake_id_token()}, probe=probe)
-                _, state = pcodex._codex_auth_begin()
+                _, state = pcodex._codex_auth_begin(T)
                 code, r = self._complete(state)
                 self.assertEqual(code, 422)
                 self.assertIn(why, r["error"])
-                self.assertFalse(os.path.exists(pcodex.OPENAI_CODEX_CREDS_FILE))
+                self.assertFalse(os.path.exists(pcodex._st(T).file))
 
     def test_bad_name_fails_before_the_exchange(self):
         self._stub({}, probe=lambda t, a: {})
-        _, state = pcodex._codex_auth_begin()
+        _, state = pcodex._codex_auth_begin(T)
         code, r = self._complete(state, name="Bad Name!")
         self.assertEqual(code, 422)
         self.assertIn("lowercase", r["error"])
@@ -6567,54 +6584,54 @@ class TestCodexEnrollComplete(AuthHTTP):
         # Emails fail the charset gate outright ("@"); the collision check
         # guards regex-passing names, so plant one in the live cache.
         self._stub({}, probe=lambda t, a: {})
-        psub._creds["weird"] = {"refresh_token": "r", "access_token": None, "expires_at": 0}
-        self.addCleanup(psub._creds.pop, "weird", None)
-        _, state = pcodex._codex_auth_begin()
+        psub._st(T).creds["weird"] = {"refresh_token": "r", "access_token": None, "expires_at": 0}
+        self.addCleanup(psub._st(T).creds.pop, "weird", None)
+        _, state = pcodex._codex_auth_begin(T)
         code, r = self._complete(state, name="weird")
         self.assertEqual(code, 422)
         self.assertIn("collides", r["error"])
 
     def test_url_without_code_422s(self):
         self._stub({}, probe=lambda t, a: {})
-        _, state = pcodex._codex_auth_begin()
+        _, state = pcodex._codex_auth_begin(T)
         code, r = self._complete(state, code=None)
         self.assertEqual(code, 422)
         self.assertIn("no ?code=", r["error"])
 
     def test_url_from_another_attempt_422s(self):
         self._stub({}, probe=lambda t, a: {})
-        _, state = pcodex._codex_auth_begin()
+        _, state = pcodex._codex_auth_begin(T)
         code, r = self._complete(state, url_state="other-state")
         self.assertEqual(code, 422)
         self.assertIn("different attempt", r["error"])
 
     def test_exchange_refusal_persists_nothing(self):
         self._stub(tok_error=400)
-        _, state = pcodex._codex_auth_begin()
+        _, state = pcodex._codex_auth_begin(T)
         code, r = self._complete(state)
         self.assertEqual(code, 422)
         self.assertIn("nothing was saved", r["error"])
-        self.assertFalse(os.path.exists(pcodex.OPENAI_CODEX_CREDS_FILE))
+        self.assertFalse(os.path.exists(pcodex._st(T).file))
 
     def test_missing_workspace_claim_persists_nothing(self):
         self._stub({"refresh_token": "rt", "access_token": "at", "id_token": "junk"},
                    probe=lambda t, a: {})
-        _, state = pcodex._codex_auth_begin()
+        _, state = pcodex._codex_auth_begin(T)
         code, r = self._complete(state)
         self.assertEqual(code, 422)
         self.assertIn("chatgpt_account_id", r["error"])
-        self.assertFalse(os.path.exists(pcodex.OPENAI_CODEX_CREDS_FILE))
+        self.assertFalse(os.path.exists(pcodex._st(T).file))
 
     def test_failing_probe_persists_nothing(self):
         def probe_500(tok, acct):
             raise urllib.error.HTTPError("u", 500, "boom", None, None)
         self._stub({"refresh_token": "rt", "access_token": "at",
                     "id_token": fake_id_token()}, probe=probe_500)
-        _, state = pcodex._codex_auth_begin()
+        _, state = pcodex._codex_auth_begin(T)
         code, r = self._complete(state)
         self.assertEqual(code, 422)
         self.assertIn("nothing was saved", r["error"])
-        self.assertFalse(os.path.exists(pcodex.OPENAI_CODEX_CREDS_FILE))
+        self.assertFalse(os.path.exists(pcodex._st(T).file))
 
 
 class TestCodexEnrollShapeConversion(unittest.TestCase):
@@ -6632,67 +6649,66 @@ class TestCodexEnrollShapeConversion(unittest.TestCase):
 
     def test_growing_a_legacy_pool_converts_to_array(self):
         seed_openai_creds()
-        pcodex._load_openai_creds(force=True)
-        replaced = pcodex._codex_pool_enroll(self.entry("gpt-b"))
+        pcodex._load_openai_creds(T, force=True)
+        replaced = pcodex._codex_pool_enroll(T, self.entry("gpt-b"))
         self.assertFalse(replaced)
-        on_disk = json.load(open(pcodex.OPENAI_CODEX_CREDS_FILE))
+        on_disk = json.load(open(pcodex._st(T).file))
         self.assertIsInstance(on_disk, list)
         self.assertEqual({e["name"] for e in on_disk}, {"gpt", "gpt-b"})
-        self.assertEqual(pcodex._openai_pool_shape, "array")
+        self.assertEqual(pcodex._st(T).pool_shape, "array")
 
     def test_reenrolling_the_sole_legacy_singleton_keeps_dict_shape(self):
         seed_openai_creds()
-        pcodex._load_openai_creds(force=True)
-        replaced = pcodex._codex_pool_enroll(self.entry("gpt"))
+        pcodex._load_openai_creds(T, force=True)
+        replaced = pcodex._codex_pool_enroll(T, self.entry("gpt"))
         self.assertTrue(replaced)
-        on_disk = json.load(open(pcodex.OPENAI_CODEX_CREDS_FILE))
+        on_disk = json.load(open(pcodex._st(T).file))
         self.assertIsInstance(on_disk, dict,
                               "repairing the singleton must stay rollback-neutral")
         self.assertEqual(on_disk["refresh_token"], "rt-gpt")
-        self.assertEqual(pcodex._openai_pool_shape, "legacy")
+        self.assertEqual(pcodex._st(T).pool_shape, "legacy")
 
     def test_enrolling_into_an_array_pool_stays_array(self):
         seed_openai_pool({"name": "gpt-a"})
-        pcodex._load_openai_creds(force=True)
-        pcodex._codex_pool_enroll(self.entry("gpt-b"))
-        on_disk = json.load(open(pcodex.OPENAI_CODEX_CREDS_FILE))
+        pcodex._load_openai_creds(T, force=True)
+        pcodex._codex_pool_enroll(T, self.entry("gpt-b"))
+        on_disk = json.load(open(pcodex._st(T).file))
         self.assertEqual({e["name"] for e in on_disk}, {"gpt-a", "gpt-b"})
 
 
 class TestKimiEnrollAndKeySource(AuthHTTP):
-    """#72 — kimi's static key: file wins over env, enrollment validates by
+    """#72 — kimi's static key: the tenant's file and nothing else (no
+    process-wide key: a key belongs to a tenant), enrollment validates by
     probe before persisting, and the response says the proxy holds its own copy."""
 
     def setUp(self):
         super().setUp()
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30))
-        self._orig_key = pkimi.KIMI_API_KEY
         self._orig_usages = pkimi._get_kimi_usages
-        self.addCleanup(setattr, pkimi, "KIMI_API_KEY", self._orig_key)
         self.addCleanup(setattr, pkimi, "_get_kimi_usages", self._orig_usages)
         clear_kimi_creds()
 
-    def test_key_resolution_file_wins_over_env(self):
-        pkimi.KIMI_API_KEY = ""
-        self.assertEqual(pkimi._kimi_key(), "")
-        self.assertEqual(pkimi._kimi_key_source(), "none")
-        self.assertFalse(ex.PROVIDERS["kimi"]["enabled"]())
-        pkimi.KIMI_API_KEY = "sk-kimi-env"
-        self.assertEqual(pkimi._kimi_key(), "sk-kimi-env")
-        self.assertEqual(pkimi._kimi_key_source(), "env")
-        pkimi._persist_kimi_key("sk-kimi-file")
-        self.assertEqual(pkimi._kimi_key(), "sk-kimi-file")
-        self.assertEqual(pkimi._kimi_key_source(), "file")
+    def test_key_resolution_is_the_tenants_file(self):
+        self.assertEqual(pkimi._kimi_key(T), "")
+        self.assertEqual(pkimi._kimi_key_source(T), "none")
+        self.assertFalse(ex.PROVIDERS["kimi"]["enabled"](T))
+        self.assertFalse(hasattr(pkimi, "KIMI_API_KEY"), "no env fallback: a key belongs to a tenant")
+        pkimi._persist_kimi_key(T, "sk-kimi-file")
+        self.assertEqual(pkimi._kimi_key(T), "sk-kimi-file")
+        self.assertEqual(pkimi._kimi_key_source(T), "file")
+        other = new_tenant()
+        self.addCleanup(ex._registry.delete, other.id)
+        self.assertEqual(pkimi._kimi_key(other), "", "another tenant has no key of this one's")
+        self.assertFalse(ex.PROVIDERS["kimi"]["enabled"](other))
 
     def test_out_of_band_file_edit_is_adopted_live(self):
-        pkimi._persist_kimi_key("sk-kimi-one")
-        with open(pkimi.KIMI_CREDS_FILE, "w") as f:
+        pkimi._persist_kimi_key(T, "sk-kimi-one")
+        with open(pkimi._st(T).file, "w") as f:
             json.dump({"api_key": "sk-kimi-two"}, f)
-        os.utime(pkimi.KIMI_CREDS_FILE, (time.time() + 5, time.time() + 5))
-        self.assertEqual(pkimi._kimi_key(), "sk-kimi-two", "mtime guard adopts edits")
+        os.utime(pkimi._st(T).file, (time.time() + 5, time.time() + 5))
+        self.assertEqual(pkimi._kimi_key(T), "sk-kimi-two", "mtime guard adopts edits")
 
     def test_enroll_validates_then_persists(self):
-        pkimi.KIMI_API_KEY = ""
         probed = []
 
         def fake_usages(key):
@@ -6710,13 +6726,12 @@ class TestKimiEnrollAndKeySource(AuthHTTP):
         self.assertIn("SWITCH_KIMI_KEY", r["note"],
                       "the operator must learn the proxy holds its own copy")
         self.assertEqual(probed, ["sk-kimi-new"], "validated with the TRIMMED key")
-        self.assertEqual(json.load(open(pkimi.KIMI_CREDS_FILE)), {"api_key": "sk-kimi-new"})
-        self.assertEqual(pkimi._kimi_key(), "sk-kimi-new")
-        self.assertTrue(ex.PROVIDERS["kimi"]["enabled"]())
+        self.assertEqual(json.load(open(pkimi._st(T).file)), {"api_key": "sk-kimi-new"})
+        self.assertEqual(pkimi._kimi_key(T), "sk-kimi-new")
+        self.assertTrue(ex.PROVIDERS["kimi"]["enabled"](T))
         self.assertTrue(ex._poll_wakeup.is_set())
 
     def test_rejected_key_persists_nothing_and_never_echoes(self):
-        pkimi.KIMI_API_KEY = ""
 
         def refuse(key):
             raise urllib.error.HTTPError("u", 401, "no", None, None)
@@ -6728,10 +6743,9 @@ class TestKimiEnrollAndKeySource(AuthHTTP):
         self.assertEqual(code, 422)
         self.assertIn("401", r["error"])
         self.assertNotIn("sk-kimi-bogus", r["error"], "the key never rides an error")
-        self.assertFalse(os.path.exists(pkimi.KIMI_CREDS_FILE))
+        self.assertFalse(os.path.exists(pkimi._st(T).file))
 
     def test_junk_quota_payload_persists_nothing(self):
-        pkimi.KIMI_API_KEY = ""
         pkimi._get_kimi_usages = lambda key: {"whatever": True}
         _, d = self.post("/auth/kimi/begin", {}, key="test-switch-key")
         code, r = self.post("/auth/kimi/complete",
@@ -6739,7 +6753,7 @@ class TestKimiEnrollAndKeySource(AuthHTTP):
                             key="test-switch-key")
         self.assertEqual(code, 422)
         self.assertIn("no usable quota", r["error"])
-        self.assertFalse(os.path.exists(pkimi.KIMI_CREDS_FILE))
+        self.assertFalse(os.path.exists(pkimi._st(T).file))
 
     def test_empty_key_422s(self):
         _, d = self.post("/auth/kimi/begin", {}, key="test-switch-key")
@@ -6755,7 +6769,7 @@ class TestAuthPageServed(AuthHTTP):
     the markup never carries the switch key."""
 
     def test_page_is_served_and_key_free(self):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/auth",
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{TP}/auth",
                                      headers={"X-Switch-Key": "test-switch-key"})
         with urllib.request.urlopen(req, timeout=5) as r:
             self.assertIn("text/html", r.headers.get("Content-Type", ""))
@@ -6810,7 +6824,7 @@ class DocAPIBase(HTTPBase):
     def req(self, method, path, body=None, key=KEY, headers=None, raw=None):
         data = raw if raw is not None else (
             json.dumps(body).encode() if body is not None else None)
-        r = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}",
+        r = urllib.request.Request(f"http://127.0.0.1:{self.port}{tp(path)}",
                                    data=data, method=method)
         if key:
             r.add_header("X-Switch-Key", key)
@@ -6831,9 +6845,9 @@ class DocAPIBase(HTTPBase):
         ex._classes = ex._load_classes()
 
     def install_consumers(self, doc):
-        with open(ex.CONSUMERS_FILE, "w") as f:
+        with open(T.consumers_file, "w") as f:
             json.dump(doc, f)
-        ex._consumers = ex._load_consumers()
+        T.consumers = ex._load_consumers(T)
 
     def setUp(self):
         self.classes_path = os.path.join(_TMP, f"classes-{self.__class__.__name__}.json")
@@ -6846,31 +6860,31 @@ class DocAPIBase(HTTPBase):
                 pass
         for suffix in ("", ".history.jsonl"):
             try:
-                os.remove(ex.CONSUMERS_FILE + suffix)
+                os.remove(T.consumers_file + suffix)
             except FileNotFoundError:
                 pass
         self.install_classes(frontier_cfg())
-        ex._consumers = ex._load_consumers()  # absent file -> none
+        T.consumers = ex._load_consumers(T)  # absent file -> none
         reset(opus_acct(30, resets=True),
               provider_result("gpt", five_hour=8.0),
               kimi_result(five_hour=12.0, weekly=2.0))
-        with ex._plock:
-            ex._preferred["classes"] = {}
-        ex.compute_preferred()
+        with T.plock:
+            T.preferred["classes"] = {}
+        ex.compute_preferred(T)
 
     def tearDown(self):
         ex.CLASSES_FILE = self._old_classes_file
-        with ex._plock:
+        with T.plock:
             ex._classes = []
             ex._classes_doc = []
             ex._classes_warnings = []
-            ex._consumers = []
-            ex._consumers_doc = {"consumers": []}
-            ex._consumers_warnings = []
+            T.consumers = []
+            T.consumers_doc = {"consumers": []}
+            T.consumers_warnings = []
             ex._lane_settings = {}
-            ex._preferred["classes"] = {}
+            T.preferred["classes"] = {}
         try:
-            os.remove(ex.CONSUMERS_FILE)
+            os.remove(T.consumers_file)
         except FileNotFoundError:
             pass
 
@@ -7008,16 +7022,16 @@ class TestClassesValidate(DocAPIBase):
                 self.assertTrue(p["errors"])
 
     def test_live_effect_deletion_bindings_pins_windows(self):
-        code, p = ex._bind_class_session("frontier", "sess-le", time.time())
+        code, p = ex._bind_class_session(T, "frontier", "sess-le", time.time())
         self.assertEqual(code, 200)
-        with ex._plock:
-            ex._preferred["classes"]["frontier"]["pinned"] = "kimi/kimi-k3"
+        with T.plock:
+            T.preferred["classes"]["frontier"]["pinned"] = "kimi/kimi-k3"
         doc = [sonnet_class()]  # deletes frontier entirely
         p = self.validate(doc)
         eff = p["live_effect"]
         self.assertEqual(eff["deleted_classes"], ["frontier"])
         self.assertEqual(eff["new_classes"], ["beta"])
-        self.assertIn({"class": "frontier", "member": "kimi/kimi-k3"}, eff["invalidated_pins"])
+        self.assertIn({"tenant": T.id, "class": "frontier", "member": "kimi/kimi-k3"}, eff["invalidated_pins"])
         self.assertTrue(any(b["session"] == "sess-le" for b in eff["invalidated_bindings"]))
         # window change: raising opus's declared window moves the derived min to kimi's
         wider = frontier_cfg()
@@ -7031,7 +7045,7 @@ class TestClassesValidate(DocAPIBase):
         before = ex._doc_revision(ex._classes_doc)
         self.validate([sonnet_class()])
         self.assertEqual(ex._doc_revision(ex._classes_doc), before)
-        with ex._plock:
+        with T.plock:
             self.assertEqual([c["class"] for c in ex._classes], ["frontier"])
 
 
@@ -7070,10 +7084,10 @@ class TestClassesPut(DocAPIBase):
         self.assertEqual(hdrs.get("X-Doc-Revision"), p["revision"])
         with open(self.classes_path) as f:
             self.assertEqual(json.load(f), doc, "atomic write landed the exact document")
-        with ex._plock:
+        with T.plock:
             self.assertEqual([c["class"] for c in ex._classes], ["frontier", "beta"],
                              "hot-swap: live config replaced, no restart")
-            self.assertIn("beta", ex._preferred["classes"], "new class seeded fresh state")
+            self.assertIn("beta", T.preferred["classes"], "new class seeded fresh state")
         with open(self.classes_path + ".history.jsonl") as f:
             entries = [json.loads(line) for line in f]
         self.assertEqual(len(entries), 1)
@@ -7093,7 +7107,7 @@ class TestClassesPut(DocAPIBase):
         self.assertEqual(code, 409)
         self.assertEqual(p["revision"], rev, "the 409 body carries the CURRENT revision")
         self.assertEqual(hdrs.get("X-Doc-Revision"), rev)
-        with ex._plock:
+        with T.plock:
             self.assertEqual([c["class"] for c in ex._classes], ["frontier"])
         self.assertFalse(os.path.exists(self.classes_path + ".history.jsonl"),
                          "a refused write must not append history")
@@ -7160,37 +7174,37 @@ class TestClassesHotSwap(DocAPIBase):
                         headers={"If-Match": ex._doc_revision(ex._classes_doc)})
 
     def test_deleted_class_state_dropped_and_persisted(self):
-        ex._bind_class_session("frontier", "sess-hs", time.time())
+        ex._bind_class_session(T, "frontier", "sess-hs", time.time())
         code, _, _ = self.put([sonnet_class()])
         self.assertEqual(code, 200)
-        with ex._plock:
-            self.assertNotIn("frontier", ex._preferred["classes"],
+        with T.plock:
+            self.assertNotIn("frontier", T.preferred["classes"],
                              "deleted-class state dropped")
-            self.assertIn("beta", ex._preferred["classes"])
-        with open(ex.STATE_FILE) as f:
+            self.assertIn("beta", T.preferred["classes"])
+        with open(T.state_file) as f:
             persisted = json.load(f)
         self.assertNotIn("frontier", persisted["classes"],
                          "the drop is persisted — no zombie resurrection on restart")
 
     def test_removed_member_invalidates_binding_and_pin(self):
-        with ex._plock:
-            ex._preferred["classes"].setdefault("frontier", ex._new_class_state())
-            ex._preferred["classes"]["frontier"]["pinned"] = "kimi/kimi-k3"
-        ex._bind_class_session("frontier", "sess-rm", time.time())  # binds to the pin
+        with T.plock:
+            T.preferred["classes"].setdefault("frontier", ex._new_class_state())
+            T.preferred["classes"]["frontier"]["pinned"] = "kimi/kimi-k3"
+        ex._bind_class_session(T, "frontier", "sess-rm", time.time())  # binds to the pin
         self.assertEqual(bound_member("sess-rm"), "kimi/kimi-k3")
         no_kimi = frontier_cfg()
         no_kimi[0]["members"] = [m for m in no_kimi[0]["members"]
                                  if m.get("provider") != "kimi"]
         code, _, _ = self.put(no_kimi)
         self.assertEqual(code, 200)
-        with ex._plock:
-            cs = ex._preferred["classes"]["frontier"]
+        with T.plock:
+            cs = T.preferred["classes"]["frontier"]
             self.assertIsNone(cs["pinned"], "pin to a vanished member invalidated")
             self.assertNotIn("sess-rm", cs["sessions"],
                              "binding to a vanished member invalidated — the proxy rebinds")
 
     def test_surviving_binding_untouched(self):
-        ex._bind_class_session("frontier", "sess-keep", time.time())
+        ex._bind_class_session(T, "frontier", "sess-keep", time.time())
         member = bound_member("sess-keep")
         code, _, _ = self.put(frontier_cfg() + [sonnet_class()])
         self.assertEqual(code, 200)
@@ -7202,17 +7216,17 @@ class TestClassesHotSwap(DocAPIBase):
         under _plock at every setdefault site, so a deleted class 404s and
         leaves no zombie state behind for _save_state to persist."""
         self.put([sonnet_class()])  # frontier is gone
-        code, p = ex._bind_class_session("frontier", "sess-z", time.time())
+        code, p = ex._bind_class_session(T, "frontier", "sess-z", time.time())
         self.assertEqual(code, 404)
         self.assertEqual(p["classes"], ["beta"])
         code, _, _ = self.req("GET", "/class-pin?class=frontier&member=lane:opus")
         self.assertEqual(code, 404)
         code, _, _ = self.req("GET", "/class-bind?class=frontier&session=sess-z2")
         self.assertEqual(code, 404)
-        with ex._plock:
-            self.assertNotIn("frontier", ex._preferred["classes"],
+        with T.plock:
+            self.assertNotIn("frontier", T.preferred["classes"],
                              "no zombie state for the deleted class")
-        with open(ex.STATE_FILE) as f:
+        with open(T.state_file) as f:
             self.assertNotIn("frontier", json.load(f)["classes"])
 
 
@@ -7229,7 +7243,7 @@ class TestClassesReload(DocAPIBase):
         self.assertEqual(p["revision"], ex._doc_revision(doc))
         self.assertNotEqual(p["revision"], old_rev, "a hand edit changes the revision by construction")
         self.assertEqual(hdrs.get("X-Doc-Revision"), p["revision"])
-        with ex._plock:
+        with T.plock:
             self.assertEqual([c["class"] for c in ex._classes], ["frontier", "beta"])
         with open(self.classes_path + ".history.jsonl") as f:
             e = json.loads(f.readlines()[-1])
@@ -7253,7 +7267,7 @@ class TestClassesReload(DocAPIBase):
         code, p, _ = self.req("POST", "/classes/reload")
         self.assertEqual(code, 422)
         self.assertIn("live config kept", p["error"])
-        with ex._plock:
+        with T.plock:
             self.assertEqual([c["class"] for c in ex._classes], ["frontier"],
                              "reload must never wipe live routing over broken JSON")
         self.assertEqual(ex._doc_revision(ex._classes_doc), rev)
@@ -7285,7 +7299,7 @@ class TestConsumersDocAPI(DocAPIBase):
     def put(self, doc, if_match=None, reason="consumer edit", key=KEY):
         return self.req("PUT", "/consumers", body={"doc": doc, "reason": reason},
                         key=key,
-                        headers={"If-Match": if_match or ex._doc_revision(ex._consumers_doc)})
+                        headers={"If-Match": if_match or ex._doc_revision(T.consumers_doc)})
 
     def test_absent_file_empty_doc_zero_warnings(self):
         code, p, hdrs = self.req("GET", "/consumers")
@@ -7305,9 +7319,9 @@ class TestConsumersDocAPI(DocAPIBase):
         code, p, _ = self.put(consumers_doc())
         self.assertEqual(code, 200)
         self.assertEqual(p["revision"], ex._doc_revision(consumers_doc()))
-        with open(ex.CONSUMERS_FILE) as f:
+        with open(T.consumers_file) as f:
             self.assertEqual(json.load(f), consumers_doc())
-        with open(ex.CONSUMERS_FILE + ".history.jsonl") as f:
+        with open(T.consumers_file + ".history.jsonl") as f:
             self.assertEqual(json.loads(f.readline())["rev"], p["revision"])
         _, pref, _ = self.req("GET", "/preferred")
         ids = [c["id"] for c in pref["consumers"]]
@@ -7350,8 +7364,8 @@ class TestConsumersDocAPI(DocAPIBase):
         code, p, _ = self.put({"consumers": []}, if_match="feedfacefeedface")
         self.assertEqual(code, 409)
         self.assertEqual(p["revision"], ex._doc_revision(consumers_doc()))
-        with ex._plock:
-            self.assertEqual(len(ex._consumers), 2, "live consumers untouched")
+        with T.plock:
+            self.assertEqual(len(T.consumers), 2, "live consumers untouched")
 
     def test_validate_dry_run(self):
         doc = consumers_doc()
@@ -7360,20 +7374,20 @@ class TestConsumersDocAPI(DocAPIBase):
         self.assertTrue(p["ok"])
         self.assertEqual(p["would_revision"], ex._doc_revision(doc))
         self.assertEqual([c["id"] for c in p["derived"]], ["coding-harness", "gateway"])
-        with ex._plock:
-            self.assertEqual(ex._consumers, [], "validate mutates nothing")
+        with T.plock:
+            self.assertEqual(T.consumers, [], "validate mutates nothing")
 
     def test_reload_hand_edit(self):
         self.install_consumers(consumers_doc())
         edited = consumers_doc()
         edited["consumers"][0]["members"].append("lane:sonnet")
-        with open(ex.CONSUMERS_FILE, "w") as f:
+        with open(T.consumers_file, "w") as f:
             json.dump(edited, f)
         code, p, _ = self.req("POST", "/consumers/reload")
         self.assertEqual(code, 200)
         self.assertTrue(p["changed"])
         self.assertEqual(p["revision"], ex._doc_revision(edited))
-        with open(ex.CONSUMERS_FILE + ".history.jsonl") as f:
+        with open(T.consumers_file + ".history.jsonl") as f:
             e = json.loads(f.readlines()[-1])
         self.assertEqual(e["actor"], "hand-edit (reload)")
         _, pref, _ = self.req("GET", "/preferred")
@@ -7464,8 +7478,8 @@ class TestDocHistory(DocAPIBase):
 
     def test_consumers_history_after_put_and_reload(self):
         self.req("PUT", "/consumers", body={"doc": consumers_doc(), "reason": "seed"},
-                 headers={"If-Match": ex._doc_revision(ex._consumers_doc)})
-        with open(ex.CONSUMERS_FILE, "w") as f:
+                 headers={"If-Match": ex._doc_revision(T.consumers_doc)})
+        with open(T.consumers_file, "w") as f:
             json.dump({"consumers": []}, f)
         self.req("POST", "/consumers/reload", body={})
         code, p, _ = self.req("GET", "/consumers/history")
@@ -7510,7 +7524,7 @@ class TestPreferredConsumerContract(DocAPIBase):
         self.assertIsNone(pref["classes"]["frontier"]["consumer"])
 
     def test_typed_sessions_still_exposed(self):
-        ex._bind_class_session("frontier", "sess-ty", time.time())
+        ex._bind_class_session(T, "frontier", "sess-ty", time.time())
         _, pref, _ = self.req("GET", "/preferred")
         s = pref["classes"]["frontier"]["sessions"]["sess-ty"]
         for k in ("member", "since", "last_seen", "reason"):
@@ -7536,10 +7550,10 @@ class TestStanding(PayBase):
     """_account_standing: the golden shape, from today's readings."""
 
     def standing(self, name):
-        with ex._lock:
-            snap = list(ex._state.values())
-        with ex._plock:
-            return ex._policy_ctx(snap, time.time())["standings"][name]
+        with T.lock:
+            snap = list(T.state.values())
+        with T.plock:
+            return ex._policy_ctx(T, snap, time.time())["standings"][name]
 
     def test_anthropic_shape(self):
         reset(opus_spent())
@@ -7612,8 +7626,8 @@ class TestStanding(PayBase):
 
     def test_never_measured_and_next_poll(self):
         reset(acct(ACCT_A, 10))
-        with ex._poll_health_lock:
-            ex._poll_schedule[ACCT_B] = time.time() + 600
+        with T.poll_health_lock:
+            T.poll_schedule[ACCT_B] = time.time() + 600
         st = self.standing(ACCT_B)
         self.assertIsNone(st["as_of"], "in the creds cache, no reading yet")
         self.assertAlmostEqual(st["next_poll_at"], time.time() + 600, delta=2)
@@ -7656,7 +7670,7 @@ class TestPollBackoff(unittest.TestCase):
         outcomes = iter((dict(http=0, err="usage URLError: dns"),
                          dict(http=503, err="usage HTTP 503"), None))
 
-        def poll(prev, account=None):  # noqa: ARG001
+        def poll(t, prev, account=None):  # noqa: ARG001
             r = kimi_result()
             o = next(outcomes)
             if o:
@@ -7669,8 +7683,8 @@ class TestPollBackoff(unittest.TestCase):
         def wait(_t):
             raise Stop
 
-        for obj, attr, val in ((psub, "_load_creds", lambda: []),
-                               (ex, "_provider_poll_targets", lambda: {"kimi": ("kimi", None)}),
+        for obj, attr, val in ((psub, "_load_creds", lambda t: []),
+                               (ex, "_provider_poll_targets", lambda t: {"kimi": ("kimi", None)}),
                                (ex.PROVIDERS["kimi"], "poll", poll),
                                (ex._poll_wakeup, "wait", wait)):
             old = obj[attr] if isinstance(obj, dict) else getattr(obj, attr)
@@ -7680,30 +7694,30 @@ class TestPollBackoff(unittest.TestCase):
             else:
                 setattr(obj, attr, val)
                 self.addCleanup(setattr, obj, attr, old)
-        self.addCleanup(ex._poll_schedule.clear)
-        self.addCleanup(ex._poll_fails.clear)
+        self.addCleanup(T.poll_schedule.clear)
+        self.addCleanup(T.poll_fails.clear)
 
         def one_pass():
-            with ex._poll_health_lock:
-                ex._poll_schedule["kimi"] = 0
+            with T.poll_health_lock:
+                T.poll_schedule["kimi"] = 0
             t0 = time.time()
             with self.assertRaises(Stop):
                 ex.poller()
             return t0
 
         t0 = one_pass()
-        self.assertAlmostEqual(ex._poll_schedule["kimi"], t0 + ex.POLL_INTERVAL, delta=5,
+        self.assertAlmostEqual(T.poll_schedule["kimi"], t0 + ex.POLL_INTERVAL, delta=5,
                                msg="no HTTP response: the normal cadence")
         t0 = one_pass()
-        self.assertEqual(ex._poll_fails["kimi"], 2)
-        self.assertAlmostEqual(ex._poll_schedule["kimi"],
+        self.assertEqual(T.poll_fails["kimi"], 2)
+        self.assertAlmostEqual(T.poll_schedule["kimi"],
                                t0 + min(ex.POLL_INTERVAL * 4, ex.POLL_MAX_BACKOFF), delta=5)
-        with ex._plock:
-            st = ex._policy_ctx(list(ex._state.values()), time.time())["standings"]["kimi"]
-        self.assertEqual(st["next_poll_at"], round(ex._poll_schedule["kimi"]))
+        with T.plock:
+            st = ex._policy_ctx(T, list(T.state.values()), time.time())["standings"]["kimi"]
+        self.assertEqual(st["next_poll_at"], round(T.poll_schedule["kimi"]))
         t0 = one_pass()
-        self.assertEqual(ex._poll_fails["kimi"], 0, "a success is never a failure")
-        self.assertAlmostEqual(ex._poll_schedule["kimi"], t0 + ex.POLL_INTERVAL, delta=5)
+        self.assertEqual(T.poll_fails["kimi"], 0, "a success is never a failure")
+        self.assertAlmostEqual(T.poll_schedule["kimi"], t0 + ex.POLL_INTERVAL, delta=5)
 
     def test_poller_goes_on_past_an_idle_five_hour_window(self):
         """Anthropic serves "five_hour": null while that window is idle. A
@@ -7731,27 +7745,27 @@ class TestPollBackoff(unittest.TestCase):
             raise Stop
 
         compute, save = ex.compute_preferred, ex._save_state
-        for obj, attr, val in ((psub, "_load_creds", lambda: [ACCT_A, ACCT_B]),
-                               (ex, "_provider_poll_targets", lambda: {}),
-                               (psub, "_ensure_token", lambda name, **_: name),
+        for obj, attr, val in ((psub, "_load_creds", lambda t: [ACCT_A, ACCT_B]),
+                               (ex, "_provider_poll_targets", lambda t: {}),
+                               (psub, "_ensure_token", lambda t, name, **_: name),
                                (psub, "_get", get),
                                (ex, "compute_preferred", lambda *a, **k: (ran.append("compute"), compute(*a, **k))[1]),
                                (ex, "_save_state", lambda *a, **k: (ran.append("save"), save(*a, **k))[1]),
                                (ex._poll_wakeup, "wait", wait)):
             self.addCleanup(setattr, obj, attr, getattr(obj, attr))
             setattr(obj, attr, val)
-        self.addCleanup(ex._poll_schedule.clear)
-        self.addCleanup(ex._poll_fails.clear)
+        self.addCleanup(T.poll_schedule.clear)
+        self.addCleanup(T.poll_fails.clear)
         with self.assertRaises(Stop):
             ex.poller()
         self.assertEqual(polled, [ACCT_A, ACCT_B])
-        self.assertEqual(ex._poll_fails.get(ACCT_A), 0, "the idle account is a good poll")
+        self.assertEqual(T.poll_fails.get(ACCT_A), 0, "the idle account is a good poll")
         self.assertIn("compute", ran)
         self.assertIn("save", ran)
-        with ex._lock:
-            self.assertEqual(ex._state[ACCT_A]["ok"], 1)
-            self.assertNotIn("five_hour", ex._reading_windows(ex._state[ACCT_A]["reading"]))
-            self.assertEqual(ex._state[ACCT_B]["ok"], 1)
+        with T.lock:
+            self.assertEqual(T.state[ACCT_A]["ok"], 1)
+            self.assertNotIn("five_hour", ex._reading_windows(T.state[ACCT_A]["reading"]))
+            self.assertEqual(T.state[ACCT_B]["ok"], 1)
 
     def test_a_body_of_the_wrong_types_fails_its_own_poll_only(self):
         """A provider body whose fields have the wrong types raises in the
@@ -7771,10 +7785,10 @@ class TestPollBackoff(unittest.TestCase):
 
     def _wrong_types_pass(self, broken, spoil):
         reset()
-        ex._poll_schedule.clear()
-        ex._poll_fails.clear()
+        T.poll_schedule.clear()
+        T.poll_fails.clear()
         seed_openai_creds()
-        pcodex._openai_pool = None
+        pcodex._st(T).pool = None
         self.addCleanup(clear_openai_creds)
         bodies = {"gpt": wham_usage(), "kimi": kimi_raw()}
         polled, ran, logged = [], [], []
@@ -7797,12 +7811,13 @@ class TestPollBackoff(unittest.TestCase):
 
         compute, save = ex.compute_preferred, ex._save_state
         patch_codex_reads(self, lambda tok, acct_id: body("gpt"))
-        for obj, attr, val in ((pkimi, "KIMI_API_KEY", "sk-kimi-testdeadbeef"),
-                               (pkimi, "_get_kimi_usages", lambda key: body("kimi")),
-                               (psub, "_load_creds", lambda: [ACCT_A]),
+        set_kimi_key("sk-kimi-testdeadbeef")
+        self.addCleanup(set_kimi_key, None)
+        for obj, attr, val in ((pkimi, "_get_kimi_usages", lambda key: body("kimi")),
+                               (psub, "_load_creds", lambda t: [ACCT_A]),
                                (ex, "_provider_poll_targets",
-                                lambda: {"gpt": ("gpt", None), "kimi": ("kimi", None)}),
-                               (psub, "_ensure_token", lambda name, **_: name),
+                                lambda t: {"gpt": ("gpt", None), "kimi": ("kimi", None)}),
+                               (psub, "_ensure_token", lambda t, name, **_: name),
                                (psub, "_get", get),
                                (ex, "log", logged.append),
                                (ex, "compute_preferred", lambda *a, **k: (ran.append("compute"), compute(*a, **k))[1]),
@@ -7810,13 +7825,13 @@ class TestPollBackoff(unittest.TestCase):
                                (ex._poll_wakeup, "wait", wait)):
             self.addCleanup(setattr, obj, attr, getattr(obj, attr))
             setattr(obj, attr, val)
-        self.addCleanup(ex._poll_schedule.clear)
-        self.addCleanup(ex._poll_fails.clear)
+        self.addCleanup(T.poll_schedule.clear)
+        self.addCleanup(T.poll_fails.clear)
         with self.assertRaises(Stop):
             ex.poller()  # every target good: the last good reading
-        with ex._lock:
-            good = ex._state[broken]["reading"]
-        ex._poll_schedule.clear()
+        with T.lock:
+            good = T.state[broken]["reading"]
+        T.poll_schedule.clear()
         polled.clear(), ran.clear(), logged.clear()
         spoil(bodies[broken])
         t0 = time.time()
@@ -7824,16 +7839,17 @@ class TestPollBackoff(unittest.TestCase):
             ex.poller()
         self.assertEqual(sorted(polled), sorted([ACCT_A, "gpt", "kimi"]), "every target is polled")
         self.assertEqual(ran, ["compute", "save"])
-        with ex._lock:
-            res = ex._state[broken]
-            others = {n: r["ok"] for n, r in ex._state.items() if n != broken}
+        with T.lock:
+            res = T.state[broken]
+            others = {n: r["ok"] for n, r in T.state.items() if n != broken}
         self.assertEqual(others, {ACCT_A: 1, ({"gpt", "kimi"} - {broken}).pop(): 1})
         self.assertEqual((res["ok"], res["stale"]), (0, 1))
         self.assertIs(res["reading"], good, "the last good reading is served, stale")
         self.assertTrue(res["err"].startswith("raised TypeError: "), res["err"])
-        self.assertEqual(ex._poll_fails[broken], 1)
-        self.assertAlmostEqual(ex._poll_schedule[broken], t0 + ex.POLL_INTERVAL, delta=5)
-        failed = [i for i, ln in enumerate(logged) if ln.startswith(f"{broken}: POLL FAILED — raised TypeError")]
+        self.assertEqual(T.poll_fails[broken], 1)
+        self.assertAlmostEqual(T.poll_schedule[broken], t0 + ex.POLL_INTERVAL, delta=5)
+        failed = [i for i, ln in enumerate(logged)
+                  if ln.startswith(f"{T.id}: {broken}: POLL FAILED — raised TypeError")]
         self.assertEqual(len(failed), 1, logged)
         self.assertIn("(serving last-good)", logged[failed[0]])
         tb = logged[failed[0] + 1]
@@ -7855,13 +7871,13 @@ class TestPollBackoff(unittest.TestCase):
         held = []
         snapshot = ex._readings_snapshot
 
-        def spy():
-            held.append(ex._plock.locked())
-            return snapshot()
+        def spy(t):
+            held.append(T.plock.locked())
+            return snapshot(t)
 
-        for obj, attr, val in ((psub, "_load_creds", lambda: []),
-                               (ex, "_provider_poll_targets", lambda: {"kimi": ("kimi", None)}),
-                               (ex.PROVIDERS["kimi"], "poll", lambda prev, account=None: kimi_result()),
+        for obj, attr, val in ((psub, "_load_creds", lambda t: []),
+                               (ex, "_provider_poll_targets", lambda t: {"kimi": ("kimi", None)}),
+                               (ex.PROVIDERS["kimi"], "poll", lambda t, prev, account=None: kimi_result()),
                                (ex._poll_wakeup, "wait", wait),
                                (ex, "_readings_snapshot", spy)):
             old = obj[attr] if isinstance(obj, dict) else getattr(obj, attr)
@@ -7871,10 +7887,10 @@ class TestPollBackoff(unittest.TestCase):
             else:
                 setattr(obj, attr, val)
                 self.addCleanup(setattr, obj, attr, old)
-        self.addCleanup(ex._poll_schedule.clear)
-        self.addCleanup(ex._poll_fails.clear)
-        with ex._poll_health_lock:
-            ex._poll_schedule["kimi"] = 0
+        self.addCleanup(T.poll_schedule.clear)
+        self.addCleanup(T.poll_fails.clear)
+        with T.poll_health_lock:
+            T.poll_schedule["kimi"] = 0
         with self.assertRaises(Stop):
             ex.poller()
         self.assertGreaterEqual(len(held), 2, "the policy's save and the poller's own")
@@ -7924,9 +7940,9 @@ class TestPointerOnChecks(PayBase):
         self.assertEqual((v["lane:opus"]["check"]["check"], v["lane:opus"]["check"]["basis"]),
                          ("included", "stale"))
         self.assertEqual(class_pointer(), "gpt/gpt-5.6")
-        with ex._lock:
-            del ex._state["gpt"]
-            del ex._state["kimi"]
+        with T.lock:
+            del T.state["gpt"]
+            del T.state["kimi"]
         self.assertEqual(class_pointer(), "lane:opus", "stale is still used when nothing fresh is")
 
 
@@ -7936,7 +7952,7 @@ class TestClassBindUnavailableHTTP(PayBase, HTTPBase):
 
     def call(self, sid):
         req = urllib.request.Request(
-            f"http://127.0.0.1:{self.port}/class-bind?class=frontier&session={sid}")
+            f"http://127.0.0.1:{self.port}{TP}/class-bind?class=frontier&session={sid}")
         req.add_header("X-Switch-Key", "test-switch-key")
         try:
             with urllib.request.urlopen(req, timeout=5) as r:
@@ -8011,7 +8027,7 @@ class TestBindAndPinOnChecks(PayBase):
         classes_reset(opus_spent(), gpt_on_credits(), kimi_result(five_hour=100.0),
                       cfg=pay_cfg())
         now = time.time()
-        code, p = ex._bind_class_session("frontier", "s1", now)
+        code, p = ex._bind_class_session(T, "frontier", "s1", now)
         self.assertEqual(code, 409)
         self.assertEqual((p["error"], p["class"]), ("class_unavailable", "frontier"))
         by_route = {m["route"]: m["accounts"] for m in p["members"]}
@@ -8063,9 +8079,9 @@ class TestBindAndPinOnChecks(PayBase):
                 classes_reset(gpt, cfg=cfg)
                 install_money({"pay_order": [], "pots": {"gpt/credits": {"topup": topup}}})
                 now = time.time()
-                with ex._poll_health_lock:
-                    ex._poll_schedule["gpt"] = now + 600
-                code, p = ex._bind_class_session("frontier", f"s-{topup}", now)
+                with T.poll_health_lock:
+                    T.poll_schedule["gpt"] = now + 600
+                code, p = ex._bind_class_session(T, "frontier", f"s-{topup}", now)
                 self.assertEqual(code, 409)
                 acct = p["members"][0]["accounts"][0]
                 self.assertEqual(acct["why"], "spent")
@@ -8086,8 +8102,8 @@ class TestBindAndPinOnChecks(PayBase):
         classes_reset(opus_acct(30, resets=True), kimi_result(), cfg=pay_cfg())
         self.bind()
         set_opus(cap=100)
-        with ex._plock:  # hold the session where it is to read the bound check
-            ex._preferred["classes"]["frontier"]["sessions"]["s1"]["member"] = "lane:opus"
+        with T.plock:  # hold the session where it is to read the bound check
+            T.preferred["classes"]["frontier"]["sessions"]["s1"]["member"] = "lane:opus"
         code, p = self.bind()
         self.assertEqual(code, 200)
         self.assertFalse(p["created"])
@@ -8096,8 +8112,8 @@ class TestBindAndPinOnChecks(PayBase):
     def test_pin_admits_a_member_whose_check_is_not_no(self):
         classes_reset(opus_acct(30, resets=True), gpt_on_credits(), kimi_result(),
                       cfg=pay_cfg(gpt=["gpt/credits"]))
-        with ex._plock:
-            ex._preferred["classes"]["frontier"] = {"pinned": "gpt/gpt-5.6", "sessions": {}}
+        with T.plock:
+            T.preferred["classes"]["frontier"] = {"pinned": "gpt/gpt-5.6", "sessions": {}}
         code, p = self.bind()
         self.assertEqual((code, p["member"]["id"], p["check"]["check"]),
                          (200, "gpt/gpt-5.6", "paid"), "the route's own pay admits it")
@@ -8107,12 +8123,12 @@ class TestBindAndPinOnChecks(PayBase):
         not seat the session there; the pointer does."""
         classes_reset(opus_acct(30, resets=True), gpt_on_credits(), kimi_result(),
                       cfg=pay_cfg())
-        with ex._plock:
-            ex._preferred["classes"]["frontier"] = {"pinned": "gpt/gpt-5.6", "sessions": {}}
+        with T.plock:
+            T.preferred["classes"]["frontier"] = {"pinned": "gpt/gpt-5.6", "sessions": {}}
         code, p = self.bind()
         self.assertEqual((code, p["member"]["id"]), (200, "lane:opus"))
         self.assertEqual(p["reason"], "bind: pointer")
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(bound_member("s1"), "lane:opus", "nor does the session policy")
 
 
@@ -8122,8 +8138,8 @@ class TestSessionMovesOnChecks(_LogCapture, PayBase):
     def test_rebind_when_the_bound_member_reads_no(self):
         classes_reset(opus_acct(30, resets=True), kimi_result(), cfg=pay_cfg())
         self.bind()
-        with ex._plock:  # inside dwell: a `no` rebind is not dwell-gated
-            ex._preferred["classes"]["frontier"]["sessions"]["s1"]["last_switch"] = time.time()
+        with T.plock:  # inside dwell: a `no` rebind is not dwell-gated
+            T.preferred["classes"]["frontier"]["sessions"]["s1"]["last_switch"] = time.time()
         self.capture_log()
         set_opus(cap=100)
         self.assertEqual(bound_member("s1"), "kimi/kimi-k3")
@@ -8137,14 +8153,14 @@ class TestSessionMovesOnChecks(_LogCapture, PayBase):
         cfg = pay_cfg(gpt=["gpt/credits"])
         classes_reset(opus_spent(), gpt_on_credits(), kimi_result(five_hour=100.0), cfg=cfg)
         self.assertEqual(self.bind()[1]["member"]["id"], "gpt/gpt-5.6")
-        with ex._plock:
-            ex._preferred["classes"]["frontier"]["sessions"]["s1"]["last_switch"] = time.time()
-        with ex._lock:
-            ex._state["kimi"] = kimi_result(five_hour=10.0)  # kimi's window reset
-        ex.compute_preferred()
+        with T.plock:
+            T.preferred["classes"]["frontier"]["sessions"]["s1"]["last_switch"] = time.time()
+        with T.lock:
+            T.state["kimi"] = kimi_result(five_hour=10.0)  # kimi's window reset
+        ex.compute_preferred(T)
         self.assertEqual(bound_member("s1"), "gpt/gpt-5.6", "inside dwell: still on money")
         age_session("s1")
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(bound_member("s1"), "kimi/kimi-k3", "money ends once allowance returns")
 
     def test_paid_stays_while_the_pointer_is_paid(self):
@@ -8156,11 +8172,11 @@ class TestSessionMovesOnChecks(_LogCapture, PayBase):
                       cfg=cfg)
         install_money({"pay_order": [POT_A]})
         self.assertEqual(self.bind()[1]["member"]["id"], "gpt/gpt-5.6", "opus's credits are off")
-        with ex._lock:
-            ex._state[ACCT_A] = opus_spent()
+        with T.lock:
+            T.state[ACCT_A] = opus_spent()
         self.assertEqual(class_pointer(), "lane:opus")
         age_session("s1")
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(bound_member("s1"), "gpt/gpt-5.6")
 
     def test_forced_rules_never_move_onto_a_paid_member(self):
@@ -8173,11 +8189,11 @@ class TestSessionMovesOnChecks(_LogCapture, PayBase):
         self.bind()
         set_opus(cap=96)
         age_session("s1")
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(bound_member("s1"), "lane:opus")
-        with ex._lock:
-            ex._state["kimi"] = kimi_result(five_hour=20.0)
-        ex.compute_preferred()
+        with T.lock:
+            T.state["kimi"] = kimi_result(five_hour=20.0)
+        ex.compute_preferred(T)
         self.assertEqual(bound_member("s1"), "kimi/kimi-k3")
 
     def test_paid_member_without_an_effective_is_not_rebound(self):
@@ -8192,7 +8208,7 @@ class TestSessionMovesOnChecks(_LogCapture, PayBase):
         self.assertEqual((v["check"]["check"], v["effective"]), ("paid", None))
         self.bind()
         age_session("s1")
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.assertEqual(bound_member("s1"), "gpt/gpt-5.6")
 
 
@@ -8248,8 +8264,8 @@ class TestTopup(PayBase):
         g = gpt_on_credits(has_credits=False)
         g["raw"]["rate_limit"]["primary_window"]["reset_at"] = int(time.time()) + 86400
         classes_reset(g, cfg=pay_cfg(gpt=["gpt/credits"]))
-        with ex._poll_health_lock:
-            ex._poll_schedule["gpt"] = time.time() + 300
+        with T.poll_health_lock:
+            T.poll_schedule["gpt"] = time.time() + 300
         c = route_check("frontier/gpt/gpt-5.6", "gpt")
         self.assertEqual((c["check"], c["reason"]), ("no", "spent"))
         self.assertEqual(c["until"], g["raw"]["rate_limit"]["primary_window"]["reset_at"])
@@ -8261,9 +8277,9 @@ class TestTopup(PayBase):
     def test_off_with_no_reset_known_is_retried_at_the_next_poll(self):
         g = gpt_on_credits(has_credits=False)
         del g["raw"]["rate_limit"]["primary_window"]["reset_at"]
-        self.addCleanup(ex._poll_schedule.clear)
-        with ex._poll_health_lock:
-            ex._poll_schedule["gpt"] = 1_900_000_000.0
+        self.addCleanup(T.poll_schedule.clear)
+        with T.poll_health_lock:
+            T.poll_schedule["gpt"] = 1_900_000_000.0
         classes_reset(g, cfg=pay_cfg(gpt=["gpt/credits"]))
         self.assertEqual(route_check("frontier/gpt/gpt-5.6", "gpt")["until"], 1_900_000_000.0)
 
@@ -8315,10 +8331,10 @@ class TestPreferredDialCheckContract(PayBase, HTTPBase):
         self.assertIsNone(p["pots"]["kimi/credits"]["pay_rank"])
         self.assertTrue(p["pots"]["kimi/credits"]["warnings"], "topup on for Kimi warns")
         self.assertEqual(p["pay_order"], ["gpt/credits"])
-        with ex._plock:
+        with T.plock:
             want = {"classes": ex._doc_revision(ex._classes_doc),
-                    "consumers": ex._doc_revision(ex._consumers_doc),
-                    "money": ex._doc_revision(ex._money_doc), "stale_max": ex.STALE_MAX}
+                    "consumers": ex._doc_revision(T.consumers_doc),
+                    "money": ex._doc_revision(T.money_doc), "stale_max": ex.STALE_MAX}
         self.assertEqual(p["settings"], want)
         self.assertTrue(any("Kimi" in w for w in p["settings_warnings"]))
 
@@ -8385,7 +8401,7 @@ class TestClassesSettingsValidation(PayBase):
         for cfg, needle in ((pay_cfg(opus=["nobody/credits"]), "unknown pot"),):
             with self.subTest(needle=needle):
                 self.assertEqual(ex._validate_classes_doc(cfg), [])
-                self.assertTrue(any(needle in w for w in ex._doc_check("classes", cfg)[1]))
+                self.assertTrue(any(needle in w for w in ex._doc_check(T, "classes", cfg)[1]))
 
     def test_stop_at_rejections(self):
         for stop, needle in (({"window": "7d"}, "stop_at must be {window, level}"),
@@ -8399,7 +8415,7 @@ class TestClassesSettingsValidation(PayBase):
     def test_a_window_no_reading_carries_is_a_warning(self):
         for window in ("30d", "Fable"):
             with self.subTest(window=window):
-                errs, warns, _, _ = ex._doc_check("classes", pay_cfg(opus_stop={"window": window, "level": 5}))
+                errs, warns, _, _ = ex._doc_check(T, "classes", pay_cfg(opus_stop={"window": window, "level": 5}))
                 self.assertEqual(errs, [])
                 self.assertTrue(any("no reading of this route's" in w for w in warns), warns)
 
@@ -8431,12 +8447,12 @@ class TestClassesSettingsValidation(PayBase):
         self.assert_refused(m, "provider members only")
 
     def test_warnings_are_accepted(self):
-        errs, warns, _, _ = ex._doc_check("classes", pay_cfg(opus_stop={"window": "7d", "level": 100}))
+        errs, warns, _, _ = ex._doc_check(T, "classes", pay_cfg(opus_stop={"window": "7d", "level": 100}))
         self.assertEqual(errs, [])
         self.assertTrue(any("no effect" in w for w in warns), warns)
-        with ex._lock:
-            del ex._state[ACCT_A]
-        errs, warns, _, _ = ex._doc_check("classes", pay_cfg(opus_stop={"window": "30d", "level": 5}))
+        with T.lock:
+            del T.state[ACCT_A]
+        errs, warns, _, _ = ex._doc_check(T, "classes", pay_cfg(opus_stop={"window": "30d", "level": 5}))
         self.assertEqual(errs, [], "no account measured: accepted")
         self.assertTrue(any("unchecked" in w for w in warns), warns)
 
@@ -8446,7 +8462,7 @@ class TestMoneyValidation(PayBase):
         reset(opus_acct(30), gpt_on_credits(), kimi_result())
 
     def check(self, doc):
-        return ex._doc_check("money", doc)
+        return ex._doc_check(T, "money", doc)
 
     def test_valid(self):
         errs, warns, norm, canon = self.check(
@@ -8499,20 +8515,20 @@ class TestMoneyDocAPI(DocAPIBase, PayBase):
     def setUp(self):
         super().setUp()
         self.money_path = os.path.join(_TMP, f"money-{self.__class__.__name__}.json")
-        self._old_money_file = ex.MONEY_FILE
-        ex.MONEY_FILE = self.money_path
+        self._old_money_file = T.money_file
+        T.money_file = self.money_path
         for suffix in ("", ".history.jsonl"):
             try:
                 os.remove(self.money_path + suffix)
             except FileNotFoundError:
                 pass
-        with ex._plock:
-            ex._money, ex._money_doc, ex._money_warnings = ex._load_money(), {}, []
+        with T.plock:
+            T.money, T.money_doc, T.money_warnings = ex._load_money(T), {}, []
 
     def tearDown(self):
-        ex.MONEY_FILE = self._old_money_file
-        with ex._plock:
-            ex._money_doc, ex._money_warnings = {}, []
+        T.money_file = self._old_money_file
+        with T.plock:
+            T.money_doc, T.money_warnings = {}, []
         DocAPIBase.tearDown(self)
         PayBase.tearDown(self)
 
@@ -8579,8 +8595,8 @@ class TestMoneyDocAPI(DocAPIBase, PayBase):
         code, p, _ = self.req("POST", "/money/reload", {"reason": "hand edit"})
         self.assertEqual(code, 200)
         self.assertTrue(p["changed"])
-        with ex._plock:
-            self.assertEqual(ex._money["pay_order"], ["gpt/credits"])
+        with T.plock:
+            self.assertEqual(T.money["pay_order"], ["gpt/credits"])
         with open(self.money_path, "w") as f:
             f.write("[1]")
         self.assertEqual(self.req("POST", "/money/reload", {})[0], 422,
@@ -8595,13 +8611,13 @@ class TestClassesDocAPIWithSettings(DocAPIBase, PayBase):
     def test_put_dict_document_installs_lane_settings(self):
         rev = self.req("GET", "/classes")[1]["revision"]
         doc = pay_cfg(gpt=["gpt/credits"], lanes={"opus": {"pay": [POT_A]}})
-        with ex._lock:
-            ex._state["gpt"] = gpt_on_credits()
+        with T.lock:
+            T.state["gpt"] = gpt_on_credits()
         code, p, _ = self.req("PUT", "/classes", {"doc": doc, "reason": "pay"},
                               headers={"If-Match": rev})
         self.assertEqual(code, 200, p)
         self.assertEqual(p["doc"], doc, "served as stored")
-        with ex._plock:
+        with T.plock:
             self.assertEqual(ex._lane_settings, {"opus": {"pay": [POT_A], "stop_at": None}})
         _, pref = self.get("/preferred")
         self.assertEqual(pref["routes"]["lane:opus"]["pay"], [POT_A])
@@ -8643,16 +8659,17 @@ class TestSettingsNumbersAreFinite(PayBase, HTTPBase):
         for kind, doc in (("money", {"pay_order": [], "pots": {"gpt/credits": {"topup": "on", "x": float("inf")}}}),
                           ("classes", {"classes": pay_cfg(), "lanes": {"opus": {"stop_at": {"window": "7d", "level": float("nan")}}}})):
             with self.subTest(kind=kind):
-                errs = ex._doc_check(kind, doc)[0]
+                errs = ex._doc_check(T, kind, doc)[0]
                 self.assertTrue(any("numbers must be finite" in e for e in errs), errs)
 
     def test_tolerant_load_drops_a_non_finite_level(self):
         self.assertEqual(load_classes(pay_cfg(opus_stop={"window": "7d", "level": float("inf")})), [])
 
     def keep_docs(self):
-        for name in ("_classes_doc", "_classes_warnings", "_lane_settings", "_money_doc",
-                     "_money_warnings", "_money", "CLASSES_FILE", "MONEY_FILE"):
+        for name in ("_classes_doc", "_classes_warnings", "_lane_settings", "CLASSES_FILE"):
             self.addCleanup(setattr, ex, name, getattr(ex, name))
+        for name in ("money_doc", "money_warnings", "money", "money_file"):
+            self.addCleanup(setattr, T, name, getattr(T, name))
 
     def write(self, name, text):
         path = os.path.join(_TMP, name)
@@ -8689,16 +8706,16 @@ class TestSettingsNumbersAreFinite(PayBase, HTTPBase):
 
     def test_a_hand_edited_non_finite_in_money_json_is_ignored_at_load(self):
         self.keep_docs()
-        ex.MONEY_FILE = self.write("money-nan.json",
+        T.money_file = self.write("money-nan.json",
                                    '{"pay_order": ["gpt/credits", NaN], "pots": {"gpt/credits": '
                                    '{"topup": "on"}}, "note": Infinity}')
-        m = ex._load_money()
-        ex._swap_money(m, ex._money_doc, ex._money_warnings)
+        m = ex._load_money(T)
+        ex._swap_money(T, m, T.money_doc, T.money_warnings)
         self.assertEqual(m["pay_order"], ["gpt/credits"])
         self.assertEqual(m["pots"]["gpt/credits"], {"topup": "on"})
-        self.assertTrue(any("non-finite" in w and "pay_order" in w for w in ex._money_warnings),
-                        ex._money_warnings)
-        self.assertIsNone(ex._non_finite_path(ex._money_doc))
+        self.assertTrue(any("non-finite" in w and "pay_order" in w for w in T.money_warnings),
+                        T.money_warnings)
+        self.assertIsNone(ex._non_finite_path(T.money_doc))
         self.served_with_revisions()
 
     def test_a_non_finite_provider_number_reads_unknown(self):
@@ -8714,10 +8731,10 @@ class TestSettingsNumbersAreFinite(PayBase, HTTPBase):
     def test_a_non_finite_number_fails_loudly_at_the_brain(self):
         a = opus_acct(30, resets=True)
         ex._reading_windows(a["reading"])["five_hour"]["used"] = float("nan")
-        with ex._lock:
-            ex._state.clear()
-            ex._state[a["name"]] = a  # past the adapter, as a bug would put it
-        ex.compute_preferred()
+        with T.lock:
+            T.state.clear()
+            T.state[a["name"]] = a  # past the adapter, as a bug would put it
+        ex.compute_preferred(T)
         code, body = self.get("/preferred")
         self.assertEqual(code, 500)
         self.assertIn("non-finite", body["error"])
@@ -8745,29 +8762,29 @@ class TestReadingsSurviveRestart(PayBase):
     account's first good poll; the stale rule decides as for any old reading."""
 
     def restart(self):
-        with ex._plock:
-            ex._save_state()
-        with ex._lock:
-            ex._state.clear()
-        ex._load_state()
+        with T.plock:
+            ex._save_state(T)
+        with T.lock:
+            T.state.clear()
+        ex._load_state(T)
 
     def test_readings_round_trip_with_their_age(self):
         a = acct(ACCT_A, 30, good_age=600)
         a["raw"]["extra_usage"] = {"is_enabled": False}
         g = gpt_result(weekly=40.0, credits={"has_credits": True, "balance": 12.5})
         reset(a, g)
-        before = {n: (r["good_ts"], r["reading"]) for n, r in ex._state.items()}
+        before = {n: (r["good_ts"], r["reading"]) for n, r in T.state.items()}
         targets = ex._provider_poll_targets
-        ex._provider_poll_targets = lambda: {"gpt": ("gpt", None)}
+        ex._provider_poll_targets = lambda t: {"gpt": ("gpt", None)}
         self.addCleanup(setattr, ex, "_provider_poll_targets", targets)
         self.restart()
-        with ex._lock:
-            after = {n: (r["good_ts"], r["reading"]) for n, r in ex._state.items()}
-            self.assertEqual(ex._state[ACCT_A]["stale"], 1, "not polled since the restart")
-            self.assertEqual(ex._state[ACCT_A]["ok"], 0)
+        with T.lock:
+            after = {n: (r["good_ts"], r["reading"]) for n, r in T.state.items()}
+            self.assertEqual(T.state[ACCT_A]["stale"], 1, "not polled since the restart")
+            self.assertEqual(T.state[ACCT_A]["ok"], 0)
         self.assertEqual(after, before)
-        with ex._plock:
-            st = ex._policy_ctx(list(ex._state.values()), time.time())["standings"]
+        with T.plock:
+            st = ex._policy_ctx(T, list(T.state.values()), time.time())["standings"]
         self.assertEqual(st[ACCT_A]["as_of"], before[ACCT_A][0])
         self.assertEqual(route_check("lane:opus", ACCT_A)["check"], "included")
 
@@ -8776,7 +8793,7 @@ class TestReadingsSurviveRestart(PayBase):
         a["raw"]["extra_usage"] = {"is_enabled": True}
         reset(a)
         self.restart()
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         c = route_check("lane:opus", ACCT_A)
         self.assertEqual((c["check"], c["reason"], c["basis"]), ("no", "unknown", "stale"))
 
@@ -8790,32 +8807,32 @@ class TestReadingsSurviveRestart(PayBase):
         reset(a)
         ghost = acct("ghost@example.com", 5, good_age=2400)
         ghost["raw"]["extra_usage"] = {"is_enabled": False}
-        with ex._lock:
-            ex._state[ghost["name"]] = ghost
+        with T.lock:
+            T.state[ghost["name"]] = ghost
         self.restart()
-        with ex._lock:
-            self.assertNotIn("ghost@example.com", ex._state)
-        ex.compute_preferred()
-        p = ex._preferred_payload()
+        with T.lock:
+            self.assertNotIn("ghost@example.com", T.state)
+        ex.compute_preferred(T)
+        p = ex._preferred_payload(T)
         self.assertNotIn("ghost@example.com", p["accounts"])
         self.assertNotIn("ghost@example.com", p["routes"]["lane:opus"]["checks"])
         self.assertNotEqual(p["lanes"]["opus"]["account"], "ghost@example.com")
-        self.assertNotIn("ghost@example.com", ex.render())
+        self.assertNotIn("ghost@example.com", ex.render([T]))
 
     def test_an_account_already_polled_keeps_its_own_result(self):
         reset(acct(ACCT_A, 30))
-        with ex._lock:
-            live = dict(ex._state[ACCT_A])
+        with T.lock:
+            live = dict(T.state[ACCT_A])
         old = dict(acct(ACCT_A, 90, good_age=3000))
-        self.assertEqual(ex._restore_readings([old]), 0)
-        with ex._lock:
-            self.assertEqual(ex._state[ACCT_A], live, "the live poll's result stands")
+        self.assertEqual(ex._restore_readings(T, [old]), 0)
+        with T.lock:
+            self.assertEqual(T.state[ACCT_A], live, "the live poll's result stands")
 
     def test_no_secret_is_persisted(self):
         reset(acct(ACCT_A, 30))
-        with ex._plock:
-            ex._save_state()
-        with open(ex.STATE_FILE) as f:
+        with T.plock:
+            ex._save_state(T)
+        with open(T.state_file) as f:
             text = f.read()
         self.assertNotIn("tok-" + ACCT_A, text)
         self.assertNotIn("r-" + ACCT_A, text)
@@ -8834,7 +8851,7 @@ class TestSettingsCheckedAgainstReadingsWarnOnly(PayBase):
         # (it binds nothing), not as dangling.
         classes_reset(opus_acct(30, resets=True), gpt_on_credits(), kimi_result(),
                       cfg=pay_cfg(lanes={"opus": {"pay": ["gpt/credits"]}}))
-        w = ex._preferred_payload()["routes"]["lane:opus"]["warnings"]
+        w = ex._preferred_payload(T)["routes"]["lane:opus"]["warnings"]
         self.assertTrue(any(x.startswith("error: pay 'gpt/credits'") for x in w), w)
         self.assertEqual(route_check("lane:opus", ACCT_A)["check"], "included")
 
@@ -8842,27 +8859,27 @@ class TestSettingsCheckedAgainstReadingsWarnOnly(PayBase):
         for cfg, needle in ((pay_cfg(gpt=["gone/credits"]), "unknown pot"),
                             (pay_cfg(opus_stop={"window": "30d", "level": 5}), "no reading")):
             with self.subTest(needle=needle):
-                errs, warns, _, _ = ex._doc_check("classes", cfg)
+                errs, warns, _, _ = ex._doc_check(T, "classes", cfg)
                 self.assertEqual(errs, [])
                 self.assertTrue(any(needle in w for w in warns), warns)
         for cfg, needle in ((pay_cfg(gpt=["gpt/allowance"]), "not a money pot"),
                             (pay_cfg(gpt=[POT_A]), "is an account of anthropic; it can never back")):
             with self.subTest(needle=needle):
-                errs, _, _, _ = ex._doc_check("classes", cfg)
+                errs, _, _, _ = ex._doc_check(T, "classes", cfg)
                 self.assertTrue(any(needle in e for e in errs), f"structure stays an error: {errs}")
 
     def test_money(self):
         for doc, needle in (({"pay_order": ["gone/credits"]}, "unknown pot"),
                             ({"pots": {"gone/credits": {"topup": "on"}}}, "unknown pot")):
             with self.subTest(doc=doc):
-                errs, warns, _, _ = ex._doc_check("money", doc)
+                errs, warns, _, _ = ex._doc_check(T, "money", doc)
                 self.assertEqual(errs, [])
                 self.assertTrue(any(needle in w for w in warns), warns)
         for doc, needle in (({"pay_order": ["gpt/allowance"]}, "not a money pot"),
                             ({"pots": {"gpt/wallet": {}}}, "unknown pot"),
                             ({"pots": {"gpt/allowance": {"topup": "off"}}}, "allowance")):
             with self.subTest(doc=doc):
-                errs = ex._doc_check("money", doc)[0]
+                errs = ex._doc_check(T, "money", doc)[0]
                 self.assertTrue(any(needle in e for e in errs), errs)
 
 
@@ -8882,8 +8899,8 @@ class TestSwitchoverMutationsKilled(PayBase):
         g = gpt_on_credits(pct=100.0)
         g["raw"]["rate_limit"]["primary_window"]["reset_at"] = int(time.time()) + 86400
         classes_reset(g, cfg=pay_cfg(gpt=["gpt/credits"]))
-        with ex._plock:
-            pool = (ex._preferred.get("providers") or {}).get("gpt") or {}
+        with T.plock:
+            pool = (T.preferred.get("providers") or {}).get("gpt") or {}
         self.assertIsNone(pool.get("account"), "the pool route pays nothing")
         self.assertEqual(class_verdicts()["gpt/gpt-5.6"]["check"]["check"], "paid",
                          "the member that may pay still gets its paid verdict")
@@ -8988,9 +9005,9 @@ class TestAnthropicReading(unittest.TestCase):
                 reset({"name": ACCT_A, "ok": 1, "ts": 0.0, "good_ts": 0.0, "stale": 0,
                        "email": ACCT_A, "tier": "max", "http": 0, "err": "",
                        "reading": ex._anthropic_reading(body, 0, "max")})
-                src = ex._reading_windows(ex._state[ACCT_A]["reading"])["seven_day"]["sources"][0]
+                src = ex._reading_windows(T.state[ACCT_A]["reading"])["seven_day"]["sources"][0]
                 self.assertIsNone(src["severity"])
-                self.assertIn('kind="weekly_all"', ex.render())
+                self.assertIn('kind="weekly_all"', ex.render([T]))
 
     def test_an_unknown_severity_has_no_sample(self):
         """Unknown is never 0: a severity Anthropic gave none of, or one not in
@@ -9003,7 +9020,7 @@ class TestAnthropicReading(unittest.TestCase):
                 reset({"name": ACCT_A, "ok": 1, "ts": 0.0, "good_ts": 0.0, "stale": 0,
                        "email": ACCT_A, "tier": "max", "http": 0, "err": "",
                        "reading": ex._anthropic_reading(body, 0, "max")})
-                got = [ln.rsplit(" ", 1)[1] for ln in ex.render().splitlines()
+                got = [ln.rsplit(" ", 1)[1] for ln in ex.render([T]).splitlines()
                        if ln.startswith("claude_usage_limit_severity{") and 'kind="weekly_all"' in ln]
                 self.assertEqual(got, want)
 
@@ -9035,9 +9052,9 @@ class TestAnthropicReading(unittest.TestCase):
         psub._get = lambda path, token: (anthropic_body() if path == "/api/oauth/usage"
                                        else {"account": {"email_address": ACCT_A},
                                              "organization": {"organization_type": "claude_max"}})
-        psub._creds[ACCT_A] = {"refresh_token": "r", "access_token": "tok",
+        psub._st(T).creds[ACCT_A] = {"refresh_token": "r", "access_token": "tok",
                              "expires_at": time.time() + 9999}
-        res = psub.poll_account(ACCT_A)
+        res = psub.poll_account(T, ACCT_A)
         self.assertEqual(res["ok"], 1, res["err"])
         self.assertNotIn("usage", res)
         self.assertEqual(res["reading"]["provider"], "anthropic")
@@ -9058,7 +9075,7 @@ def ledger_entry(i, charge=1.0, route=GPT_ROUTE, at=None, **over):
 def post_ledger(*entries, now=None):
     """ledger_accept, as a /reports batch of ledger events reaches it:
     -> ([(result, why)] per entry, seq)."""
-    return ex.ledger_accept(list(entries), ROSTER, time.time() if now is None else now)
+    return ex.ledger_accept(T, list(entries), ROSTER, time.time() if now is None else now)
 
 
 def month_start(t):
@@ -9072,7 +9089,7 @@ class TestLedgerAccept(_LogCapture, PayBase):
         reset()
 
     def lines(self):
-        with open(ex.LEDGER_FILE) as f:
+        with open(T.ledger_file) as f:
             return [json.loads(ln) for ln in f]
 
     def test_accepts_and_appends(self):
@@ -9088,7 +9105,7 @@ class TestLedgerAccept(_LogCapture, PayBase):
         res, seq = post_ledger(ledger_entry(1, 2.5), ledger_entry(2, 1.0), ledger_entry(2, 1.0))
         self.assertEqual((results(res), seq), (["ignored", "applied", "ignored"], 2))
         self.assertEqual(len(self.lines()), 2)
-        p = ex._ledger_payload(time.time(), ROSTER, ex._money)["pots"]["gpt/credits"]
+        p = ex._ledger_payload(T, time.time(), ROSTER, T.money)["pots"]["gpt/credits"]
         self.assertEqual(p["period_spend"], 3.5)
 
     def test_a_bad_entry_is_refused_with_its_reason(self):
@@ -9126,33 +9143,33 @@ class TestLedgerAccept(_LogCapture, PayBase):
                 (res, why), = post_ledger(e)[0]
                 self.assertEqual(res, "refused")
                 self.assertIn(needle, why)
-        self.assertFalse(os.path.exists(ex.LEDGER_FILE), "nothing written")
+        self.assertFalse(os.path.exists(T.ledger_file), "nothing written")
 
     def test_spend_is_per_period_and_route(self):
         now = time.time()
         last = month_start(now) - 86400
         post_ledger(ledger_entry(1, 4.0), ledger_entry(2, 1.0, route="fast/gpt/gpt-6.1-sol"),
                     ledger_entry(3, 100.0, at=last), ledger_entry(4, None))
-        p = ex._ledger_payload(now, ROSTER, ex._money)
+        p = ex._ledger_payload(T, now, ROSTER, T.money)
         self.assertEqual(p["period"], {"start": month_start(now), "end": ex._budget_period(now)[1]})
         g = p["pots"]["gpt/credits"]
         self.assertEqual((g["period_spend"], g["uncounted"]), (5.0, 1))
         self.assertEqual(g["routes"], {"fast/gpt/gpt-6.1-sol": 1.0, GPT_ROUTE: 4.0})
-        self.assertEqual(ex._ledger_totals()[("gpt/credits", GPT_ROUTE)], 104.0,
+        self.assertEqual(ex._ledger_totals(T)[("gpt/credits", GPT_ROUTE)], 104.0,
                          "money_spent_total counts every period")
 
     def test_the_file_is_read_back_at_startup(self):
         post_ledger(ledger_entry(1, 4.0), ledger_entry(2, None))
-        with open(ex.LEDGER_FILE, "a") as f:
+        with open(T.ledger_file, "a") as f:
             f.write("{not json\n")
             f.write(json.dumps({"at": "x"}) + "\n")
-        with ex._ledger_lock:
-            ex._ledger.update(seq=0, ids={}, spend={}, uncounted={}, unpriced={}, total={}, recon={},
+        with T.ledger_lock:
+            T.ledger.update(seq=0, ids={}, spend={}, uncounted={}, unpriced={}, total={}, recon={},
                               unreadable=0, counted_at={})
         self.capture_log()
-        ex._load_ledger()
+        ex._load_ledger(T)
         logged = self.logged
-        p = ex._ledger_payload(time.time(), ROSTER, ex._money)
+        p = ex._ledger_payload(T, time.time(), ROSTER, T.money)
         self.assertEqual((p["seq"], p["unreadable_lines"]), (4, 2))
         self.assertEqual(p["pots"]["gpt/credits"]["period_spend"], 4.0)
         self.assertEqual(p["pots"]["gpt/credits"]["uncounted"], 1)
@@ -9169,28 +9186,28 @@ class TestLedgerAccept(_LogCapture, PayBase):
         now = time.time()
         last = month_start(month_start(now) - 1) + 10
         post_ledger(ledger_entry(1, 3.0, at=last), ledger_entry(2, 1.0, at=now), now=now)
-        self.assertEqual(set(ex._ledger["ids"]), {"e-1", "e-2"})
+        self.assertEqual(set(T.ledger["ids"]), {"e-1", "e-2"})
         later = month_start(now) + 40 * 86400  # the next period: e-1's is two back
-        with ex._ledger_lock:
-            ex._ledger_prune(later)
-        self.assertEqual(set(ex._ledger["ids"]), {"e-2"})
-        total = sum(ex._ledger_totals().values())
+        with T.ledger_lock:
+            ex._ledger_prune(T, later)
+        self.assertEqual(set(T.ledger["ids"]), {"e-2"})
+        total = sum(ex._ledger_totals(T).values())
         (res, why), = post_ledger(ledger_entry(1, 3.0, at=last), now=later)[0]
         self.assertEqual(res, "refused", why)
         self.assertIn("in this budget period or the last", why)
-        self.assertEqual(sum(ex._ledger_totals().values()), total)
+        self.assertEqual(sum(ex._ledger_totals(T).values()), total)
         res = post_ledger(ledger_entry(2, 1.0, at=now), now=later)[0]
         self.assertEqual(results(res), ["ignored"], res)
-        self.assertEqual(sum(ex._ledger_totals().values()), total, "a resend in reach counts once")
+        self.assertEqual(sum(ex._ledger_totals(T).values()), total, "a resend in reach counts once")
 
     def restart(self):
         """What a brain restart does to the ledger: forget it, read the file."""
-        with ex._ledger_lock:
-            ex._ledger.update(seq=0, ids={}, spend={}, uncounted={}, unpriced={}, total={}, recon={},
+        with T.ledger_lock:
+            T.ledger.update(seq=0, ids={}, spend={}, uncounted={}, unpriced={}, total={}, recon={},
                               unreadable=0, counted_at={})
         self.capture_log()
-        ex._load_ledger()
-        return ex._ledger_payload(time.time(), ROSTER, ex._money)
+        ex._load_ledger(T)
+        return ex._ledger_payload(T, time.time(), ROSTER, T.money)
 
     def test_at_is_epoch_seconds_within_a_bound_of_now(self):
         now = time.time()
@@ -9209,7 +9226,7 @@ class TestLedgerAccept(_LogCapture, PayBase):
         # budget period it raised at every start. Today's validation reads it
         # unreadable instead, as it does any line that is not an entry.
         post_ledger(ledger_entry(1, 4.0))
-        with open(ex.LEDGER_FILE, "a") as f:
+        with open(T.ledger_file, "a") as f:
             for bad in (dict(ledger_entry(2), at=time.time() * 1000), dict(ledger_entry(3), at=1e300),
                         dict(ledger_entry(4), charge=-1.0), dict(ledger_entry(5), colour=1)):
                 f.write(json.dumps(bad) + "\n")
@@ -9237,11 +9254,11 @@ class TestLedgerAccept(_LogCapture, PayBase):
         self.assertEqual(results(res), ["retry", "retry"])
         self.assertEqual(results(post_ledger(ledger_entry(10, 5.0), ledger_entry(11, 7.0))[0]),
                          ["applied", "applied"])
-        before = ex._ledger_totals()
+        before = ex._ledger_totals(T)
         self.assertEqual(len(self.lines()), 5, "the failed append's lines stay in the file")
         p = self.restart()
         self.assertEqual((p["pots"]["gpt/credits"]["period_spend"], p["unreadable_lines"]), (13.0, 0))
-        self.assertEqual(ex._ledger_totals(), before, "money_spent_total never goes down, or up")
+        self.assertEqual(ex._ledger_totals(T), before, "money_spent_total never goes down, or up")
         self.assertEqual(results(post_ledger(ledger_entry(11, 7.0))[0]), ["ignored"],
                          "the ids read back")
 
@@ -9250,7 +9267,7 @@ class TestLedgerAccept(_LogCapture, PayBase):
         # next append must not join its first line onto it (one unreadable
         # line hiding a counted charge), and a load drops it.
         post_ledger(ledger_entry(1, 1.0))
-        with open(ex.LEDGER_FILE, "a") as f:
+        with open(T.ledger_file, "a") as f:
             f.write(json.dumps(ledger_entry(10, 5.0))[:40])
         p = self.restart()
         self.assertEqual((p["seq"], p["unreadable_lines"], p["pots"]["gpt/credits"]["period_spend"]),
@@ -9261,16 +9278,16 @@ class TestLedgerAccept(_LogCapture, PayBase):
                          ["applied", "applied"])
         self.assertTrue(any("cut 40 bytes" in ln for ln in self.logged), self.logged)
         self.assertEqual([e["id"] for e in self.lines()], ["e-1", "e-10", "e-11"])
-        before = ex._ledger_totals()
+        before = ex._ledger_totals(T)
         p = self.restart()
         self.assertEqual((p["unreadable_lines"], p["pots"]["gpt/credits"]["period_spend"]), (0, 13.0))
-        self.assertEqual(ex._ledger_totals(), before)
+        self.assertEqual(ex._ledger_totals(T), before)
 
     def test_a_complete_final_line_with_no_newline_is_dropped_too(self):
         # It came back `retry` (the newline was never written), so the proxy
         # resends it; counting it here as well would count it twice.
         post_ledger(ledger_entry(1, 1.0))
-        with open(ex.LEDGER_FILE, "a") as f:
+        with open(T.ledger_file, "a") as f:
             f.write(json.dumps(ledger_entry(2, 5.0)))
         p = self.restart()
         self.assertEqual(p["pots"]["gpt/credits"]["period_spend"], 1.0)
@@ -9279,30 +9296,30 @@ class TestLedgerAccept(_LogCapture, PayBase):
 
     def test_cut_finds_a_line_boundary_beyond_one_read(self):
         post_ledger(ledger_entry(1, 1.0))
-        with open(ex.LEDGER_FILE, "a") as f:
+        with open(T.ledger_file, "a") as f:
             f.write("x" * 200000)
         post_ledger(ledger_entry(2, 2.0))
         self.assertEqual([e["id"] for e in self.lines()], ["e-1", "e-2"])
-        with open(ex.LEDGER_FILE, "w") as f:
+        with open(T.ledger_file, "w") as f:
             f.write("y" * 70000)
         post_ledger(ledger_entry(3, 3.0))
         self.assertEqual([e["id"] for e in self.lines()], ["e-3"])
 
     def test_reconciliation(self):
         t0 = time.time() - 100
-        ex._ledger_note_balance("gpt/credits", 100.0, t0)
+        ex._ledger_note_balance(T, "gpt/credits", 100.0, t0)
         post_ledger(ledger_entry(1, 5.0, at=t0 + 10), ledger_entry(2, 3.0, at=t0 - 50))
-        ex._ledger_note_balance("gpt/credits", 90.0, t0 + 20)
-        ex._ledger_note_balance("gpt/credits", 200.0, t0 + 30)   # a refill
-        ex._ledger_note_balance("gpt/credits", 195.0, t0 + 40)
-        ex._ledger_note_balance("gpt/credits", None, t0 + 50)    # unknown says nothing
-        ex._ledger_note_balance("gpt/credits", 1.0, t0 + 5)      # older than the last: ignored
-        rc = ex._ledger_payload(time.time(), ROSTER, ex._money)["pots"]["gpt/credits"]["reconciliation"]
+        ex._ledger_note_balance(T, "gpt/credits", 90.0, t0 + 20)
+        ex._ledger_note_balance(T, "gpt/credits", 200.0, t0 + 30)   # a refill
+        ex._ledger_note_balance(T, "gpt/credits", 195.0, t0 + 40)
+        ex._ledger_note_balance(T, "gpt/credits", None, t0 + 50)    # unknown says nothing
+        ex._ledger_note_balance(T, "gpt/credits", 1.0, t0 + 5)      # older than the last: ignored
+        rc = ex._ledger_payload(T, time.time(), ROSTER, T.money)["pots"]["gpt/credits"]["reconciliation"]
         self.assertEqual(rc, {"since": round(t0), "balance_falls": 15.0, "ledger": 5.0,
                               "elsewhere_or_uncounted": 10.0})
 
     def test_only_countable_pots_are_listed(self):
-        p = ex._ledger_payload(time.time(), ROSTER, ex._money)
+        p = ex._ledger_payload(T, time.time(), ROSTER, T.money)
         self.assertEqual(set(p["pots"]), {"gpt/credits"})
         g = p["pots"]["gpt/credits"]
         self.assertEqual(g, {"unit": "codex_credit", "period_spend": 0, "routes": {}, "uncounted": 0,
@@ -9323,33 +9340,33 @@ class TestRecheckEndpoint(DocAPIBase, PayBase):
     def tearDown(self):
         DocAPIBase.tearDown(self)
         PayBase.tearDown(self)
-        with ex._poll_health_lock:
-            ex._recheck_epochs.clear()
+        with T.poll_health_lock:
+            T.recheck_epochs.clear()
         ex._poll_wakeup.clear()
 
     def test_key_guard(self):
         for key in (None, "nope"):
             self.assertEqual(self.req("POST", "/recheck?account=gpt", key=key)[0], 401)
-        with ex._poll_health_lock:
-            self.assertEqual(ex._recheck_epochs, {}, "a refused re-check bumps nothing")
+        with T.poll_health_lock:
+            self.assertEqual(T.recheck_epochs, {}, "a refused re-check bumps nothing")
 
     def test_account_required_and_known(self):
         self.assertEqual(self.req("POST", "/recheck")[0], 400)
         code, body, _ = self.req("POST", "/recheck?account=nobody@example.com")
         self.assertEqual((code, body["account"]), (404, "nobody@example.com"))
-        with ex._poll_health_lock:
-            self.assertEqual(ex._recheck_epochs, {})
+        with T.poll_health_lock:
+            self.assertEqual(T.recheck_epochs, {})
 
     def test_polls_at_once_and_publishes_the_epoch(self):
-        with ex._poll_health_lock:
-            ex._poll_schedule["kimi"] = time.time() + 600
+        with T.poll_health_lock:
+            T.poll_schedule["kimi"] = time.time() + 600
         ex._poll_wakeup.clear()
         before = time.time()
         code, body, _ = self.req("POST", "/recheck?account=kimi")
         self.assertEqual((code, body["account"]), (200, "kimi"))
         self.assertGreaterEqual(body["recheck_epoch"], before)
-        with ex._poll_health_lock:
-            self.assertNotIn("kimi", ex._poll_schedule, "due at the poller's next pass")
+        with T.poll_health_lock:
+            self.assertNotIn("kimi", T.poll_schedule, "due at the poller's next pass")
         self.assertTrue(ex._poll_wakeup.is_set(), "the poller wakes for it")
         _, p, _ = self.req("GET", "/preferred")
         self.assertEqual(p["accounts"]["kimi"]["recheck_epoch"], body["recheck_epoch"])
@@ -9357,8 +9374,8 @@ class TestRecheckEndpoint(DocAPIBase, PayBase):
 
     def test_epoch_never_moves_back(self):
         later = time.time() + 1000
-        with ex._poll_health_lock:
-            ex._recheck_epochs["kimi"] = later
+        with T.poll_health_lock:
+            T.recheck_epochs["kimi"] = later
         _, body, _ = self.req("POST", "/recheck?account=kimi")
         self.assertEqual(body["recheck_epoch"], later)
 
@@ -9374,7 +9391,7 @@ class TestBudgetGateLive(PayBase):
         classes_reset(g, kimi_result(), cfg=pay_cfg(gpt=["gpt/credits"]))
 
     def check(self):
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         return route_check(GPT_ROUTE, "gpt")
 
     def test_absent_budget_never_gates(self):
@@ -9422,12 +9439,12 @@ class TestBudgetGateLive(PayBase):
         # there; a route with no budget is not touched.
         install_money({"pots": {"gpt/credits": {"budget": 10.0}}})
         post_ledger(ledger_entry(1, 1.0))
-        with open(ex.LEDGER_FILE, "a") as f:
+        with open(T.ledger_file, "a") as f:
             f.write("{torn\n")
-        with ex._ledger_lock:
-            ex._ledger.update(seq=0, ids={}, spend={}, uncounted={}, unpriced={}, total={}, recon={},
+        with T.ledger_lock:
+            T.ledger.update(seq=0, ids={}, spend={}, uncounted={}, unpriced={}, total={}, recon={},
                               unreadable=0, counted_at={})
-        ex._load_ledger()
+        ex._load_ledger(T)
         c = self.check()
         self.assertEqual((c["check"], c["reason"], c["until"], c["basis"]),
                          ("no", "unknown", None, "ledger_unreadable"))
@@ -9440,7 +9457,7 @@ class TestBudgetGateLive(PayBase):
         # room for the rest of the period. A route budget elsewhere is not
         # reached by it.
         post_ledger(ledger_entry(1, 0.5, basis="lower_bound"))
-        p = ex._ledger_payload(time.time(), ROSTER, ex._money)["pots"]["gpt/credits"]
+        p = ex._ledger_payload(T, time.time(), ROSTER, T.money)["pots"]["gpt/credits"]
         self.assertEqual((p["period_spend"], p["unpriced"]), (0.5, {GPT_ROUTE: 1}))
         install_money({"pots": {"gpt/credits": {"route_budgets": {"fast/gpt/gpt-6.1-sol": 10.0}}}})
         self.assertEqual(self.check()["check"], "paid")
@@ -9460,8 +9477,8 @@ class TestBudgetGateLive(PayBase):
         # what an undercounting ledger cannot vouch for.
         install_money({"pots": {"gpt/credits": {"budget": 1.0}}})
         post_ledger(ledger_entry(1, 5.0))
-        with ex._ledger_lock:
-            ex._ledger["unreadable"] = 1
+        with T.ledger_lock:
+            T.ledger["unreadable"] = 1
         self.assertEqual(self.check()["reason"], "budget")
 
     def test_a_unit_with_no_rates_reads_unknown(self):
@@ -9480,13 +9497,13 @@ class TestBudgetGateLive(PayBase):
                                  ("no", "unknown", None, "no_rates"))
 
     def test_a_stale_ledger_reads_unknown_until_the_next_poll(self):
-        ex.compute_preferred()
-        with ex._plock:
-            ctx = ex._policy_ctx(list(ex._state.values()), time.time())
+        ex.compute_preferred(T)
+        with T.plock:
+            ctx = ex._policy_ctx(T, list(T.state.values()), time.time())
         st = ctx["standings"]["gpt"]
         st = dict(st, next_poll_at=round(time.time()) + 240)
         now = time.time()
-        led = dict(ex._ledger_payload(now, ROSTER, ex._money), as_of=now - ex.STALE_MAX - 1)
+        led = dict(ex._ledger_payload(T, now, ROSTER, T.money), as_of=now - ex.STALE_MAX - 1)
         r = {"id": GPT_ROUTE, "pay": ["gpt/credits"], "scope": "gpt-5.6"}
         c = ex.dial_check(r, "gpt", st, {"gpt/credits": {"budget": 10.0}}, now, ledger=led)
         self.assertEqual((c["check"], c["reason"], c["until"], c["basis"]),
@@ -9500,20 +9517,20 @@ class MoneyDocBase(DocAPIBase, PayBase):
     def setUp(self):
         super().setUp()
         self.money_path = os.path.join(_TMP, f"money-{self.__class__.__name__}.json")
-        self._old_money_file = ex.MONEY_FILE
-        ex.MONEY_FILE = self.money_path
+        self._old_money_file = T.money_file
+        T.money_file = self.money_path
         for suffix in ("", ".history.jsonl"):
             try:
                 os.remove(self.money_path + suffix)
             except FileNotFoundError:
                 pass
-        with ex._plock:
-            ex._money, ex._money_doc, ex._money_warnings = ex._load_money(), {}, []
+        with T.plock:
+            T.money, T.money_doc, T.money_warnings = ex._load_money(T), {}, []
 
     def tearDown(self):
-        ex.MONEY_FILE = self._old_money_file
-        with ex._plock:
-            ex._money_doc, ex._money_warnings = {}, []
+        T.money_file = self._old_money_file
+        with T.plock:
+            T.money_doc, T.money_warnings = {}, []
         DocAPIBase.tearDown(self)
         PayBase.tearDown(self)
 
@@ -9530,7 +9547,7 @@ class TestBudgetsAtPut(MoneyDocBase):
         super().setUp()
         self.install_classes(pay_cfg(gpt=["gpt/credits"]))
         reset(opus_acct(30), gpt_on_credits(), kimi_result())
-        ex.compute_preferred()
+        ex.compute_preferred(T)
 
     def test_a_budget_on_a_countable_pot_is_accepted_and_published(self):
         doc = {"pots": {"gpt/credits": {"budget": 50, "route_budgets": {GPT_ROUTE: 20}}}}
@@ -9577,12 +9594,12 @@ class TestBudgetsAtPut(MoneyDocBase):
 
     def test_a_classes_change_that_orphans_a_route_budget_warns_dangling(self):
         self.assertEqual(self.put({"pots": {"gpt/credits": {"route_budgets": {GPT_ROUTE: 20}}}})[0], 200)
-        errs, warns, _, _ = ex._doc_check("classes", pay_cfg(gpt=[]))
+        errs, warns, _, _ = ex._doc_check(T, "classes", pay_cfg(gpt=[]))
         self.assertEqual(errs, [])
-        self.assertTrue(any(w.startswith("money: dangling:") and GPT_ROUTE in w for w in warns), warns)
+        self.assertTrue(any(w.startswith(f"{T.name}: money: dangling:") and GPT_ROUTE in w for w in warns), warns)
         # Once live, the orphaned budget is shown dangling on the pot and binds nothing.
         self.install_classes(pay_cfg(gpt=[]))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         _, pref, _ = self.req("GET", "/preferred")
         self.assertTrue(any("dangling" in w for w in pref["pots"]["gpt/credits"]["warnings"]),
                         pref["pots"]["gpt/credits"])
@@ -9605,8 +9622,8 @@ class TestColdRoutesNameAPassingAccount(PayBase):
         self.assertEqual(route_check("lane:default", ACCT_A)["check"], "no")
         self.assertEqual(route_check("lane:default", ACCT_B)["check"], "included")
         self.assertEqual(lane_account("default"), ACCT_B)
-        with ex._plock:
-            self.assertNotIn("effective", ex._preferred["lanes"]["default"],
+        with T.plock:
+            self.assertNotIn("effective", T.preferred["lanes"]["default"],
                              "no number is invented for it")
 
     def test_cold_lane_ties_go_to_the_first_by_name(self):
@@ -9622,9 +9639,9 @@ class TestColdRoutesNameAPassingAccount(PayBase):
         self.assertEqual(lane_account("default"), ACCT_A)
         b = acct(ACCT_B, 20)
         b["raw"]["extra_usage"] = {"is_enabled": False}
-        with ex._lock:
-            ex._state[ACCT_B] = read(b)
-        ex.compute_preferred()
+        with T.lock:
+            T.state[ACCT_B] = read(b)
+        ex.compute_preferred(T)
         self.assertEqual(lane_account("default"), ACCT_B)
 
     def test_cold_pool_names_the_passing_account(self):
@@ -9635,8 +9652,8 @@ class TestColdRoutesNameAPassingAccount(PayBase):
             pool.append(read(g))
         classes_reset(*pool, cfg=pay_cfg())
         self.assertIsNone(ex._provider_effective(pool[0]))
-        with ex._plock:
-            self.assertEqual(ex._preferred["providers"]["gpt"]["account"], "gpt-1")
+        with T.plock:
+            self.assertEqual(T.preferred["providers"]["gpt"]["account"], "gpt-1")
 
 
 class TestC6Metrics(PayBase):
@@ -9650,7 +9667,7 @@ class TestC6Metrics(PayBase):
         classes_reset(opus_spent(), g, kimi_result(), cfg=pay_cfg(opus=[POT_A], gpt=["gpt/credits"]))
         post_ledger(ledger_entry(1, 2.5), ledger_entry(2, 1.5), ledger_entry(3, None),
                     ledger_entry(4, 4.0, at=month_start(time.time()) - 60))
-        self.t = ex.render()
+        self.t = ex.render([T])
 
     def test_help_and_type(self):
         for fam, typ in (("quota_pot_open", "gauge"), ("entitlement_active", "gauge"),
@@ -9680,10 +9697,10 @@ class TestC6Metrics(PayBase):
                            check=f"paid:{POT_A}"), 1)
         self.assertEqual(L(t, "route_check", route="lane:opus", account=ACCT_B, check="no:unknown"), 1)
         n = sum(1 for ln in t.splitlines() if ln.startswith("route_check{"))
-        with ex._lock:
-            snap = list(ex._state.values())
-        with ex._plock:
-            checks = ex._policy_ctx(snap, time.time())["checks"]
+        with T.lock:
+            snap = list(T.state.values())
+        with T.plock:
+            checks = ex._policy_ctx(T, snap, time.time())["checks"]
         self.assertEqual(n, sum(len(c) for c in checks.values()), "one series per (route, account)")
 
     def test_money_spent_total(self):
@@ -9709,7 +9726,7 @@ class TestReportedReadings(PayBase):
     def setUp(self):
         self.t0 = time.time() - 100  # the polls started 100 s ago
         reset(anth_polled(self.t0), gpt_on_credits(pct=40.0, good_age=100))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
 
     def test_a_newer_reading_is_adopted_and_carries_its_own_age(self):
         at = self.t0 + 10
@@ -9720,7 +9737,7 @@ class TestReportedReadings(PayBase):
         self.assertEqual(st["allowance"]["windows"]["five_hour"]["as_of"], self.t0,
                          "a window nothing reported keeps the poll's age")
         self.assertEqual(st["as_of"], self.t0, "the standing's as_of stays the poll's")
-        doc = ex._preferred_payload()
+        doc = ex._preferred_payload(T)
         self.assertEqual(doc["accounts"][ACCT_A]["allowance"]["windows"]["seven_day"]["as_of"], at)
         self.assertEqual(doc["weekly"][ACCT_A], 77.0, "the document reads the merge")
 
@@ -9732,7 +9749,7 @@ class TestReportedReadings(PayBase):
         self.assertEqual(post_reports(rep_reading(1, at, used=29.0, resets=week))[0], [("applied", None)])
         w = live_window("seven_day")
         self.assertEqual((w["used_pct"], w["as_of"]), (30.0, at))
-        self.assertEqual(ex._preferred_payload()["weekly"][ACCT_A], 30.0)
+        self.assertEqual(ex._preferred_payload(T)["weekly"][ACCT_A], 30.0)
         post_reports(rep_reading(2, at + 10, used=29.5))
         self.assertEqual(live_window("seven_day")["used_pct"], 30.0, "half a point below, no reset carried")
         post_reports(rep_reading(3, at + 20, used=31.0))
@@ -9747,7 +9764,7 @@ class TestReportedReadings(PayBase):
         post_reports(rep_reading(1, at, used=28.5))
         self.assertEqual(live_window("seven_day")["used_pct"], 28.5, "more than a point below")
         reset(anth_polled(self.t0), gpt_on_credits(pct=40.0, good_age=100))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         post_reports(rep_reading(2, at, used=29.0, resets=self.t0 + 10 * 86400))
         w = live_window("seven_day")
         self.assertEqual((w["used_pct"], w["resets_at"]), (29.0, self.t0 + 10 * 86400),
@@ -9773,7 +9790,7 @@ class TestReportedReadings(PayBase):
 
     def test_a_reading_with_no_use_never_adds_a_window(self):
         reset(anth_polled(self.t0, five_hour=False))
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         before = {lane: route_check(f"lane:{lane}", ACCT_A) for lane in ("opus", "fable")}
         self.assertEqual({c["check"] for c in before.values()}, {"included"})
         self.assertEqual({c["basis"] for c in before.values()}, {"fresh"})
@@ -9804,7 +9821,7 @@ class TestReportedReadings(PayBase):
         poll_lands(anth_polled(at + 1, weekly=50.0))
         w = live_window("seven_day")
         self.assertEqual((w["used_pct"], w["as_of"]), (50.0, at + 1))
-        self.assertEqual(ex._reported, {}, "dropped once a poll catches up")
+        self.assertEqual(T.reported, {}, "dropped once a poll catches up")
 
     def test_five_hour_is_added_and_a_later_poll_leaving_it_out_removes_it(self):
         reset(anth_polled(self.t0, five_hour=False))
@@ -9825,28 +9842,28 @@ class TestReportedReadings(PayBase):
         res, _ = post_reports(rep_reading(1, self.t0 + 10, used=77.0, account=ACCT_B))
         self.assertEqual(res[0], ("ignored", "an account the brain has never measured"))
         self.assertIsNone(live_ctx()["standings"][ACCT_B]["as_of"])
-        self.assertEqual(ex._reported, {})
+        self.assertEqual(T.reported, {})
 
     def test_the_polls_own_facts_are_unchanged(self):
-        before = copy.deepcopy(ex._state[ACCT_A])
+        before = copy.deepcopy(T.state[ACCT_A])
         now = time.time()
-        health = ex._unified_account_health(now)
+        health = ex._unified_account_health(T, now)
 
         def gauges():
             # Both renders read the clock at `now`: a data age is now - good_ts, rounded to
             # 0.1 s, so two renders on the live clock differ whenever a tenth turns between them.
             with mock.patch.object(ex.time, "time", return_value=now):
-                return sorted(l for l in ex.render().splitlines()
+                return sorted(l for l in ex.render([T]).splitlines()
                               if l.startswith(("claude_usage_window_", "provider_quota_",
                                                "provider_account_quota_", "claude_usage_data_age",
                                                "claude_usage_lane_effective")))
         g0 = gauges()
         post_reports(rep_reading(1, self.t0 + 10, used=95.0),
                      rep_reading(2, self.t0 + 10, account="gpt", used=99.0))
-        self.assertEqual(ex._state[ACCT_A], before, "_state is never written")
+        self.assertEqual(T.state[ACCT_A], before, "_state is never written")
         self.assertEqual(live_window("seven_day")["used_pct"], 95.0)
         self.assertTrue(health["accounts"])
-        self.assertEqual(ex._unified_account_health(now), health,
+        self.assertEqual(ex._unified_account_health(T, now), health,
                          "account_health (good_ts, stale, age_s, the backoff) stays the poll's")
         self.assertTrue(g0)
         self.assertEqual(gauges(), g0, "the window gauges and ages stay the poll's")
@@ -9886,7 +9903,7 @@ class TestRefusalsGolden(PayBase):
 
     def setUp(self):
         reset(acct(ACCT_A, 10.0), gpt_result(), kimi_result())
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         with open(RECORDS_GOLDEN) as f:
             self.doc = json.load(f)["refusals"]
         self.now = max(c["event"]["read_at"] for c in self.doc["applied"]) + 1
@@ -9911,7 +9928,7 @@ class TestRefusalsGolden(PayBase):
             with self.subTest(c["name"]):
                 [(res, why)] = post_reports(served_event(c["event"]), now=self.now)[0]
                 self.assertEqual((res, why), ("refused", c["why"]))
-        self.assertEqual((ex._limit_holds, ex._holds), ({}, {}))
+        self.assertEqual((T.limit_holds, T.holds), ({}, {}))
 
 
 class TestReportsLedgerKind(PayBase):
@@ -9925,7 +9942,7 @@ class TestReportsLedgerKind(PayBase):
 
     def lines(self):
         try:
-            with open(ex.LEDGER_FILE) as f:
+            with open(T.ledger_file) as f:
                 return [json.loads(l) for l in f]
         except FileNotFoundError:
             return []
@@ -9943,7 +9960,7 @@ class TestReportsLedgerKind(PayBase):
         res, _ = post_reports(self.ev(1, at=far), self.ev(2, account="nobody"), self.ev(3, read_at=far))
         self.assertEqual(res[0], ("applied", None), "no read_at rule: the entry's at is its time")
         self.assertEqual(res[1], ("refused", ex._ledger_entry_problem(
-            ledger_entry(2, account="nobody"), ex._account_roster(list(ex._state.values())), time.time())))
+            ledger_entry(2, account="nobody"), ex._account_roster(T, list(T.state.values())), time.time())))
         self.assertEqual(res[2], ("applied", None), "a read_at, if ever sent, is stripped")
 
     def test_a_duplicate_is_ignored_and_seq_returned(self):
@@ -9962,7 +9979,7 @@ class TestReportsLedgerKind(PayBase):
         self.assertIn("disk full", res[0][1])
         self.assertEqual(res[1][0], "applied", "a reading beside it is unaffected")
         self.assertEqual(body["seq"], 0)
-        self.assertEqual(ex._ledger["ids"], {})
+        self.assertEqual(T.ledger["ids"], {})
         self.assertEqual(post_reports(self.ev(1))[0], [("applied", None)], "sent again, it lands")
 
 
@@ -9987,7 +10004,7 @@ class TestReportsEndpoint(_LogCapture, DocAPIBase, PayBase):
         self.assertEqual(self.post(body, key="nope")[0], 401)
         with mock.patch.object(ex, "SWITCH_KEY", ""):
             self.assertEqual(self.post(body)[0], 503)
-        self.assertEqual(ex._reported, {})
+        self.assertEqual(T.reported, {})
         preflight = {"reporter": "deploy-preflight", "events": []}
         self.assertEqual(self.post(preflight, key=None)[0], 401, "the deploy preflight's probe")
         with mock.patch.object(ex, "SWITCH_KEY", ""):
@@ -9997,10 +10014,10 @@ class TestReportsEndpoint(_LogCapture, DocAPIBase, PayBase):
         now = time.time()
         ev = rep_refusal(1, now, until=now + 3600)  # after setUp's poll
         self.assertEqual(self.post({"events": [ev]})[1]["results"][0]["result"], "applied")
-        self.assertIn((ACCT_A, "seven_day"), ex._holds)
+        self.assertIn((ACCT_A, "seven_day"), T.holds)
         self.assertEqual(self.post({"events": [dict(ev, id="f-2", read_at=now + 1, ended=True)]})[1]
                          ["results"][0]["result"], "applied")
-        self.assertEqual(ex._holds, {})
+        self.assertEqual(T.holds, {})
 
     def test_body_shape(self):
         for body in ({}, {"events": {}}, {"events": [], "x": 1}, {"reporter": 5, "events": []},
@@ -10051,7 +10068,7 @@ class TestReportsEndpoint(_LogCapture, DocAPIBase, PayBase):
         g["raw"]["rate_limit"]["primary_window"]["reset_at"] = int(time.time()) + 86400
         classes_reset(g, kimi_result(), cfg=pay_cfg(gpt=["gpt/credits"]))
         install_money({"pots": {"gpt/credits": {"budget": 5.0}}})
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         _, p, _ = self.req("GET", "/preferred")
         self.assertEqual(p["routes"][GPT_ROUTE]["checks"]["gpt"]["check"], "paid")
         code, out = self.post({"events": [dict(ledger_entry(1, 5.0), kind="ledger")]})
@@ -10065,7 +10082,7 @@ class TestReportsEndpoint(_LogCapture, DocAPIBase, PayBase):
     def test_post_ledger_is_not_found(self):
         code, _, _ = self.req("POST", "/ledger", {"entries": [ledger_entry(1)]})
         self.assertEqual(code, 404)
-        self.assertFalse(os.path.exists(ex.LEDGER_FILE))
+        self.assertFalse(os.path.exists(T.ledger_file))
 
     def test_read_at_inside_the_minute_ahead_is_taken(self):
         code, out = self.post({"events": [rep_reading(1, time.time() + 50, used=50.0,
@@ -10115,7 +10132,7 @@ class TestServedGolden(PayBase):
 
     def setUp(self):
         reset(acct(ACCT_A, 10.0), gpt_result(), kimi_result())
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.doc = served_golden()
         # The brain's clock: just after the golden's last read_at.
         self.now = max(c["event"]["read_at"] for c in self.doc["cases"]) + 1
@@ -10146,13 +10163,13 @@ class TestServedGolden(PayBase):
                         self.assertIsNone(reason)
                         usd[ev["account"]] = usd.get(ev["account"], 0.0) + got
                 missing = c.get("seq_missing_after", missing)
-                self.assertEqual(ex._served["seq_missing"], missing)
-        self.assertEqual({a: round(v, 6) for a, v in ex._served["usd"].items()},
+                self.assertEqual(T.served["seq_missing"], missing)
+        self.assertEqual({a: round(v, 6) for a, v in T.served["usd"].items()},
                          {a: round(v, 6) for a, v in usd.items()})
-        self.assertEqual(ex._served["unpriced"], unpriced)
-        self.assertEqual(ex._served["events"], {ACCT_A: 14, "gpt": 7, "kimi": 2})
-        self.assertEqual(ex._served["incomplete"], {ACCT_A: 3})
-        self.assertEqual(ex._served["duplicates"], 1)
+        self.assertEqual(T.served["unpriced"], unpriced)
+        self.assertEqual(T.served["events"], {ACCT_A: 14, "gpt": 7, "kimi": 2})
+        self.assertEqual(T.served["incomplete"], {ACCT_A: 3})
+        self.assertEqual(T.served["duplicates"], 1)
 
     def test_refused(self):
         base = next(c["event"] for c in self.doc["cases"]
@@ -10169,8 +10186,8 @@ class TestServedGolden(PayBase):
                 [(res, why)] = self.post(ev)
                 self.assertEqual(res, "refused")
                 self.assertTrue(why)
-        self.assertEqual(ex._served["events"], {}, "a refused event counts nothing")
-        self.assertEqual(len(ex._served["ids"]), 0)
+        self.assertEqual(T.served["events"], {}, "a refused event counts nothing")
+        self.assertEqual(len(T.served["ids"]), 0)
         self.assertEqual(self.post(served_event(base)), [("applied", None)],
                          "the base event itself is taken")
 
@@ -10180,7 +10197,7 @@ class TestServed(PayBase):
 
     def setUp(self):
         reset(acct(ACCT_A, 10.0), gpt_result(), kimi_result())
-        ex.compute_preferred()
+        ex.compute_preferred(T)
 
     @staticmethod
     def price(model, speed="standard", complete=True, **tokens):
@@ -10290,25 +10307,25 @@ class TestServed(PayBase):
     def test_a_boot_first_heard_counts_no_gap(self):
         """The brain can't tell what a boot sent before it started from what was lost."""
         self.assertEqual(post_reports(served(1, boot="b9", seq=40))[0], [("applied", None)])
-        self.assertEqual(ex._served["seq_missing"], 0)
+        self.assertEqual(T.served["seq_missing"], 0)
         post_reports(served(2, boot="b9", seq=43))
-        self.assertEqual(ex._served["seq_missing"], 2)
+        self.assertEqual(T.served["seq_missing"], 2)
         post_reports(served(3, boot="b9", seq=41))
-        self.assertEqual(ex._served["seq_missing"], 2, "a late seq takes nothing back, adds nothing")
+        self.assertEqual(T.served["seq_missing"], 2, "a late seq takes nothing back, adds nothing")
         post_reports(served(4, boot="b9", seq=44))
-        self.assertEqual(ex._served["seq_missing"], 2)
+        self.assertEqual(T.served["seq_missing"], 2)
 
     def test_memory_is_bounded(self):
         with mock.patch.object(ex, "SERVED_IDS_MAX", 3), mock.patch.object(ex, "SERVED_BOOTS_MAX", 2):
             for i in range(1, 5):
                 post_reports(served(i, boot=f"b{i}", seq=1))
-            self.assertEqual(list(ex._served["ids"]), ["s-2", "s-3", "s-4"])
-            self.assertEqual(list(ex._served["boots"]), ["b3", "b4"])
+            self.assertEqual(list(T.served["ids"]), ["s-2", "s-3", "s-4"])
+            self.assertEqual(list(T.served["boots"]), ["b3", "b4"])
             self.assertEqual(post_reports(served(4, boot="b4", seq=1))[0][0][0], "ignored")
             self.assertEqual(post_reports(served(1, boot="b1", seq=1))[0][0][0], "applied",
                              "an id past the bound is taken again")
             post_reports(served(5, boot="b1", seq=9))
-            self.assertEqual(ex._served["seq_missing"], 7, "b1 heard again: its seq from there")
+            self.assertEqual(T.served["seq_missing"], 7, "b1 heard again: its seq from there")
 
     def test_exposition(self):
         post_reports(served(1, input=1000, output=1000),                       # 0.024
@@ -10319,7 +10336,7 @@ class TestServed(PayBase):
                      served(5, seq=6),                                           # resent id
                      served(6, model="gpt-6-astra", account="gpt", cache_write_5m=None,
                             cache_write_1h=None, input=100000, output=0))  # 1.0
-        t = ex.render()
+        t = ex.render([T])
         L = TestRenderMetrics().line
         for fam in ("served_events_total", "served_api_dollars_total", "served_unpriced_total",
                     "served_incomplete_total", "served_seq_missing_total", "served_duplicates_total"):
@@ -10335,8 +10352,8 @@ class TestServed(PayBase):
         self.assertEqual(L(t, "served_unpriced_total", account=ACCT_A, reason="incomplete"), 1)
         self.assertEqual(L(t, "served_unpriced_total", account=ACCT_A, reason="speed unknown"), 1)
         self.assertEqual(L(t, "served_incomplete_total", account=ACCT_A), 1)
-        self.assertIn("\nserved_seq_missing_total 1\n", t, "seq 4 never came")
-        self.assertIn("\nserved_duplicates_total 1\n", t)
+        self.assertIn(f'\nserved_seq_missing_total{{tenant="{T.id}"}} 1\n', t, "seq 4 never came")
+        self.assertIn(f'\nserved_duplicates_total{{tenant="{T.id}"}} 1\n', t)
 
 
 class TestServedEndpoint(DocAPIBase, PayBase):
@@ -10348,22 +10365,22 @@ class TestServedEndpoint(DocAPIBase, PayBase):
         PayBase.tearDown(self)
 
     def test_a_served_only_post_publishes_nothing(self):
-        ex.compute_preferred()
-        ex._events_publish()  # the document for this state is the published one
+        ex.compute_preferred(T)
+        ex._events_publish(T)  # the document for this state is the published one
         with mock.patch.object(ex, "compute_preferred") as recompute:
             code, out, _ = self.req("POST", "/reports", {"reporter": "nas", "events": [
                 served(1, input=1000), served(2, model="kimi-k3", account="kimi")]})
             self.assertEqual(code, 200)
             self.assertEqual([r["result"] for r in out["results"]], ["applied", "applied"])
             recompute.assert_not_called()
-        self.assertFalse(ex._events_publish(), "the same document: nothing published")
-        self.assertEqual(ex._served["events"], {ACCT_A: 1, "kimi": 1})
+        self.assertFalse(ex._events_publish(T), "the same document: nothing published")
+        self.assertEqual(T.served["events"], {ACCT_A: 1, "kimi": 1})
 
     def test_decisive_counts_only_what_a_decision_reads(self):
         now = time.time()
-        _, decisive = ex.reports_post([served(1)], "t", now)
+        _, decisive = ex.reports_post(T, [served(1)], "t", now)
         self.assertEqual(decisive, 0)
-        _, decisive = ex.reports_post([served(2), rep_reading(1, now, used=50.0, account="gpt")],
+        _, decisive = ex.reports_post(T, [served(2), rep_reading(1, now, used=50.0, account="gpt")],
                                       "t", now)
         self.assertEqual(decisive, 1)
 
@@ -10383,7 +10400,7 @@ class TestServedStep2Keys(PayBase):
 
     def setUp(self):
         reset(acct(ACCT_A, 10.0), gpt_result(), kimi_result())
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.doc = served_golden()
         self.now = max(c["event"]["read_at"] for c in self.doc["cases"]) + 1
 
@@ -10420,7 +10437,7 @@ class TestServedStep2Keys(PayBase):
         for name, ev in cases.items():
             with self.subTest(name):
                 self.assertEqual(self.post(ev), [("applied", None)])
-        self.assertEqual(ex._served["incomplete"], {ACCT_A: 1})
+        self.assertEqual(T.served["incomplete"], {ACCT_A: 1})
 
     def test_the_new_golden_cases_refused(self):
         base = next(c["event"] for c in self.doc["cases"] if c["event"]["id"] == "srv-01")
@@ -10448,8 +10465,8 @@ class TestServedStep2Keys(PayBase):
                 [(res, why)] = self.post(ev)
                 self.assertEqual(res, "refused")
                 self.assertTrue(why)
-        self.assertEqual(ex._served["events"], {}, "a refused event counts nothing")
-        self.assertEqual(ex._sizing["accounts"], {}, "nor reaches sizing")
+        self.assertEqual(T.served["events"], {}, "a refused event counts nothing")
+        self.assertEqual(T.sizing["accounts"], {}, "nor reaches sizing")
 
     def test_an_event_without_the_keys_is_refused(self):
         """Neither key, or only one: refused as any missing key is (66 §11 push 3)."""
@@ -10465,8 +10482,8 @@ class TestServedStep2Keys(PayBase):
                 self.assertIn("missing key", why)
                 for k in gone:
                     self.assertIn(k, why)
-        self.assertEqual(ex._served["events"], {}, "a refused event counts nothing")
-        self.assertEqual(ex._sizing["accounts"], {}, "nor reaches sizing")
+        self.assertEqual(T.served["events"], {}, "a refused event counts nothing")
+        self.assertEqual(T.sizing["accounts"], {}, "nor reaches sizing")
 
     def test_an_unknown_key_is_still_refused(self):
         base = next(c["event"] for c in self.doc["cases"] if c["event"]["id"] == "srv-01")
@@ -10483,7 +10500,7 @@ class TestServedOutputMax(PayBase):
 
     def setUp(self):
         reset(acct(ACCT_A, 10.0), gpt_result(), kimi_result())
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.addCleanup(reset_sizing)
         self.doc = served_golden()
         self.now = max(c["event"]["read_at"] for c in self.doc["cases"]) + 1
@@ -10509,7 +10526,7 @@ class TestServedOutputMax(PayBase):
         for name, ev in cases.items():
             with self.subTest(name):
                 self.assertEqual(self.post(ev), [("applied", None)])
-        self.assertEqual(ex._served["incomplete"], {ACCT_A: 3})
+        self.assertEqual(T.served["incomplete"], {ACCT_A: 3})
 
     def test_refused(self):
         cases = {
@@ -10528,7 +10545,7 @@ class TestServedOutputMax(PayBase):
                 [(res, why)] = self.post(ev)
                 self.assertEqual(res, "refused")
                 self.assertTrue(why.startswith("output_max"), why)
-        self.assertEqual(ex._served["events"], {}, "a refused event counts nothing")
+        self.assertEqual(T.served["events"], {}, "a refused event counts nothing")
 
     def test_the_key_is_required(self):
         """Since 66 §11's push 6 an event without output_max is refused like
@@ -10541,8 +10558,8 @@ class TestServedOutputMax(PayBase):
         """The bound is sizing's only (66 §4): the event counts as unpriced,
         reason incomplete, and adds no API dollars."""
         self.assertEqual(self.post(self.hung(1, output_max=32000)), [("applied", None)])
-        self.assertEqual(ex._served["usd"], {})
-        self.assertEqual(ex._served["unpriced"], {(ACCT_A, "claude-opus-5-5", "incomplete"): 1})
+        self.assertEqual(T.served["usd"], {})
+        self.assertEqual(T.served["unpriced"], {(ACCT_A, "claude-opus-5-5", "incomplete"): 1})
 
     def test_the_bound(self):
         """The middle: the known tokens and half the bound as output, at the
@@ -10565,7 +10582,7 @@ class SizingBase(PayBase):
 
     def setUp(self):
         reset(acct(ACCT_A, 10.0), gpt_result(), kimi_result())
-        ex.compute_preferred()
+        ex.compute_preferred(T)
         self.n = 0
         self.seqs = {}
         self.logged = []
@@ -10601,7 +10618,7 @@ class SizingBase(PayBase):
         return out
 
     def win(self, window="seven_day", account=ACCT_A):
-        return ex._sizing["windows"][(account, window)]
+        return T.sizing["windows"][(account, window)]
 
     def samples(self, window="seven_day", account=ACCT_A):
         return [(s["p"], s["q"], round(s["usd"], 6)) for s in self.win(window, account)["samples"]]
@@ -10622,22 +10639,22 @@ class SizingBase(PayBase):
         t = self.T0 if t0 is None else t0
         mk = functools.partial(self.ev, window=window, account=account, reset=reset)
         evs = [mk(t, t + 1, used=q0, model=model)]
-        q, T = q0 + 1, t + 100
-        evs.append(mk(T, T + 1, used=q, model=model))
-        bounds = [T]
+        q, TT = q0 + 1, t + 100
+        evs.append(mk(TT, TT + 1, used=q, model=model))
+        bounds = [TT]
         for step in steps:
             points, usds, m = (tuple(step) + (model,))[:3]
             if not usds:
-                evs[-1]["read_at"] = T + gap + 2
+                evs[-1]["read_at"] = TT + gap + 2
             for k, u in enumerate(usds):
                 u, um = u if isinstance(u, tuple) else (u, m)
-                end = T + 10 + k * (gap - 20) / max(len(usds), 1)
+                end = TT + 10 + k * (gap - 20) / max(len(usds), 1)
                 evs.append(mk(end - 2, end, used=q, usd=u, model=um))
-            T, q = T + gap, q + points
-            evs.append(mk(T, T + 1, used=q, model=model))
-            bounds.append(T)
+            TT, q = TT + gap, q + points
+            evs.append(mk(TT, TT + 1, used=q, model=model))
+            bounds.append(TT)
         if close:
-            evs.append(mk(T + ex.SIZING_SETTLE_S + 1, T + ex.SIZING_SETTLE_S + 2, used=q,
+            evs.append(mk(TT + ex.SIZING_SETTLE_S + 1, TT + ex.SIZING_SETTLE_S + 2, used=q,
                           model=model))
         return self.in_end_order(evs), bounds
 
@@ -10685,8 +10702,8 @@ class TestSizingFixture(SizingBase):
 
     def run_in(self, events, check=None):
         reset_sizing()
-        with ex._served_lock:
-            ex._served = ex._served_fresh()
+        with T.served_lock:
+            T.served = ex._served_fresh()
         for i, ev in enumerate(events, 1):
             # The proxy numbers what it sends in the order it sends it.
             self.feed(dict(ev, seq=i), now=ev["read_at"] + 1)
@@ -10832,7 +10849,7 @@ class TestSizingBoundaries(SizingBase):
         self.assertEqual(self.samples(), [(99.0, 100.0, 1.0)])
         self.assertEqual(self.counts(), {"sample": 1, "over_limit": 1})
         self.assertIsNone(ex._sizing_hold_from(self.win()), "a window at its allowance holds nothing")
-        self.assertEqual(len(ex._sizing["accounts"][ACCT_A]["buf"]), 1, "the last, in its grace")
+        self.assertEqual(len(T.sizing["accounts"][ACCT_A]["buf"]), 1, "the last, in its grace")
 
     def test_a_reset_reanchors(self):
         evs, (T11, T12) = self.walk([(1, [1.0])], gap=700, close=False)
@@ -10861,8 +10878,8 @@ class TestSizingBoundaries(SizingBase):
         for late, want in ((True, {"sample": 1}), (False, {"period_change": 1})):
             with self.subTest(late=late):
                 reset_sizing()
-                with ex._reports_lock:
-                    ex._holds.clear()
+                with T.reports_lock:
+                    T.holds.clear()
                 evs, (T99,) = self.walk([], q0=98.0, close=False)
                 evs.append(self.ev(T99 + 50, T99 + 60, used=99.0, usd=2.0))
                 evs.append(self.ev(T99 + 650, T99 + 660, used=99.0, usd=3.0))
@@ -10896,18 +10913,18 @@ class TestSizingOutcomes(SizingBase):
         self.assertEqual(self.outcome(), {"sample": 1})
 
     def test_unpriced(self):
-        T = self.T0 + 100
-        self.one_step([self.ev(T + 150, T + 160, model="claude-opus-9")])
+        TT = self.T0 + 100
+        self.one_step([self.ev(TT + 150, TT + 160, model="claude-opus-9")])
         self.assertEqual(self.outcome(), {"unpriced": 1})
 
     def test_incomplete(self):
-        T = self.T0 + 100
-        self.one_step([self.ev(T + 150, T + 160, complete=False, why="stream ended")])
+        TT = self.T0 + 100
+        self.one_step([self.ev(TT + 150, TT + 160, complete=False, why="stream ended")])
         self.assertEqual(self.outcome(), {"incomplete": 1})
 
     def test_paid(self):
-        T = self.T0 + 100
-        self.one_step([self.ev(T + 150, T + 160, usd=5.0, paid=True)])
+        TT = self.T0 + 100
+        self.one_step([self.ev(TT + 150, TT + 160, usd=5.0, paid=True)])
         self.assertEqual(self.outcome(), {"paid": 1})
 
     def test_seq_gap(self):
@@ -10931,9 +10948,9 @@ class TestSizingOutcomes(SizingBase):
         self.assertEqual(self.outcome(), {"proxy_restart": 1})
 
     def test_two_proxies_at_once_are_no_restart(self):
-        T = self.T0 + 100
+        TT = self.T0 + 100
         evs, bounds = self.walk([(1, [1.0, 1.0])], close=False)
-        other = [self.ev(t - 1, t, boot="b2") for t in (self.T0 + 5, T + 50, T + 250, T + 320)]
+        other = [self.ev(t - 1, t, boot="b2") for t in (self.T0 + 5, TT + 50, TT + 250, TT + 320)]
         for e in sorted(evs + other, key=lambda e: e["read_at"]):
             self.feed(e, reporter="p2" if e["boot"] == "b2" else "p1")
         T12 = bounds[-1]
@@ -10986,19 +11003,19 @@ class TestSizingOutcomes(SizingBase):
         for e in evs:
             self.feed(e, reporter="p1")
         self.feed(self.ev(T11 + 30, T11 + 40, boot="b2"), reporter="p2")
-        ex._sizing_shutdown()
+        ex._sizing_shutdown(T)
         reset_sizing_memory()
-        ex._sizing_load()
+        ex._sizing_load(T)
         self.feed(self.ev(T12 + 30, T12 + 40, boot="b2"), reporter="p2")
         self.feed(self.ev(T13 + 700, T13 + 701, used=13.0), reporter="p1")
         self.assertEqual(self.outcome(), {"sample": 2})
 
     def test_overflow(self):
         with mock.patch.object(ex, "SIZING_EVENTS_MAX", 4):
-            T = self.T0 + 100
-            self.one_step([self.ev(T + 150 + k, T + 151 + k) for k in range(5)])
+            TT = self.T0 + 100
+            self.one_step([self.ev(TT + 150 + k, TT + 151 + k) for k in range(5)])
         self.assertEqual(self.outcome(), {"overflow": 1})
-        self.assertGreater(ex._sizing["accounts"][ACCT_A]["dropped"], 0)
+        self.assertGreater(T.sizing["accounts"][ACCT_A]["dropped"], 0)
 
     def test_silent(self):
         self.one_step(usd=())
@@ -11019,10 +11036,10 @@ class TestSizingOutcomes(SizingBase):
     def test_brain_restart(self):
         evs, bounds = self.walk([(1, [1.0])], close=False)
         self.feed(*evs)
-        with ex._sizing_lock:
-            ex._sizing_save()                           # the samples' write; no open state
-        ex._sizing_load()
-        self.assertIn((ACCT_A, "seven_day"), ex._sizing["restarted"])
+        with T.sizing_lock:
+            ex._sizing_save(T)                           # the samples' write; no open state
+        ex._sizing_load(T)
+        self.assertIn((ACCT_A, "seven_day"), T.sizing["restarted"])
         T12 = bounds[-1]
         self.feed(self.ev(T12 + 50, T12 + 51, used=12.0),
                   self.ev(T12 + 300, T12 + 301, used=13.0),
@@ -11062,8 +11079,8 @@ class TestSizingBound(SizingBase):
         return bounds
 
     def test_a_small_span_is_a_sample_at_the_middle(self):
-        T = self.T0 + 100
-        self.one_step(self.hung(T + 150, T + 160))     # spans $0.02 of $2.11
+        TT = self.T0 + 100
+        self.one_step(self.hung(TT + 150, TT + 160))     # spans $0.02 of $2.11
         mid = 0.1 + 500 * self.OUT
         self.assertEqual(self.counts(), {"sample": 1, "bounded": 1})
         [smp] = self.win()["samples"]
@@ -11078,8 +11095,8 @@ class TestSizingBound(SizingBase):
         self.assertIn(": sample; 1 hung-up, spans $0.0200 against 5% of the work", line)
 
     def test_a_large_span_is_incomplete(self):
-        T = self.T0 + 100
-        self.one_step(self.hung(T + 150, T + 160, output_max=10000))  # $0.20 of $2.20
+        TT = self.T0 + 100
+        self.one_step(self.hung(TT + 150, TT + 160, output_max=10000))  # $0.20 of $2.20
         self.assertEqual(self.counts(), {"incomplete": 1})
         self.assertEqual(self.win()["samples"], [])
         rg = self.win()["range"]
@@ -11089,23 +11106,23 @@ class TestSizingBound(SizingBase):
 
     def test_the_spans_add_up(self):
         """Each span is under 5% of the work; together they are over it."""
-        T = self.T0 + 100
-        self.one_step(*(self.hung(T + 150 + k, T + 160 + k, output_max=3000) for k in range(2)))
+        TT = self.T0 + 100
+        self.one_step(*(self.hung(TT + 150 + k, TT + 160 + k, output_max=3000) for k in range(2)))
         self.assertEqual(self.counts(), {"incomplete": 1})
 
     def test_an_incomplete_event_without_a_bound_is_incomplete(self):
-        T = self.T0 + 100
+        TT = self.T0 + 100
         for kw in (dict(output_max=None), dict(model="claude-unknown-9")):
             with self.subTest(kw):
                 reset_sizing()
-                self.one_step(self.hung(T + 150, T + 160, **kw))
+                self.one_step(self.hung(TT + 150, TT + 160, **kw))
                 self.assertEqual(self.counts(), {"incomplete": 1})
 
     def test_a_paid_hung_up_request_closes_its_step_as_paid(self):
         """A paid request's work is the account's own spend, not the meter's:
         its span is not the meter's either, and the step closes as paid."""
-        T = self.T0 + 100
-        self.one_step(self.hung(T + 150, T + 160, output_max=10000, paid=True))
+        TT = self.T0 + 100
+        self.one_step(self.hung(TT + 150, TT + 160, output_max=10000, paid=True))
         self.assertEqual(self.counts(), {"paid": 1})
         self.assertFalse(any("hung-up" in l for l in self.logged))
 
@@ -11114,12 +11131,12 @@ class TestSizingBound(SizingBase):
         self.feed(*evs)
         self.feed(self.ev(T12 + 40, T12 + 45, used=12.0, usd=1.0),
                   self.hung(T12 + 50, T12 + 60))
-        ex._sizing_shutdown()
-        with open(ex.SIZING_FILE) as f:
+        ex._sizing_shutdown(T)
+        with open(T.sizing_file) as f:
             saved = json.load(f)
         reset_sizing_memory()
-        ex._sizing_load()
-        [e] = [e for e in ex._sizing["accounts"][ACCT_A]["buf"] if not e["complete"]]
+        ex._sizing_load(T)
+        [e] = [e for e in T.sizing["accounts"][ACCT_A]["buf"] if not e["complete"]]
         self.assertAlmostEqual(e["span"], 1000 * self.OUT)
         self.feed(self.ev(T12 + 300, T12 + 301, used=13.0),
                   self.ev(T12 + 1000, T12 + 1001, used=13.0))
@@ -11139,14 +11156,14 @@ class TestSizingBound(SizingBase):
                 for e in doc["open"]["accounts"][ACCT_A]["buf"]:
                     bad(e)
                 reset_sizing()
-                with open(ex.SIZING_FILE, "w") as f:
+                with open(T.sizing_file, "w") as f:
                     json.dump(doc, f)
-                ex._sizing_load()
-                self.assertEqual(ex._sizing["windows"], {})
-                self.assertIsNotNone(ex._sizing_gate["set_aside"])
+                ex._sizing_load(T)
+                self.assertEqual(T.sizing["windows"], {})
+                self.assertIsNotNone(T.sizing_gate["set_aside"])
 
     def test_sizing_names_the_constant(self):
-        self.assertEqual(ex.sizing_payload()["constants"]["unseen"], 0.05)
+        self.assertEqual(ex.sizing_payload(T)["constants"]["unseen"], 0.05)
 
 
 class TestSizingScopes(SizingBase):
@@ -11169,7 +11186,7 @@ class TestSizingScopes(SizingBase):
         self.feed(*evs)
         self.assertEqual(self.samples(), [(11.0, 12.0, 6.0)])
         self.assertEqual(self.samples("scoped:Fable"), [(6.0, 7.0, 2.0)])
-        held = ex._sizing["accounts"][ACCT_A]["buf"]
+        held = T.sizing["accounts"][ACCT_A]["buf"]
         self.assertTrue(all(e["r"] > t + 400 for e in held), "closed past by every window")
 
     def test_an_event_leaves_once_no_window_needs_it(self):
@@ -11183,7 +11200,7 @@ class TestSizingScopes(SizingBase):
                   self.ev(t + 170, t + 180, readings=fb, model="claude-fable-5-1", usd=1.0),
                   self.ev(t + 300, t + 301, used=12.0),
                   self.ev(t + 1000, t + 1001, used=12.0))
-        rs = [e["r"] for e in ex._sizing["accounts"][ACCT_A]["buf"]]
+        rs = [e["r"] for e in T.sizing["accounts"][ACCT_A]["buf"]]
         self.assertNotIn(t + 160, rs, "Opus work: seven_day closed past it")
         self.assertIn(t + 180, rs, "Fable work: scoped:Fable's open step still needs it")
 
@@ -11211,13 +11228,13 @@ class TestSizingScopes(SizingBase):
         self.assertEqual(self.win()["retracted"], {"late": 1})
         self.assertEqual(self.win()["range"]["work"], 1.5)
         self.assertEqual(self.win()["range"]["steps"][0]["work"], 1.5)
-        self.assertEqual(ex._sizing["accounts"][ACCT_A]["late"], 0)
+        self.assertEqual(T.sizing["accounts"][ACCT_A]["late"], 0)
         self.assertTrue(any(l.endswith("late (sample retracted)") for l in self.logged))
-        self.assertIn(f'sizing_samples_retracted_total{{account="{ACCT_A}",window="seven_day",'
-                      'outcome="late"} 1', "\n".join(ex._sizing_metric_lines()))
+        self.assertIn(f'sizing_samples_retracted_total{{tenant="{T.id}",account="{ACCT_A}",window="seven_day",'
+                      'outcome="late"} 1', "\n".join(ex._sizing_metric_lines(T)))
         # Before the first transition: no step, no range; no window can use it.
         self.feed(self.ev(self.T0 + 40, self.T0 + 50, usd=0.5, boot="b2"), reporter="p2")
-        self.assertEqual(ex._sizing["accounts"][ACCT_A]["late"], 1)
+        self.assertEqual(T.sizing["accounts"][ACCT_A]["late"], 1)
 
     def test_a_late_event_unsilences_its_step(self):
         evs, (T11, T12) = self.walk([(1, [])])
@@ -11275,7 +11292,7 @@ class TestSizingScopes(SizingBase):
         self.feed(*evs)
         self.feed(self.ev(T13 + 20, T13 + 30, usd=1.0, readings={}))
         self.assertIsNotNone(self.win()["anchor"])
-        self.assertTrue(ex._sizing["accounts"][ACCT_A]["buf"])
+        self.assertTrue(T.sizing["accounts"][ACCT_A]["buf"])
         self.feed(self.ev(R + 100, R + 110, readings={}))
         self.assertIsNotNone(self.win()["anchor"], "not before the settle past the reset")
         t = R + ex.SIZING_SETTLE_S + 1
@@ -11285,7 +11302,7 @@ class TestSizingScopes(SizingBase):
         self.assertIsNone(ex._sizing_hold_from(self.win()))
         t2 = t + 11 + ex.SIZING_SETTLE_S
         self.feed(self.ev(t + 10, t2, readings={}))
-        self.assertEqual([e["r"] for e in ex._sizing["accounts"][ACCT_A]["buf"]], [t2],
+        self.assertEqual([e["r"] for e in T.sizing["accounts"][ACCT_A]["buf"]], [t2],
                          "nothing held for it: only the newest event's grace")
         self.assertTrue(any("lets go of its open step" in l for l in self.logged))
 
@@ -11294,26 +11311,26 @@ class TestSizingScopes(SizingBase):
         self.feed(*evs)
         e = self.ev(T11 + 50, T11 + 60, usd=1.0)
         self.feed(e)
-        with ex._served_lock:
-            ex._served = ex._served_fresh()        # a restart forgot the ids ...
+        with T.served_lock:
+            T.served = ex._served_fresh()        # a restart forgot the ids ...
         self.feed(dict(e, id="s-again"))           # ... and the proxy sends it again
-        self.assertEqual(sum(1 for x in ex._sizing["accounts"][ACCT_A]["buf"]
+        self.assertEqual(sum(1 for x in T.sizing["accounts"][ACCT_A]["buf"]
                              if x["seq"] == e["seq"]), 1)
 
     def test_the_gap_bound(self):
         with mock.patch.object(ex, "SIZING_GAPS_MAX", 3):
             for k in range(6):
                 self.feed(self.ev(self.T0 + k, self.T0 + k + 0.5, seq=10 * k + 1))
-        self.assertEqual(len(ex._sizing["gaps"]), 3)
+        self.assertEqual(len(T.sizing["gaps"]), 3)
 
     def test_steps_outside_the_proxy_window_need_no_events(self):
         """Without readings (Kimi, or a head with no rate-limit headers) the
         buffer keeps only the settle's grace."""
         for k in range(5):
             self.feed(self.ev(self.T0 + k * 400, self.T0 + k * 400 + 1, usd=1.0))
-        rs = [e["r"] for e in ex._sizing["accounts"][ACCT_A]["buf"]]
+        rs = [e["r"] for e in T.sizing["accounts"][ACCT_A]["buf"]]
         self.assertEqual(rs, [self.T0 + 1201, self.T0 + 1601])
-        self.assertEqual(ex._sizing["windows"], {})
+        self.assertEqual(T.sizing["windows"], {})
 
 
 class TestSizingEstimator(SizingBase):
@@ -11380,28 +11397,28 @@ class TestSizingEstimator(SizingBase):
                                         "claude-sonnet-5-5|standard|standard",
                                         "claude-opus-5-5|standard|standard"})
         self.assertAlmostEqual(s["usd"], 0.075 + 2.0)
-        with ex._sizing_lock:
-            ex._sizing_save()
+        with T.sizing_lock:
+            ex._sizing_save(T)
         long_rows = {"standard": dict(ex.API_LONG_CONTEXT["claude-haiku-5-5"][1]["standard"],
                                       input=1.0)}
         with mock.patch.dict(ex.API_LONG_CONTEXT,
                              {"claude-haiku-5-5": (100000, long_rows)}):
-            ex._sizing_load()
+            ex._sizing_load(T)
             [s] = self.win()["samples"]
             self.assertAlmostEqual(s["usd"], 0.15 + 2.0)
             self.assertAlmostEqual(s["by"]["claude-haiku-5-5|standard|long"]["usd"], 0.15)
-        with ex._sizing_lock:
-            ex._sizing_save()
+        with T.sizing_lock:
+            ex._sizing_save(T)
         with mock.patch.dict(ex.API_LIST_PRICES):
             del ex.API_LIST_PRICES["claude-sonnet-5-5"]
-            ex._sizing_load()
+            ex._sizing_load(T)
             self.assertEqual(self.win()["samples"], [])
             self.assertTrue(any("1 dropped" in l for l in self.logged))
 
     def test_per_model_medians(self):
         evs, _ = self.walk([(1, [1.0])] * 3 + [(1, [2.0], "claude-fable-5-1")] * 2)
         self.feed(*evs)
-        view = ex.sizing_payload()["accounts"][ACCT_A]["windows"]["seven_day"]
+        view = ex.sizing_payload(T)["accounts"][ACCT_A]["windows"]["seven_day"]
         self.assertEqual(view["per_model"],
                          {"claude-fable-5-1": {"median_per_point": 2.0, "samples": 2},
                           "claude-opus-5-5": {"median_per_point": 1.0, "samples": 3}})
@@ -11411,10 +11428,10 @@ class TestSizingOutside(SizingBase):
     """66 §6: the signed sum over the measured range."""
 
     def view(self, window="seven_day", account=ACCT_A):
-        return ex.sizing_payload()["accounts"][account]["windows"][window]["outside"]
+        return ex.sizing_payload(T)["accounts"][account]["windows"][window]["outside"]
 
     def test_none_before_a_step(self):
-        self.assertIsNone(ex.sizing_payload()["accounts"][ACCT_A]["windows"]["seven_day"]["outside"])
+        self.assertIsNone(ex.sizing_payload(T)["accounts"][ACCT_A]["windows"]["seven_day"]["outside"])
 
     def test_near_zero_on_proxy_only_use(self):
         evs, _ = self.walk([(1, [1.0])] * 4)
@@ -11466,7 +11483,7 @@ class TestSizingPoll(SizingBase):
 
     def poll(self, t, remaining, weekly=2.0):
         res = kimi_result(ts=t, total_remaining=remaining, weekly=weekly)
-        ex._sizing_poll("kimi", res)
+        ex._sizing_poll(T, "kimi", res)
 
     def test_modes(self):
         self.assertEqual(ex._sizing_mode("anthropic", "seven_day"), "header")
@@ -11481,7 +11498,7 @@ class TestSizingPoll(SizingBase):
     def test_an_anthropic_five_hour_reading_is_not_sized(self):
         self.feed(self.ev(self.T0, self.T0 + 1,
                           readings={"five_hour": {"used_pct": 40.0, "resets_at": RESET_7D}}))
-        self.assertNotIn((ACCT_A, "five_hour"), ex._sizing["windows"])
+        self.assertNotIn((ACCT_A, "five_hour"), T.sizing["windows"])
 
     def test_the_pool_steps_without_a_reset(self):
         P = ex.POLL_INTERVAL
@@ -11509,10 +11526,10 @@ class TestSizingPoll(SizingBase):
     def test_a_limit_the_polls_stop_carrying_lets_go_at_its_reset(self):
         t = self.T0
         R = t + 1000
-        with ex._sizing_lock:
-            ex._sizing_acct("kimi", "kimi")
-            w = ex._sizing_win("kimi", "window:gone", "poll")
-            ex._sizing_head("kimi", "window:gone", w, t, 10.0, R, t)
+        with T.sizing_lock:
+            ex._sizing_acct(T, "kimi", "kimi")
+            w = ex._sizing_win(T, "kimi", "window:gone", "poll")
+            ex._sizing_head(T, "kimi", "window:gone", w, t, 10.0, R, t)
         self.poll(R + 100, 90.0)
         self.assertIsNotNone(w["anchor"])
         self.poll(R + ex.SIZING_SETTLE_S + 1, 90.0)
@@ -11551,12 +11568,12 @@ class TestSizingPersistence(SizingBase):
     def test_samples_round_trip(self):
         evs, _ = self.walk([(1, [1.0])] * 3)
         self.feed(*evs)
-        with open(ex.SIZING_FILE) as f:
+        with open(T.sizing_file) as f:
             doc = json.load(f)
         self.assertEqual(doc["v"], 1)
         self.assertNotIn("open", doc, "the open state is not written as samples change")
         before = copy.deepcopy(self.win()["samples"])
-        ex._sizing_load()
+        ex._sizing_load(T)
         self.assertEqual(self.win()["samples"], before)
         self.assertEqual(self.win()["basis"], "learned")
 
@@ -11566,12 +11583,12 @@ class TestSizingPersistence(SizingBase):
         T12 = bounds[-1]
         self.feed(self.ev(T12 + 50, T12 + 60, used=12.0, usd=1.5))
         before = copy.deepcopy((self.win()["anchor"], self.win()["pending"]))
-        ex._sizing_shutdown()
+        ex._sizing_shutdown(T)
         reset_sizing_memory()
-        ex._sizing_load()
+        ex._sizing_load(T)
         self.assertEqual((self.win()["anchor"], self.win()["pending"]), before)
-        self.assertEqual(ex._sizing["restarted"], set())
-        with open(ex.SIZING_FILE) as f:
+        self.assertEqual(T.sizing["restarted"], set())
+        with open(T.sizing_file) as f:
             self.assertNotIn("open", json.load(f), "good for this start only")
         self.feed(self.ev(T12 + 300, T12 + 301, used=13.0),
                   self.ev(T12 + 1000, T12 + 1001, used=13.0))
@@ -11581,12 +11598,12 @@ class TestSizingPersistence(SizingBase):
     def test_a_start_without_it_marks_the_open_step(self):
         evs, bounds = self.walk([(1, [1.0])], close=False)
         self.feed(*evs)
-        ex._sizing_shutdown()
+        ex._sizing_shutdown(T)
         reset_sizing_memory()
-        ex._sizing_load()                      # the open state is used once ...
+        ex._sizing_load(T)                      # the open state is used once ...
         reset_sizing_memory()
-        ex._sizing_load()                      # ... so a second start is a crash's
-        self.assertIn((ACCT_A, "seven_day"), ex._sizing["restarted"])
+        ex._sizing_load(T)                      # ... so a second start is a crash's
+        self.assertIn((ACCT_A, "seven_day"), T.sizing["restarted"])
         self.assertTrue(any("no open state" in l for l in self.logged))
 
     def test_sigterm_saves_and_exits(self):
@@ -11595,7 +11612,7 @@ class TestSizingPersistence(SizingBase):
         self.feed(*evs)
         with self.assertRaises(SystemExit):
             ex._sigterm(15, None)
-        with open(ex.SIZING_FILE) as f:
+        with open(T.sizing_file) as f:
             self.assertIn("open", json.load(f))
 
     def test_a_missing_or_unusable_file(self):
@@ -11603,11 +11620,11 @@ class TestSizingPersistence(SizingBase):
         version, a version-1 file with a field missing or of the wrong type)
         is set aside as .bad-<UTC time>, never over an earlier one, before
         anything is written; sizing starts empty and /sizing names it."""
-        ex._sizing_load()
-        self.assertEqual(ex._sizing["windows"], {})
+        ex._sizing_load(T)
+        self.assertEqual(T.sizing["windows"], {})
         evs, _ = self.walk([(1, [1.0])] * 2)
         self.feed(*evs)
-        with open(ex.SIZING_FILE) as f:
+        with open(T.sizing_file) as f:
             good = json.load(f)
         smp = good["windows"][ACCT_A]["seven_day"]["samples"][0]
         bad_open = dict(good, open={"accounts": {ACCT_A: {"data_t": 1.0, "buf": [{"r": 1.0}]}}})
@@ -11630,24 +11647,24 @@ class TestSizingPersistence(SizingBase):
             with self.subTest(name):
                 reset_sizing_memory()
                 self.logged.clear()
-                with open(ex.SIZING_FILE, "w") as f:
+                with open(T.sizing_file, "w") as f:
                     f.write(text)
-                ex._sizing_load()
-                self.assertEqual(ex._sizing["windows"], {})
-                self.assertFalse(os.path.exists(ex.SIZING_FILE))
-                bad = ex._sizing_gate["set_aside"]
+                ex._sizing_load(T)
+                self.assertEqual(T.sizing["windows"], {})
+                self.assertFalse(os.path.exists(T.sizing_file))
+                bad = T.sizing_gate["set_aside"]
                 self.assertRegex(bad, r"\.bad-\d{8}T\d{6}Z(-\d+)?$")
                 self.assertEqual(len(sizing_bad_files()), k + 1, "never over an earlier one")
                 with open(bad) as f:
                     self.assertEqual(f.read(), text)
                 self.assertEqual(len([l for l in self.logged if "set aside as" in l]), 1)
-                self.assertEqual(ex.sizing_payload()["file"], {
-                    "path": ex.SIZING_FILE, "frozen": False, "frozen_why": None, "set_aside": bad})
+                self.assertEqual(ex.sizing_payload(T)["file"], {
+                    "path": T.sizing_file, "frozen": False, "frozen_why": None, "set_aside": bad})
                 # Sizing goes on, and its next save leaves the set-aside file alone.
                 self.feed(*self.walk([(1, [1.0])], t0=self.T0 + 10000)[0])
                 with open(bad) as f:
                     self.assertEqual(f.read(), text)
-                os.remove(ex.SIZING_FILE)
+                os.remove(T.sizing_file)
 
     def test_a_file_that_cannot_be_read_is_left_and_frozen(self):
         """An I/O error reading a file that may be good: it stays where it
@@ -11655,26 +11672,26 @@ class TestSizingPersistence(SizingBase):
         and the shutdown says the open state was not saved."""
         evs, _ = self.walk([(1, [1.0])] * 2)
         self.feed(*evs)
-        with open(ex.SIZING_FILE) as f:
+        with open(T.sizing_file) as f:
             good = f.read()
         reset_sizing_memory()
         real_open = open
 
         def deny(path, *a, **k):
-            if path == ex.SIZING_FILE:
+            if path == T.sizing_file:
                 raise PermissionError(13, "Permission denied")
             return real_open(path, *a, **k)
         with mock.patch("builtins.open", deny):
-            ex._sizing_load()
+            ex._sizing_load(T)
         self.assertEqual(sizing_bad_files(), [])
-        self.assertEqual(ex._sizing["windows"], {})
-        f = ex.sizing_payload()["file"]
+        self.assertEqual(T.sizing["windows"], {})
+        f = ex.sizing_payload(T)["file"]
         self.assertTrue(f["frozen"])
         self.assertIn("Permission denied", f["frozen_why"])
         self.assertIsNone(f["set_aside"])
         self.feed(*self.walk([(1, [1.0])], t0=self.T0 + 10000)[0])
-        ex._sizing_shutdown()
-        with open(ex.SIZING_FILE) as fh:
+        ex._sizing_shutdown(T)
+        with open(T.sizing_file) as fh:
             self.assertEqual(fh.read(), good)
         self.assertTrue(any(l.startswith("sizing: open state not saved: sizing is frozen (cannot read")
                             for l in self.logged))
@@ -11683,7 +11700,7 @@ class TestSizingPersistence(SizingBase):
     def test_a_missing_key_never_passes_as_null(self):
         evs, _ = self.walk([(1, [1.0])] * 2)
         self.feed(*evs)
-        with open(ex.SIZING_FILE) as f:
+        with open(T.sizing_file) as f:
             doc = json.load(f)
         for key in ("q", "reset"):
             with self.subTest(key):
@@ -11692,13 +11709,13 @@ class TestSizingPersistence(SizingBase):
                 self.assertEqual(ex._sizing_doc_problem(d), f"windows.{ACCT_A}.seven_day.range")
 
     def test_a_file_that_cannot_be_set_aside_is_never_written_over(self):
-        with open(ex.SIZING_FILE, "w") as f:
+        with open(T.sizing_file, "w") as f:
             f.write("{")
         with mock.patch.object(ex.os, "replace", side_effect=OSError("read-only")):
-            ex._sizing_load()
-        self.assertIn("not set aside (read-only)", ex.sizing_payload()["file"]["frozen_why"])
+            ex._sizing_load(T)
+        self.assertIn("not set aside (read-only)", ex.sizing_payload(T)["file"]["frozen_why"])
         self.feed(*self.walk([(1, [1.0])])[0])
-        with open(ex.SIZING_FILE) as f:
+        with open(T.sizing_file) as f:
             self.assertEqual(f.read(), "{")
 
     def test_the_range_is_repriced_at_load(self):
@@ -11708,12 +11725,12 @@ class TestSizingPersistence(SizingBase):
         row = dict(ex.API_LIST_PRICES["claude-opus-5-5"]["standard"])
         row["input"] *= 2
         with mock.patch.dict(ex.API_LIST_PRICES, {"claude-opus-5-5": {"standard": row}}):
-            ex._sizing_load()
+            ex._sizing_load(T)
             self.assertAlmostEqual(self.win()["range"]["work"], 4.0)
             self.assertEqual([round(s["usd"], 6) for s in self.win()["samples"]], [2.0, 2.0])
         with mock.patch.dict(ex.API_LIST_PRICES):
             del ex.API_LIST_PRICES["claude-opus-5-5"]
-            ex._sizing_load()
+            ex._sizing_load(T)
             self.assertIsNone(self.win()["range"])
             self.assertTrue(any("1 measured range(s) started again" in l for l in self.logged))
 
@@ -11725,28 +11742,28 @@ class TestSizingPersistence(SizingBase):
         evs, bounds = self.walk([(1, [1.0])], close=False)
         self.feed(*evs)
         T12 = bounds[-1]
-        ex._sizing_shutdown()
-        with open(ex.SIZING_FILE) as f:
+        ex._sizing_shutdown(T)
+        with open(T.sizing_file) as f:
             saved = f.read()
         self.assertIn('"open"', saved)
         pending = copy.deepcopy(self.win()["pending"])
-        counted = copy.deepcopy((ex._served["events"], ex._served["usd"], list(ex._served["ids"])))
+        counted = copy.deepcopy((T.served["events"], T.served["usd"], list(T.served["ids"])))
         late = self.ev(T12 + 700, T12 + 701, used=12.0, usd=1.0)   # would close the step
         out = post_reports(late, now=T12 + 702)[0]
         self.assertEqual(out, [("retry", "the brain is shutting down")])
-        self.assertEqual((ex._served["events"], ex._served["usd"], list(ex._served["ids"])), counted)
+        self.assertEqual((T.served["events"], T.served["usd"], list(T.served["ids"])), counted)
         refusal = rep_refusal(self.n + 1, T12 + 710, resets=RESET_7D)
         self.assertEqual(post_reports(refusal, now=T12 + 711)[0],
                          [("retry", "the brain is shutting down")])
         self.assertEqual(self.win()["pending"], pending)
-        with ex._reports_lock:
-            self.assertEqual(ex._holds, {}, "nothing of the refusal is kept")
-        with ex._sizing_lock:
-            ex._sizing_save()
-        with open(ex.SIZING_FILE) as f:
+        with T.reports_lock:
+            self.assertEqual(T.holds, {}, "nothing of the refusal is kept")
+        with T.sizing_lock:
+            ex._sizing_save(T)
+        with open(T.sizing_file) as f:
             self.assertEqual(f.read(), saved, "the open state stays on the file")
         reset_sizing_memory()                    # the next brain
-        ex._sizing_load()
+        ex._sizing_load(T)
         self.assertEqual(post_reports(late, now=T12 + 702)[0], [("applied", None)])
         self.assertEqual(self.samples(), [(11.0, 12.0, 1.0)])
         self.assertEqual(post_reports(refusal, now=T12 + 711)[0], [("applied", None)])
@@ -11754,13 +11771,13 @@ class TestSizingPersistence(SizingBase):
     def test_the_shutdown_save_waits_for_events_in_flight(self):
         evs, _ = self.walk([(1, [1.0])], close=False)
         self.feed(*evs)
-        self.assertTrue(ex._sizing_enter())      # a served event past the gate
+        self.assertTrue(ex._sizing_enter(T))      # a served event past the gate
         done = threading.Event()
-        th = threading.Thread(target=lambda: (ex._sizing_shutdown(), done.set()))
+        th = threading.Thread(target=lambda: (ex._sizing_shutdown(T), done.set()))
         th.start()
         self.assertFalse(done.wait(0.2), "the save waits for it")
-        self.assertFalse(ex._sizing_enter(), "and lets no new one in")
-        ex._sizing_leave()
+        self.assertFalse(ex._sizing_enter(T), "and lets no new one in")
+        ex._sizing_leave(T)
         self.assertTrue(done.wait(2))
         th.join()
 
@@ -11770,11 +11787,11 @@ class TestSizingPersistence(SizingBase):
         evs, bounds = self.walk([(1, [1.0])], close=False)
         self.feed(*evs)
         T12 = bounds[-1]
-        data_t = ex._sizing["accounts"][ACCT_A]["data_t"]
+        data_t = T.sizing["accounts"][ACCT_A]["data_t"]
         tr = T12 + 2000
         self.assertEqual(post_reports(rep_refusal(self.n + 1, tr, used=12.0, resets=RESET_7D),
                                       now=tr + 1)[0], [("applied", None)])
-        self.assertEqual(ex._sizing["accounts"][ACCT_A]["data_t"], data_t)
+        self.assertEqual(T.sizing["accounts"][ACCT_A]["data_t"], data_t)
         self.assertEqual(self.counts(), {}, "the step 11→12 is still open")
         self.feed(self.ev(T12 + 30, T12 + 40, usd=0.5))
         self.assertEqual(self.counts(), {})
@@ -11785,7 +11802,7 @@ class TestSizingPersistence(SizingBase):
         self.addCleanup(setattr, ex, "_sigterm_seen", False)
         ex._sigterm_seen = True
         out = []
-        with ex._sizing_lock:
+        with T.sizing_lock:
             th = threading.Thread(target=lambda: out.append(ex._sigterm(15, None)))
             th.start()
             th.join(2)
@@ -11803,14 +11820,13 @@ class TestSizingPersistence(SizingBase):
             port = so.getsockname()[1]
         env = {k: v for k, v in os.environ.items() if not k.startswith(("SWITCH_", "KIMI_", "OPENAI_",
                                                                         "RUNWAY_", "CLAUDE_"))}
-        env.update(PORT=str(port), POLL_INTERVAL="3600",
-                   **{k: os.path.join(d, k.lower()) for k in (
-                       "CLAUDE_ACCOUNTS_FILE", "KIMI_CREDS_FILE", "OPENAI_CODEX_CREDS_FILE",
-                       "RUNWAY_CREDS_FILE", "SWITCH_CLASSES_FILE", "SWITCH_CONSUMERS_FILE",
-                       "SWITCH_HARNESS_FILE", "SWITCH_HARNESS_KEY_FILE", "SWITCH_LANES_FILE",
-                       "SWITCH_LEDGER_FILE", "SWITCH_MONEY_FILE", "SWITCH_SIZING_FILE",
-                       "SWITCH_STATE_FILE")})
-        sizing = env["SWITCH_SIZING_FILE"]
+        env.update(PORT=str(port), POLL_INTERVAL="3600", SWITCH_CREDS_DIR=d)
+        with open(os.path.join(d, "tenants.json"), "w") as f:
+            json.dump([{"tenant": TEST_TENANT, "name": "household", "lan": True,
+                        "tap": "content"}], f)
+        tdir = os.path.join(d, TEST_TENANT)
+        os.mkdir(tdir)
+        sizing = os.path.join(tdir, tenancy.FILES["sizing"])
         with open(sizing, "w") as f:
             f.write('{"v": 1, "windows": {"a": {"seven_day": {"mode": "header", '
                     '"samples": [{"usd": 1.0}]}}}}')
@@ -11826,7 +11842,7 @@ class TestSizingPersistence(SizingBase):
         body = None
         for _ in range(100):
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/sizing", timeout=1) as r:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/t/{TEST_TENANT}/sizing", timeout=1) as r:
                     body = json.load(r)
                 break
             except OSError:
@@ -11834,9 +11850,9 @@ class TestSizingPersistence(SizingBase):
                     break
                 time.sleep(0.1)
         self.assertIsNotNone(body, proc.stdout.read() if proc.poll() is not None else "no answer")
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/preferred", timeout=2) as r:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/t/{TEST_TENANT}/preferred", timeout=2) as r:
             self.assertEqual(r.status, 200)
-        self.assertEqual(len([n for n in os.listdir(d) if n.startswith("switch_sizing_file.bad-")]), 1)
+        self.assertEqual(len([n for n in os.listdir(tdir) if n.startswith("sizing.json.bad-")]), 1)
         self.assertTrue(body["file"]["set_aside"].startswith(sizing + ".bad-"))
         proc.send_signal(signal.SIGTERM)
         out, _ = proc.communicate(timeout=10)
@@ -11894,7 +11910,7 @@ class TestSizingWeights(SizingBase):
            (1, [(0.9, OPUS), (0.05, FABLE)])]
 
     def fit(self, provider="anthropic"):
-        return ex._sizing["weights"][provider]
+        return T.sizing["weights"][provider]
 
     def fixture_rows(self):
         with open(SIZING_WEIGHTS_FIXTURE) as f:
@@ -12024,7 +12040,7 @@ class TestSizingWeights(SizingBase):
         fit = self.fit()
         self.assertEqual((fit["fit"]["samples"], fit["fit"]["trimmed"]), (7, 2))
         self.assertAlmostEqual(fit["ratios"][FABLE], 2.0, delta=0.1)
-        v = ex.sizing_payload()["accounts"][ACCT_A]["windows"]["seven_day"]
+        v = ex.sizing_payload(T)["accounts"][ACCT_A]["windows"]["seven_day"]
         per = [s["weighted"] / s["points"] for s in v["samples"]]
         kept = [x for x in per if x >= (1 - ex.SIZING_CHEAP) * ex._median(per)]
         self.assertEqual((len(per), len(kept)), (7, 5))
@@ -12055,7 +12071,7 @@ class TestSizingWeights(SizingBase):
         evs, bounds = self.walk(self.MIX + [(1, [(0.1, OPUS), (0.45, FABLE)])] * 6)
         split = bounds[5] + ex.SIZING_SETTLE_S + 1          # the mix's steps closed, no other
         self.feed(*[e for e in evs if e["read_at"] <= split])
-        v = ex.sizing_payload()["accounts"][ACCT_A]["windows"]["seven_day"]
+        v = ex.sizing_payload(T)["accounts"][ACCT_A]["windows"]["seven_day"]
         self.assertEqual((self.fit()["reference"], self.fit()["fit"]["samples"]), (OPUS, 5))
         self.assertEqual([round(x, 6) for x in (v["sizes"][OPUS], v["sizes"][FABLE], v["size_ref"])],
                          [100.0, 50.0, 100.0])
@@ -12064,7 +12080,7 @@ class TestSizingWeights(SizingBase):
         self.assertEqual((fit["reference"], fit["fit"]["samples"]), (FABLE, 11))
         self.assertGreater(fit["models"][FABLE]["dollars"], fit["models"][OPUS]["dollars"])
         self.assertAlmostEqual(fit["ratios"][OPUS], 0.5, places=6)
-        v = ex.sizing_payload()["accounts"][ACCT_A]["windows"]["seven_day"]
+        v = ex.sizing_payload(T)["accounts"][ACCT_A]["windows"]["seven_day"]
         self.assertEqual([round(x, 6) for x in (v["sizes"][OPUS], v["sizes"][FABLE], v["size_ref"])],
                          [100.0, 50.0, 50.0])
         self.assertIn(f"sizing: anthropic weights: reference {FABLE}; {OPUS} weighed 0.500 (error 0.0%)",
@@ -12136,7 +12152,7 @@ class TestSizingWeights(SizingBase):
         """No weighed model: the sizes are step 2's list-dollar median."""
         evs, _ = self.walk([(1, [1.0])] * 3 + [(1, [1.1])])
         self.feed(*evs)
-        v = ex.sizing_payload()["accounts"][ACCT_A]["windows"]["seven_day"]
+        v = ex.sizing_payload(T)["accounts"][ACCT_A]["windows"]["seven_day"]
         self.assertEqual((v["size"], v["size_ref"], v["sizes"]), (100.0, 100.0, {OPUS: 100.0}))
         self.assertEqual((v["unweighed_share"], v["own_weights"], v["weights_disagree"]), (0.0, {}, []))
         self.assertEqual((self.fit()["reference"], self.fit()["ratios"]), (OPUS, {}))
@@ -12166,7 +12182,7 @@ class TestSizingWeights(SizingBase):
         solo, _ = self.walk([(1, [0.3]), (1, [0.31]), (1, [0.29])], t0=self.T0 + 20000,
                             window="scoped:Fable", model=FABLE)
         self.feed(*evs, *solo)
-        doc = ex.sizing_payload()
+        doc = ex.sizing_payload(T)
         wt = doc["weights"]["anthropic"]
         self.assertEqual(set(wt), {"reference", "models", "fit"})
         self.assertEqual((wt["reference"], wt["models"][FABLE]["basis"]), (OPUS, "weighed"))
@@ -12197,13 +12213,14 @@ class TestSizingWeights(SizingBase):
         self.assertAlmostEqual(fb["sizes"][FABLE], 30.0, places=6)
         self.assertAlmostEqual(fb["size"], 30.0, places=6)
         self.assertEqual(fb["own_weights"], {})
-        metrics = "\n".join(ex._sizing_metric_lines())
-        for line in (f'sizing_weight{{provider="anthropic",model="{OPUS}"}} 1.0',
-                     f'sizing_weight{{provider="anthropic",model="{FABLE}"}} 2.0',
-                     f'sizing_size_api_usd{{account="{ACCT_A}",window="seven_day"}} 80.0',
-                     f'sizing_model_size_api_usd{{account="{ACCT_A}",window="seven_day",model="{FABLE}"}} 50.0',
-                     f'sizing_model_size_api_usd{{account="{ACCT_A}",window="scoped:Fable",model="{FABLE}"}} 30.0',
-                     f'sizing_weights_disagree{{account="{ACCT_A}",window="seven_day",model="{FABLE}"}} 0'):
+        metrics = "\n".join(ex._sizing_metric_lines(T))
+        tl = f'tenant="{T.id}"'
+        for line in (f'sizing_weight{{{tl},provider="anthropic",model="{OPUS}"}} 1.0',
+                     f'sizing_weight{{{tl},provider="anthropic",model="{FABLE}"}} 2.0',
+                     f'sizing_size_api_usd{{{tl},account="{ACCT_A}",window="seven_day"}} 80.0',
+                     f'sizing_model_size_api_usd{{{tl},account="{ACCT_A}",window="seven_day",model="{FABLE}"}} 50.0',
+                     f'sizing_model_size_api_usd{{{tl},account="{ACCT_A}",window="scoped:Fable",model="{FABLE}"}} 30.0',
+                     f'sizing_weights_disagree{{{tl},account="{ACCT_A}",window="seven_day",model="{FABLE}"}} 0'):
             self.assertIn(line, metrics)
         self.assertNotIn(f'window="scoped:Fable",model="{OPUS}"', metrics)
 
@@ -12217,12 +12234,12 @@ class TestSizingWeights(SizingBase):
                                              FABLE: 1.0 * (1 + 0.01 * (k % 2))}) for k in range(5)]
 
         def put(*windows):
-            with ex._sizing_lock:
-                ex._sizing_acct(ACCT_A, "anthropic")
+            with T.sizing_lock:
+                ex._sizing_acct(T, ACCT_A, "anthropic")
                 for rows in windows:
-                    ex._sizing_win(ACCT_A, rows[0][0][1], "header")["samples"] = \
+                    ex._sizing_win(T, ACCT_A, rows[0][0][1], "header")["samples"] = \
                         weight_samples(rows, self.T0)
-                ex._sizing_refit("anthropic")
+                ex._sizing_refit(T, "anthropic")
 
         put(seven, five, month)
         fit = self.fit()
@@ -12231,11 +12248,11 @@ class TestSizingWeights(SizingBase):
         self.assertGreater(abs(own - shared), ex.SIZING_WEIGHT_AGREE * shared)
         self.assertEqual(fit["disagree"], {(ACCT_A, "five_hour"): [FABLE]})
         self.assertEqual(set(fit["own"]), {(ACCT_A, "seven_day"), (ACCT_A, "five_hour")})
-        view = ex.sizing_payload()["accounts"][ACCT_A]["windows"]
+        view = ex.sizing_payload(T)["accounts"][ACCT_A]["windows"]
         self.assertEqual((view["five_hour"]["weights_disagree"], view["seven_day"]["weights_disagree"],
                           view["monthly"]["own_weights"]), ([FABLE], [], {}))
-        metrics = "\n".join(ex._sizing_metric_lines())
-        lab = f'account="{ACCT_A}",window="%s",model="{FABLE}"'
+        metrics = "\n".join(ex._sizing_metric_lines(T))
+        lab = f'tenant="{T.id}",account="{ACCT_A}",window="%s",model="{FABLE}"'
         self.assertIn(f"sizing_weights_disagree{{{lab % 'five_hour'}}} 1", metrics)
         self.assertIn(f"sizing_weights_disagree{{{lab % 'seven_day'}}} 0", metrics)
         self.assertNotIn(f"sizing_weights_disagree{{{lab % 'monthly'}}}", metrics)
@@ -12273,12 +12290,12 @@ class TestSizingWeights(SizingBase):
                 out.append(((acct, "seven_day"), x / 10 * (1 + noise * r.uniform(-1, 1)), u))
             return out
 
-        with ex._sizing_lock:
+        with T.sizing_lock:
             for a, rows in ((ACCT_A, window(ACCT_A, 0.01)), (ACCT_B, window(ACCT_B, 0.30))):
-                ex._sizing_acct(a, "anthropic")
-                ex._sizing["accounts"][a]["data_t"] = self.T0 + 1e5
-                ex._sizing_win(a, "seven_day", "header")["samples"] = weight_samples(rows, self.T0)
-            ex._sizing_refit("anthropic")
+                ex._sizing_acct(T, a, "anthropic")
+                T.sizing["accounts"][a]["data_t"] = self.T0 + 1e5
+                ex._sizing_win(T, a, "seven_day", "header")["samples"] = weight_samples(rows, self.T0)
+            ex._sizing_refit(T, "anthropic")
         fit = self.fit()
         self.assertEqual(fit["models"][S5]["basis"], "unweighed")
         self.assertAlmostEqual(fit["own"][(ACCT_A, "seven_day")][S5]["ratio"], 0.6, delta=0.05)
@@ -12340,17 +12357,17 @@ class TestSizingWeights(SizingBase):
         self.feed(*evs)
         self.assertAlmostEqual(self.fit()["ratios"][FABLE], 2.0, places=6)
         self.assertEqual(self.fit()["models"][S55]["basis"], "unweighed")
-        with ex._sizing_lock:
-            ex._sizing_save(open_state=True)
+        with T.sizing_lock:
+            ex._sizing_save(T, open_state=True)
         doubled = {"standard": {k: 2 * v for k, v in ex.API_LIST_PRICES[FABLE]["standard"].items()}}
         with mock.patch.dict(ex.API_LIST_PRICES, {FABLE: doubled}):
-            ex._sizing_load()
+            ex._sizing_load(T)
             self.assertAlmostEqual(self.fit()["ratios"][FABLE], 1.0, places=6)
-            with ex._sizing_lock:
-                ex._sizing_save(open_state=True)
+            with T.sizing_lock:
+                ex._sizing_save(T, open_state=True)
         with mock.patch.dict(ex.API_LIST_PRICES):
             del ex.API_LIST_PRICES[S55]
-            ex._sizing_load()
+            ex._sizing_load(T)
             self.assertTrue(any("1 dropped" in l for l in self.logged))
             self.assertNotIn(S55, self.fit()["models"])
             self.assertAlmostEqual(self.fit()["ratios"][FABLE], 2.0, places=6)
@@ -12359,24 +12376,24 @@ class TestSizingWeights(SizingBase):
         evs, _ = self.walk(self.MIX)
         self.feed(*evs)
         before = copy.deepcopy(self.fit())
-        with ex._sizing_lock:
-            ex._sizing_save(open_state=True)
-        with open(ex.SIZING_FILE) as f:
+        with T.sizing_lock:
+            ex._sizing_save(T, open_state=True)
+        with open(T.sizing_file) as f:
             doc = json.load(f)
         self.assertEqual(doc["v"], 1)
         self.assertNotIn("weights", doc)
         self.assertNotIn("ratio", json.dumps(doc))
         del self.logged[:]
-        ex._sizing_load()
+        ex._sizing_load(T)
         self.assertAlmostEqual(self.fit()["ratios"][FABLE], before["ratios"][FABLE], places=9)
         self.assertIn(f"sizing: anthropic weights: reference {OPUS}; {FABLE} weighed 2.000 (error 0.0%)",
                       self.logged)
         # A start without the open state knows no provider until the
         # account's next event, which fits its weights.
-        with ex._sizing_lock:
-            ex._sizing_save()
-        ex._sizing_load()
-        self.assertEqual(ex._sizing["weights"], {})
+        with T.sizing_lock:
+            ex._sizing_save(T)
+        ex._sizing_load(T)
+        self.assertEqual(T.sizing["weights"], {})
         last = max(e["read_at"] for e in evs)
         self.feed(self.ev(last + 10, last + 11, used=16.0, boot="b2"))
         self.assertAlmostEqual(self.fit()["ratios"][FABLE], before["ratios"][FABLE], places=9)
@@ -12384,9 +12401,9 @@ class TestSizingWeights(SizingBase):
 
 def reset_sizing_memory():
     """A new process: no sizing state in memory, the file left as it is."""
-    with ex._sizing_lock:
-        ex._sizing = ex._sizing_fresh()
-        ex._sizing_gate.update(closing=False, inflight=0, frozen=None, set_aside=None)
+    with T.sizing_lock:
+        T.sizing = ex._sizing_fresh()
+        T.sizing_gate.update(closing=False, inflight=0, frozen=None, set_aside=None)
 
 
 class TestSizingPublication(HTTPBase, SizingBase):
@@ -12420,7 +12437,7 @@ class TestSizingPublication(HTTPBase, SizingBase):
         self.assertEqual(v["outside"]["outside_points"], 1.0)
         self.assertEqual(v["open"]["anchor"]["q"], 15.0)
         self.assertEqual(v["samples"][0]["by"]["claude-opus-5-5|standard|standard"]["usd"], 1.0)
-        t = ex.render()
+        t = ex.render([T])
         L = lambda name, **lab: [l for l in t.splitlines()  # noqa: E731
                                  if l.startswith(name + "{") and all(f'{k}="{v}"' in l
                                                                      for k, v in lab.items())]
@@ -12553,13 +12570,13 @@ class TestFleetAsksOnTheDocument(SizingBase):
     def test_the_document_carries_an_auth_ask(self):
         real_health = ex._unified_account_health
 
-        def health(now):
-            self.assertFalse(ex._plock.locked(), "account_health is read before _plock")
-            return real_health(now)
-        with ex._lock:
-            ex._state[ACCT_A] = dict(ex._state[ACCT_A], ok=0, http=401)
+        def health(t, now):
+            self.assertFalse(T.plock.locked(), "account_health is read before _plock")
+            return real_health(t, now)
+        with T.lock:
+            T.state[ACCT_A] = dict(T.state[ACCT_A], ok=0, http=401)
         with mock.patch.object(ex, "_unified_account_health", side_effect=health):
-            doc = ex._preferred_payload()
+            doc = ex._preferred_payload(T)
         self.assertIn({"account": ACCT_A, "kind": "auth", "sign_in": "oauth", "model": None,
                        "until": None}, doc["fleet"]["proxy"]["asks"])
         self.assertEqual(doc["account_health"]["worst"], "auth_dead", "the document's own rows")
@@ -12568,10 +12585,10 @@ class TestFleetAsksOnTheDocument(SizingBase):
         # account_health takes _refresh_lock, which a token refresh holds
         # across its network call; the gauges read no asks, so /metrics
         # never asks for it, and its fleet gauges are the same.
-        before = ex.render()
+        before = ex.render([T])
         with mock.patch.object(ex, "_unified_account_health",
                                side_effect=AssertionError("/metrics read account_health")):
-            after = ex.render()
+            after = ex.render([T])
         fleet = lambda text: [l for l in text.splitlines() if l.startswith("fleet_")]  # noqa: E731
         self.assertTrue(fleet(before))
         self.assertEqual(fleet(after), fleet(before))
@@ -12585,7 +12602,7 @@ class TestFleetDocument(SizingBase):
 
     def test_document_carries_fleet(self):
         with mock.patch.object(ex, "_sizing_fleet_view", return_value=self.view()):
-            f = ex._preferred_payload()["fleet"]
+            f = ex._preferred_payload(T)["fleet"]
         self.assertEqual(f["unit"], "api_usd")
         self.assertEqual(set(f), {"unit", "proxy", "selections", "accounts"})
         self.assertIn("lane:opus", f["selections"])
@@ -12601,23 +12618,23 @@ class TestFleetDocument(SizingBase):
 
     def test_the_view_is_taken_outside_plock(self):
         # _sizing_lock is never held around _plock (67 §8).
-        def view():
-            self.assertFalse(ex._plock.locked(), "the sizing view is taken before _plock")
+        def view(t):
+            self.assertFalse(T.plock.locked(), "the sizing view is taken before _plock")
             return self.view()
         with mock.patch.object(ex, "_sizing_fleet_view", side_effect=view) as v:
-            ex._preferred_payload()
-            ex.render()
+            ex._preferred_payload(T)
+            ex.render([T])
         self.assertEqual(v.call_count, 2)
 
     def test_the_view_reuses_the_sizing_numbers(self):
         evs, _ = self.walk([(1, [1.0])] * 3)
         self.feed(*evs)
-        w = ex._sizing_fleet_view()["windows"][ACCT_A]["seven_day"]
-        s = ex.sizing_payload()["accounts"][ACCT_A]["windows"]["seven_day"]
+        w = ex._sizing_fleet_view(T)["windows"][ACCT_A]["seven_day"]
+        s = ex.sizing_payload(T)["accounts"][ACCT_A]["windows"]["seven_day"]
         self.assertEqual((w["basis"], w["mix"], w["sizes"], w["samples"]),
                          (s["size_basis"], s["size"], s["sizes"], s["samples_n"]))
         self.assertEqual(w["basis"], "learned")
-        f = ex._preferred_payload()["fleet"]
+        f = ex._preferred_payload(T)["fleet"]
         a = f["selections"]["lane:opus"]["accounts"][ACCT_A]
         self.assertEqual((a["capacity"], a["room"]), (100.0, 90.0), "$1 a point, 10 of 100 used")
 
@@ -12626,7 +12643,7 @@ class TestFleetDocument(SizingBase):
         out, _ = post_reports(rep_refusal(1, t - 5, until=t + 3600, by_reading=False))
         self.assertEqual(out, [("applied", None)])
         with mock.patch.object(ex, "_sizing_fleet_view", return_value=self.view()):
-            f = ex._preferred_payload()["fleet"]
+            f = ex._preferred_payload(T)["fleet"]
         a = f["selections"]["lane:opus"]["accounts"][ACCT_A]
         self.assertEqual((a["capacity"], a["room"], a["windows"]["seven_day"]["used"]),
                          (1000.0, 0.0, 100.0))
@@ -12643,7 +12660,7 @@ class TestFleetDocument(SizingBase):
         self.assertEqual(out, [("applied", None)])
         self.assertEqual(live_ctx()["checks"], before, "the dial check is unchanged")
         with mock.patch.object(ex, "_sizing_fleet_view", return_value=self.view()):
-            f = ex._preferred_payload()["fleet"]
+            f = ex._preferred_payload(T)["fleet"]
         a = f["selections"]["lane:opus"]["accounts"][ACCT_A]
         self.assertEqual((a["capacity"], a["room"], a["refused"]),
                          (1000.0, 0.0, {"why": "spent", "limit": "model:claude-opus-4-7",
@@ -12661,9 +12678,9 @@ class TestFleetDocument(SizingBase):
         t = time.time()
         with mock.patch.object(ex, "_sizing_fleet_view", return_value=self.view()):
             with mock.patch.object(ex.time, "time", return_value=t):
-                a = ex._preferred_payload()
+                a = ex._preferred_payload(T)
             with mock.patch.object(ex.time, "time", return_value=t + 60):
-                b = ex._preferred_payload()
+                b = ex._preferred_payload(T)
         self.assertEqual(json.dumps(a["fleet"]), json.dumps(b["fleet"]))
         self.assertEqual(ex._preferred_digest(a), ex._preferred_digest(b))
 
@@ -12676,16 +12693,16 @@ class TestFleetDocument(SizingBase):
             mark.assert_not_called()
             self.feed(*evs[1:])
             mark.assert_called()
-            self.assertTrue(os.path.exists(ex.SIZING_FILE), "saved before the mark")
+            self.assertTrue(os.path.exists(T.sizing_file), "saved before the mark")
 
     def test_a_new_document_follows_a_sample_close(self):
-        ex._events_publish()
-        self.assertFalse(ex._events_publish(), "nothing changed")
+        ex._events_publish(T)
+        self.assertFalse(ex._events_publish(T), "nothing changed")
         evs, _ = self.walk([(1, [1.0])] * 3)
         self.feed(*evs)
-        self.assertTrue(ex._events_publish(), "the fleet moved with the sizes")
-        with ex._events_cond:
-            doc = json.loads(ex._events_pub["data"])
+        self.assertTrue(ex._events_publish(T), "the fleet moved with the sizes")
+        with T.events_cond:
+            doc = json.loads(T.events_pub["data"])
         self.assertEqual(doc["fleet"]["accounts"][ACCT_A]["size_basis"], "learned")
 
     def test_a_late_event_in_a_silent_step_moves_no_fleet(self):
@@ -12694,36 +12711,36 @@ class TestFleetDocument(SizingBase):
         # (64 §2, 67 §8): fleet carries no outside_pct.
         evs, bounds = self.walk([(1, [1.0])] * 3 + [(1, [])])
         self.feed(*evs, reporter="p1")
-        ex._events_publish()
-        before = ex.sizing_payload()["accounts"][ACCT_A]["windows"]["seven_day"]["outside"]["outside_pct"]
+        ex._events_publish(T)
+        before = ex.sizing_payload(T)["accounts"][ACCT_A]["windows"]["seven_day"]["outside"]["outside_pct"]
         self.feed(self.ev(bounds[3] + 5, bounds[3] + 10, usd=0.5, boot="b2"), reporter="p2")
-        after = ex.sizing_payload()["accounts"][ACCT_A]["windows"]["seven_day"]["outside"]["outside_pct"]
+        after = ex.sizing_payload(T)["accounts"][ACCT_A]["windows"]["seven_day"]["outside"]["outside_pct"]
         self.assertNotEqual(before, after, "the probe reaches the silent step")
-        self.assertFalse(ex._events_publish())
-        self.assertNotIn("outside_pct", json.dumps(ex._preferred_payload()["fleet"]))
+        self.assertFalse(ex._events_publish(T))
+        self.assertNotIn("outside_pct", json.dumps(ex._preferred_payload(T)["fleet"]))
 
     def test_an_account_that_learns_its_provider_resizes(self):
         # A start without the open state keeps samples but no provider; the
         # account's next event fits its weights, which moves its sizes.
         evs, _ = self.walk([(1, [1.0])] * 3)
         self.feed(*evs)
-        with ex._sizing_lock:
-            ex._sizing_save()
+        with T.sizing_lock:
+            ex._sizing_save(T)
         reset_sizing_memory()
         with mock.patch.object(ex, "_events_mark") as mark:
-            ex._sizing_load()
-        mark.assert_called_once_with()
-        self.assertIsNone((ex._sizing["accounts"].get(ACCT_A) or {}).get("provider"))
-        with ex._sizing_lock:
-            ex._sizing.pop("resized", None)
-            ex._sizing_acct(ACCT_A, "anthropic")
-            self.assertTrue(ex._sizing.pop("resized", False))
-            ex._sizing_acct(ACCT_A, "anthropic")
-            self.assertNotIn("resized", ex._sizing, "once known, no refit")
+            ex._sizing_load(T)
+        mark.assert_called_once_with(T)
+        self.assertIsNone((T.sizing["accounts"].get(ACCT_A) or {}).get("provider"))
+        with T.sizing_lock:
+            T.sizing.pop("resized", None)
+            ex._sizing_acct(T, ACCT_A, "anthropic")
+            self.assertTrue(T.sizing.pop("resized", False))
+            ex._sizing_acct(T, ACCT_A, "anthropic")
+            self.assertNotIn("resized", T.sizing, "once known, no refit")
 
     def test_the_gauges_render(self):
         with mock.patch.object(ex, "_sizing_fleet_view", return_value=self.view()):
-            t = ex.render()
+            t = ex.render([T])
         L = lambda fam, **lab: [l for l in t.splitlines()  # noqa: E731
                                 if l.startswith(fam + "{") and all(f'{k}="{v}"' in l
                                                                    for k, v in lab.items())]
@@ -12747,10 +12764,10 @@ class TestLocalRoutes(PayBase):
 
     def test_route_accounts_and_check(self):
         classes_reset(opus_acct(30, resets=True), local_result(), cfg=[local_class_cfg()])
-        r = ex._preferred_payload()["routes"]["local/local/local-gemma4-12b"]
+        r = ex._preferred_payload(T)["routes"]["local/local/local-gemma4-12b"]
         self.assertEqual((r["provider"], r["accounts"], r["pay"]), ("local", ["local"], []))
         self.assertEqual(route_check("local/local/local-gemma4-12b", "local")["check"], "included")
-        st = ex._preferred_payload()["accounts"]["local"]
+        st = ex._preferred_payload(T)["accounts"]["local"]
         self.assertEqual((st["kind"], st["allowance"]["open"], st["money"]["credits"]["open"]),
                          ("subscription", True, False))
 
@@ -12758,7 +12775,7 @@ class TestLocalRoutes(PayBase):
         # A fresh, ok poll of an unmetered account is the whole answer: no
         # number is missing, so each member reads ok/usable, not no_quota_data.
         classes_reset(opus_acct(30, resets=True), local_result(), cfg=[local_class_cfg()])
-        members = ex._preferred_payload()["classes"]["local"]["members"]
+        members = ex._preferred_payload(T)["classes"]["local"]["members"]
         self.assertEqual([(m["id"], m["status"], m["usable"], m["targets"]) for m in members],
                          [("local/local-gemma4-12b", "ok", True, {"local": None}),
                           ("local/local-gpt-oss-20b", "ok", True, {"local": None}),
@@ -12767,7 +12784,7 @@ class TestLocalRoutes(PayBase):
     def test_stale_members_read_stale(self):
         classes_reset(opus_acct(30, resets=True), local_result(good_age=ex.STALE_MAX + 100),
                       cfg=[local_class_cfg()])
-        m = ex._preferred_payload()["classes"]["local"]["members"][0]
+        m = ex._preferred_payload(T)["classes"]["local"]["members"][0]
         self.assertEqual((m["status"], m["usable"]), ("stale", False))
 
     def test_unmetered_is_locals_alone(self):
@@ -12780,9 +12797,9 @@ class TestLocalRoutes(PayBase):
         unmarked = local_result()
         unmarked["reading"]["pots"][0].pop("unmetered")
         classes_reset(opus_acct(30, resets=True), cfg=[local_class_cfg()])
-        with ex._lock:
-            ex._state["local"] = unmarked
-        m = ex._preferred_payload()["classes"]["local"]["members"][0]
+        with T.lock:
+            T.state["local"] = unmarked
+        m = ex._preferred_payload(T)["classes"]["local"]["members"][0]
         self.assertEqual((m["status"], m["usable"]), ("no_quota_data", False))
 
     def test_bind_lands_on_gemma(self):
@@ -12796,7 +12813,7 @@ class TestLocalRoutes(PayBase):
         classes_reset(opus_acct(30, resets=True), cfg=[local_class_cfg()])
         with mock.patch.object(ex, "_provider_poll_targets",
                                return_value={"local": ("local", None)}):
-            ex.compute_preferred()
+            ex.compute_preferred(T)
             c = route_check("local/local/local-gemma4-12b", "local")
         self.assertEqual((c["check"], c["reason"]), ("no", "unknown"))
 
@@ -12811,10 +12828,10 @@ class TestAnthropicApiProvider(AuthHTTP):
     def setUp(self):
         super().setUp()
         d = tempfile.mkdtemp(dir=_TMP)
-        self.addCleanup(setattr, papi, "ANTHROPIC_API_CREDS_FILE", papi.ANTHROPIC_API_CREDS_FILE)
-        papi.ANTHROPIC_API_CREDS_FILE = os.path.join(d, "anthropic-api.json")
-        self.addCleanup(setattr, papi, "_keys", None)
-        papi._keys = None
+        self.addCleanup(setattr, papi._st(T), "file", papi._st(T).file)
+        papi._st(T).file = os.path.join(d, "anthropic-api.json")
+        self.addCleanup(setattr, papi._st(T), "keys", None)
+        papi._st(T).keys = None
         self.seen = []
         orig = papi._get_models
         self.addCleanup(setattr, papi, "_get_models", orig)
@@ -12828,22 +12845,22 @@ class TestAnthropicApiProvider(AuthHTTP):
                          {"state": d["state"], "name": name, "api_key": key}, key="test-switch-key")
 
     def poll_into_state(self, name):
-        res = papi.poll(None, account=name)
+        res = papi.poll(T, None, account=name)
         res["good_ts"] = res["ts"]
-        with ex._lock:
-            ex._state[name] = res
+        with T.lock:
+            T.state[name] = res
         return res
 
     def test_enrolment_validates_then_stores_the_key_owner_only(self):
         code, d = self.enroll("team-a")
         self.assertEqual((code, d["account"], d["reauthorized"]), (200, "team-a", False))
         self.assertEqual(self.seen, [self.KEY], "validated with one model list")
-        with open(papi.ANTHROPIC_API_CREDS_FILE) as f:
+        with open(papi._st(T).file) as f:
             self.assertEqual(json.load(f), [{"name": "team-a", "api_key": self.KEY}])
-        self.assertEqual(os.stat(papi.ANTHROPIC_API_CREDS_FILE).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(papi._st(T).file).st_mode & 0o777, 0o600)
         code, d = self.enroll("team-a", key="test-api-key-two")
         self.assertEqual((code, d["reauthorized"]), (200, True), "a name enrolled again is re-keyed")
-        self.assertEqual(papi._load(), {"team-a": "test-api-key-two"})
+        self.assertEqual(papi._load(T), {"team-a": "test-api-key-two"})
 
     def test_a_refused_key_saves_nothing(self):
         def refuse(key):
@@ -12853,13 +12870,13 @@ class TestAnthropicApiProvider(AuthHTTP):
         self.assertEqual(code, 422)
         self.assertIn("HTTP 401", d["error"])
         self.assertNotIn(self.KEY, d["error"])
-        self.assertFalse(os.path.exists(papi.ANTHROPIC_API_CREDS_FILE))
+        self.assertFalse(os.path.exists(papi._st(T).file))
 
     def test_a_name_another_account_holds_is_refused(self):
         for name in (ACCT_A, "kimi", "bad name"):
             code, d = self.enroll(name)
             self.assertEqual(code, 422, name)
-        self.assertFalse(os.path.exists(papi.ANTHROPIC_API_CREDS_FILE))
+        self.assertFalse(os.path.exists(papi._st(T).file))
 
     def test_the_auth_page_lists_accounts_by_fingerprint_never_the_key(self):
         self.enroll("team-a")
@@ -12871,21 +12888,21 @@ class TestAnthropicApiProvider(AuthHTTP):
 
     def test_the_poll_reads_an_open_unmetered_allowance(self):
         self.enroll("team-a")
-        res = papi.poll(None, account="team-a")
+        res = papi.poll(T, None, account="team-a")
         self.assertEqual((res["ok"], res["kind"], res["provider"]), (1, "provider", "anthropic-api"))
         self.assertEqual(res["reading"]["kind"], "api")
         self.assertTrue(ex._unmetered(res))
         def refuse(key):
             raise urllib.error.HTTPError(papi.ANTHROPIC_API_BASE + "/v1/models", 401, "no", {}, None)
         papi._get_models = refuse
-        res = papi.poll(None, account="team-a")
+        res = papi.poll(T, None, account="team-a")
         self.assertEqual((res["ok"], res["http"], ex._classify_poll_error(res)), (0, 401, "auth"))
 
     def test_its_accounts_serve_every_lane_as_api_accounts(self):
         self.enroll("team-a")
         self.poll_into_state("team-a")
-        ex.compute_preferred()
-        p = ex._preferred_payload()
+        ex.compute_preferred(T)
+        p = ex._preferred_payload(T)
         self.assertEqual(p["accounts"]["team-a"]["kind"], "api")
         self.assertNotIn("anthropic-api", p["providers"], "no pool: its accounts are lane accounts")
         for ln in ex._lane_names:
@@ -12901,16 +12918,16 @@ class TestAnthropicApiProvider(AuthHTTP):
 
     def test_no_keys_no_rows(self):
         """Without a creds file the provider adds nothing a payload carries."""
-        self.assertFalse(ex.PROVIDERS["anthropic-api"]["enabled"]())
-        self.assertNotIn("anthropic-api", {pid for pid, _ in ex._provider_poll_targets().values()})
-        self.assertEqual(ex.PROVIDERS["anthropic-api"]["auth"]["status"](time.time()), [])
+        self.assertFalse(ex.PROVIDERS["anthropic-api"]["enabled"](T))
+        self.assertNotIn("anthropic-api", {pid for pid, _ in ex._provider_poll_targets(T).values()})
+        self.assertEqual(ex.PROVIDERS["anthropic-api"]["auth"]["status"](T, time.time()), [])
 
 
 class TestReauthPageKeyed(HTTPBase):
     """/reauth is keyed like /auth: without the switch key, the key shell."""
 
     def test_without_the_key_the_shell_asks_for_it(self):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/reauth")
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{TP}/reauth")
         with self.assertRaises(urllib.error.HTTPError) as cm:
             urllib.request.urlopen(req, timeout=5)
         body = cm.exception.read().decode()
@@ -13285,7 +13302,8 @@ class TestNoticesDelivery(NoticesBase):
                                                  "classes": []}}}}
         with mock.patch("urllib.request.urlopen") as uo:
             uo.return_value.__enter__.return_value.read.return_value = json.dumps(doc).encode()
-            out = notices.send_test("acme", post=self.bridge)
+            out = notices.send_test("acme", post=self.bridge, tenant=T.id)
+            self.assertIn(f"/t/{T.id}/preferred", uo.call_args[0][0], "the tenant's document")
         self.assertEqual(out, {"ok": True, "telegram": True, "ha": True,
                                "channels": {"telegram": True, "ha": True}, "detail": None})
         ann = self.bridge.posts[0][1]["alerts"][0]["annotations"]
@@ -13321,7 +13339,7 @@ class TestNoticesInTheDocument(PayBase):
 
     def test_shape(self):
         classes_reset(opus_acct(30, resets=True))
-        doc = ex._preferred_payload()["notices"]
+        doc = ex._preferred_payload(T)["notices"]
         self.assertEqual(doc, {"enabled": False, "why": "no bridge address", "accounts": {}})
 
     def test_an_api_account_whose_pot_no_dial_draws_is_not_prepaid(self):
@@ -13331,8 +13349,8 @@ class TestNoticesInTheDocument(PayBase):
                         "ts": now, "good_ts": now, "stale": 0, "http": 0, "err": "",
                         "retry_after": None, "raw": {}})
             classes_reset(opus_acct(30, resets=True), api)
-            self.assertEqual(ex._preferred_payload()["accounts"]["key-a"]["kind"], "api")
-            self.assertEqual(ex._preferred_payload()["notices"]["accounts"], {})
+            self.assertEqual(ex._preferred_payload(T)["accounts"]["key-a"]["kind"], "api")
+            self.assertEqual(ex._preferred_payload(T)["notices"]["accounts"], {})
 
 
 class TestNoticesRecharge(NoticesBase):

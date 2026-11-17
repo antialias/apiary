@@ -94,7 +94,7 @@ func TestE2EClassQuotaExhaustedRefusesWithoutDialing(t *testing.T) {
 	// the QUOTA axis — a speculative cooldown here would let the next request
 	// ride the "cooling member as last resort" detour straight into the stall.
 	for _, acct := range []string{"kimi", "gpt"} {
-		rec, ok := spentRecordOf(acct, nowFn())
+		rec, ok := lan.spentRecordOf(acct, nowFn())
 		if !ok {
 			t.Fatalf("%s carries no spent record after an explicit refusal: %v", acct, recordsOn(acct))
 		}
@@ -102,7 +102,7 @@ func TestE2EClassQuotaExhaustedRefusesWithoutDialing(t *testing.T) {
 			t.Errorf("%s recorded no cause; the refusal message would name nobody", acct)
 		}
 	}
-	if rec, _ := spentRecordOf("gpt", nowFn()); rec.resets.IsZero() {
+	if rec, _ := lan.spentRecordOf("gpt", nowFn()); rec.resets.IsZero() {
 		t.Error("gpt sent a resets_at; dropping it means we invent a wait we were told")
 	}
 	drainClassAlerts(t, h.e2eEnv)
@@ -170,10 +170,10 @@ func TestE2EClassQuotaRefusalNeedsEveryMemberSpent(t *testing.T) {
 	resp.Body.Close()
 	h.hostedHit(t)
 	h.codexHitOrFail(t)
-	if _, ok := spentRecordOf("kimi", nowFn()); !ok {
+	if _, ok := lan.spentRecordOf("kimi", nowFn()); !ok {
 		t.Fatal("kimi stated a billing-cycle limit and was not recorded spent")
 	}
-	if _, ok := spentRecordOf("gpt", nowFn()); ok {
+	if _, ok := lan.spentRecordOf("gpt", nowFn()); ok {
 		t.Fatal(`an ambiguous "rate limited" was recorded as a budget refusal; that would refuse traffic a retry could have served`)
 	}
 	drainClassAlerts(t, h.e2eEnv)

@@ -98,14 +98,14 @@ func (r refusal) records() bool { return r.walks() && r.class != refWrongMember 
 // rungRefusal classifies member m's response by its provider's adapter. It
 // buffers the body only for the statuses an adapter reads, so a 200 stream is
 // never touched; nil and 2xx-3xx are no refusal.
-func rungRefusal(m classMemberPref, resp *http.Response) refusal {
+func (tn *tenant) rungRefusal(m classMemberPref, resp *http.Response) refusal {
 	if resp == nil || resp.StatusCode < 400 {
 		return refusal{}
 	}
 	now := nowFn()
 	switch memberWireName(m) {
 	case "anthropic":
-		return anthropicRefusal(resp, m.Model, now)
+		return tn.anthropicRefusal(resp, m.Model, now)
 	case "codex":
 		return codexRefusal(resp, m.Model, now)
 	case "bearer":
@@ -152,7 +152,7 @@ func refDetailText(msg, fallback string) string {
 // third-party app's "draw from your extra usage" (400), and the Console
 // tier's spend cap (429 enforced_spend_limit_reached, no unified headers:
 // money, not a throttle). Any other 400 is invalid.
-func anthropicRefusal(resp *http.Response, model string, now time.Time) refusal {
+func (tn *tenant) anthropicRefusal(resp *http.Response, model string, now time.Time) refusal {
 	switch resp.StatusCode {
 	case http.StatusTooManyRequests:
 		b := bufferResp(resp)
@@ -163,7 +163,7 @@ func anthropicRefusal(resp *http.Response, model string, now time.Time) refusal 
 			return refusal{class: refUnpaid, limits: []refLimit{{name: potCredits, kind: limPot}},
 				detail: refDetail(b, "enforced_spend_limit_reached"), body: b}
 		}
-		obs, ok := parseUnifiedRL(resp.Header, now, currentScopes())
+		obs, ok := parseUnifiedRL(resp.Header, now, tn.currentScopes())
 		rej := obs.rejectedWindows()
 		if !ok || len(rej) == 0 {
 			return refusal{class: refThrottled, detail: "429 that named no rejected window", body: b}

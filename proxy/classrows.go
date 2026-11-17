@@ -154,15 +154,20 @@ func classShapedRefusalReason(model string) (reason string, retrySecs int, ok bo
 		"the classes this proxy currently serves are listed at " + statusHint(), 0, true
 }
 
-// brainAnswered reports whether the brain is reachable now (pref.ok: the
-// /events stream is live and its last document decoded), not whether it ever
+// brainAnswered reports whether the brain is reachable now for the lan
+// tenant, whose document the class rows derive from (pref.ok: its /events
+// stream is live and its last document decoded), not whether it ever
 // answered. It is the only thing that separates "we cannot hear the brain"
 // from "we asked and there are none" — and telling a caller to retry the second one is the same species
 // of lie this refusal exists to stop telling.
 func brainAnswered() bool {
-	pref.mu.RLock()
-	defer pref.mu.RUnlock()
-	return pref.ok
+	tn := lanTenant()
+	if tn == nil {
+		return false
+	}
+	tn.pref.mu.RLock()
+	defer tn.pref.mu.RUnlock()
+	return tn.pref.ok
 }
 
 // classRowsLoaded reports whether ANY source has populated the class rows yet
@@ -369,9 +374,15 @@ func classTargetMember(class string) (classMemberPref, bool) {
 	if class == "" {
 		return classMemberPref{}, false
 	}
-	pref.mu.RLock()
-	cp, ok := pref.classes[class]
-	pref.mu.RUnlock()
+	// The rows are the lan tenant's document's (applyPreferred), so the
+	// member view that goes with them is read from the same document.
+	tn := lanTenant()
+	if tn == nil {
+		return classMemberPref{}, false
+	}
+	tn.pref.mu.RLock()
+	cp, ok := tn.pref.classes[class]
+	tn.pref.mu.RUnlock()
 	if !ok || len(cp.Members) == 0 {
 		return classMemberPref{}, false
 	}

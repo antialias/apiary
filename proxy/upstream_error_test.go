@@ -48,7 +48,7 @@ func TestUpstreamErrorResponseClassification(t *testing.T) {
 		r := httptest.NewRequest("POST", "/v1/messages", nil)
 		ctx := context.WithValue(r.Context(), reqStartKey, time.Now().Add(-90*time.Second))
 		ctx = context.WithValue(ctx, infoKey, reqInfo{
-			classCtx: &classRoute{class: "helpdesk", member: classMemberPref{ID: "kimi/kimi-k3"}},
+			classCtx: &classRoute{tenant: lan, class: "helpdesk", member: classMemberPref{ID: "kimi/kimi-k3"}},
 		})
 		return r.WithContext(ctx)
 	}

@@ -3,8 +3,10 @@
 #   docker compose run --rm init    once: the two secrets and classes.json (init.sh)
 #   docker compose up -d            the brain on 127.0.0.1:9115, the proxy on 127.0.0.1:8787
 #
-# Everything either service keeps is on the `data` volume, mounted at /creds in both. Keys for
-# the optional providers come from a .env file beside this one (see the README), never from here.
+# Everything either service keeps is on the `data` volume, mounted at /creds in both: the brain's
+# files there are sealed with /creds/key (init.sh makes it; credstore.py). Keys for the optional
+# providers are enrolled on the brain's /auth page, or for the proxy come from a .env file beside
+# this one (see the README), never from here.
 # Both images are published; `docker compose build` builds them from this checkout instead.
 name: apiary
 
@@ -16,8 +18,9 @@ services:
     ports:
       - "127.0.0.1:9115:9115"
     environment:
+      SWITCH_CREDS_DIR: /creds
+      SWITCH_CREDS_KEY_FILE: /creds/key
       SWITCH_KEY_FILE: /creds/switch_key
-      KIMI_API_KEY: ${SWITCH_KIMI_KEY:-}
       LOCAL_UPSTREAM: ${LOCAL_UPSTREAM:-}
     volumes:
       - data:/creds

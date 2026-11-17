@@ -20,15 +20,18 @@ You need Docker with Compose, and an Anthropic API key. From a checkout of this 
     docker compose run --rm init
     docker compose up -d
 
-Then open http://127.0.0.1:9115/auth in a browser.
+Then open http://127.0.0.1:9115/t/\<tenant\>/auth in a browser, with the tenant id `init` printed.
 
-1. `init` writes two secrets and the class document onto the `data` volume, then prints both
-   secrets. This is the only time it prints them. It refuses to run a second time.
+1. `init` writes two secrets, the brain's sealing key, the tenant registry and the class
+   document onto the `data` volume, then prints both secrets and the tenant id. This is the
+   only time it prints the secrets. It refuses to run a second time.
    - The **client secret** is what Claude Code sends the proxy.
    - The **switch key** unlocks the brain's `/auth` page.
+   - The **tenant** is this machine's one (`ten_` and 26 letters, not a secret): every brain
+     route that reads or writes its data is under `/t/<tenant>/`.
 2. `up -d` starts the brain on `127.0.0.1:9115` and the proxy on `127.0.0.1:8787`. Both
    listen on loopback only.
-3. On `/auth`, paste the switch key when the page asks for it. Under **Anthropic API**, choose
+3. On `/t/<tenant>/auth`, paste the switch key when the page asks for it. Under **Anthropic API**, choose
    **Set / replace key**, name the account and paste your API key. The brain checks the key
    with a model list before it saves anything.
 
@@ -94,11 +97,17 @@ for the same body.
 Everything is on the Compose volume `apiary_data`, mounted at `/creds` in both services:
 
 - `switch_key` and `client_secret`, from `init`
-- `classes.json`, and the brain's other documents beside it
-- the accounts: `anthropic-api.json` (API keys), `accounts.json` (Claude-plan sign-ins),
-  `openai-codex.json` (Codex), `kimi.json` (a Kimi key enrolled on `/auth`)
-- the brain's routing state, `switch_state.json`
+- `key`, the brain's sealing key, and `tenants.json`, the tenant registry, both from `init`
+- `classes.json`, the one operator document
+- under `<tenant>/`, the tenant's files, each sealed with `key` (AES-256-GCM; the brain
+  refuses a plain one, and without the key refuses a sealed one): the accounts,
+  `anthropic-api.json` (API keys), `accounts.json` (Claude-plan sign-ins), `openai-codex.json`
+  (Codex), `kimi.json` (a Kimi key enrolled on `/auth`); the brain's documents, `consumers.json`
+  and `money.json`; its routing state, `switch_state.json`; and the ledger, `ledger.jsonl`, plain
 - the proxy's class state, under `proxy/`
+
+The sealing key beside the data defends a backup or a copied volume, not the machine itself:
+whoever can read `key` can open everything. Back the volume up whole.
 
 `docker compose down` keeps the volume. `docker compose down -v` deletes it, keys and all.
 
@@ -125,8 +134,9 @@ Everything is on the Compose volume `apiary_data`, mounted at `/creds` in both s
 
     SWITCH_KIMI_KEY=<your Kimi for Coding key>
 
-Then run `docker compose up -d`. The proxy signs Kimi requests with the key, the brain polls
-Kimi's quota with it, and the Kimi members of the shipped classes come into use.
+Then run `docker compose up -d`: the proxy signs Kimi requests with the key. The brain polls
+Kimi's quota with the key enrolled on `/t/<tenant>/auth` (its sealed `kimi.json`); enrol the
+same one there, and the Kimi members of the shipped classes come into use.
 
 **A local model.** Serve one with an Anthropic-compatible API and an OpenAI-style
 `GET /models` (llama-server does both). Point both services at it in `.env`, then run

@@ -1,6 +1,7 @@
 """The Kimi for Coding driver (shared): a static-key provider whose quota the
-brain polls on GET /coding/v1/usages; its key is enrolled on the /auth page or
-set as KIMI_API_KEY."""
+brain polls on GET /coding/v1/usages; its key is enrolled on the tenant's
+/auth page into the tenant's kimi.json (there is no process-wide key: a key
+belongs to a tenant)."""
 import base64
 import copy
 import hashlib
@@ -25,77 +26,68 @@ from providers import register, register_route
 
 # ---- provider quota pollers (Phase 1 of cross-provider class switching) ----
 # These are additive, brain-only metrics: they do NOT alter /preferred in Phase 1.
-# The Kimi key is the same sk-kimi-* key the proxy already uses; source it from the
-# same secret (container .env), never commit it, and fingerprint it
-# in logs.
-KIMI_API_KEY = os.environ.get("KIMI_API_KEY", "")
+# The Kimi key is the same sk-kimi-* key the proxy uses for the tenant; never
+# commit it, and fingerprint it in logs.
 KIMI_USAGES_URL = os.environ.get("KIMI_USAGES_URL", "https://api.kimi.com/coding/v1/usages")
 
 
-# Kimi enrollment (#72): the enrolled key lives here; KIMI_API_KEY env remains
-# the fallback so pre-enrollment deployments (and a rolled-back brain, which
-# never reads this file) keep working unchanged.
-KIMI_CREDS_FILE = os.environ.get("KIMI_CREDS_FILE", "/creds/kimi.json")
+# Kimi enrollment (#72): the enrolled key lives in the tenant's dir.
+KIMI_CREDS_FILE = "kimi.json"
 
 
 # ---- Kimi-for-Coding quota poller --------------------------------------------
 
-# Kimi key resolution (#72): the enrolled file key wins, else the env var.
-# mtime-cached like every pooled creds file so an out-of-band edit is adopted live.
-# _kimi_file_key: None = not loaded / no file, "" = file present but keyless.
-_kimi_file_key = None
-_kimi_file_mtime = None
+# Kimi key resolution (#72): the tenant's enrolled file key, mtime-cached like
+# every pooled creds file so an out-of-band edit is adopted live.
+# file_key: None = not loaded / no file, "" = file present but keyless.
+class _Store:
+    """One tenant's kimi key (tenant.stores["kimi"], _st)."""
+
+    def __init__(self, t):
+        self.file = t.path(KIMI_CREDS_FILE)
+        self.file_key = None
+        self.file_mtime = None
 
 
-def _kimi_key():
-    """The Moonshot key the brain polls with: enrolled file value, else env."""
-    global _kimi_file_key, _kimi_file_mtime
-    with core._refresh_lock:
-        try:
-            mtime = os.stat(KIMI_CREDS_FILE).st_mtime
-        except OSError:
-            _kimi_file_key = None
-            _kimi_file_mtime = None
-            return KIMI_API_KEY
-        if _kimi_file_key is None or mtime != _kimi_file_mtime:
+def _st(t):
+    return t.store_for("kimi", _Store)
+
+
+def _kimi_key(t):
+    """The Moonshot key the brain polls with for this tenant: the enrolled
+    file's value, "" without one."""
+    with t.refresh_lock:
+        mtime = core._store.mtime(_st(t).file)
+        if mtime is None:
+            _st(t).file_key = None
+            _st(t).file_mtime = None
+            return ""
+        if _st(t).file_key is None or mtime != _st(t).file_mtime:
             try:
-                with open(KIMI_CREDS_FILE) as f:
-                    raw = json.load(f)
-                _kimi_file_key = (raw.get("api_key") or "") if isinstance(raw, dict) else ""
+                raw = core._store.read_json(_st(t).file)
+                _st(t).file_key = (raw.get("api_key") or "") if isinstance(raw, dict) else ""
             except Exception as e:  # noqa: BLE001
                 core.log(f"WARN kimi creds file unreadable: {e}")
-                _kimi_file_key = ""
-            _kimi_file_mtime = mtime
-        return _kimi_file_key or KIMI_API_KEY
+                _st(t).file_key = ""
+            _st(t).file_mtime = mtime
+        return _st(t).file_key or ""
 
 
-def _kimi_key_source():
-    """Where the active kimi key comes from — declared on /auth/providers so the
-    UI can say which copy an enrollment actually replaced."""
-    key = _kimi_key()
-    if not key:
-        return "none"
-    return "file" if _kimi_file_key else "env"
+def _kimi_key_source(t):
+    """Where the active kimi key comes from — declared on /auth/providers."""
+    return "file" if _kimi_key(t) else "none"
 
 
-def _persist_kimi_key(key):
+def _persist_kimi_key(t, key):
     """Atomically write the enrolled kimi key. Raises ValueError (operator-readable)
     on I/O failure; logs the fingerprint only, never the key."""
-    global _kimi_file_key, _kimi_file_mtime
-    with core._refresh_lock:
-        tmp = KIMI_CREDS_FILE + ".tmp"
+    with t.refresh_lock:
         try:
-            with open(tmp, "w") as f:
-                json.dump({"api_key": key}, f)
-            os.replace(tmp, KIMI_CREDS_FILE)
+            core._store.write_json(_st(t).file, {"api_key": key})
         except Exception as e:  # noqa: BLE001
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise ValueError(f"cannot write {KIMI_CREDS_FILE}: {e}") from e
-        _kimi_file_key = key
-        _kimi_file_mtime = os.stat(KIMI_CREDS_FILE).st_mtime
+            raise ValueError(f"cannot write {_st(t).file}: {e}") from e
+        _st(t).file_key = key
+        _st(t).file_mtime = core._store.mtime(_st(t).file)
     core.log(f"kimi key enrolled (fingerprint {core._key_fingerprint(key)})")
 
 
@@ -215,16 +207,16 @@ def _kimi_reading(raw, as_of):
             "beside": beside, "models": {}}, ""
 
 
-def poll_kimi(prev=None, account=None):  # noqa: ARG001 — uniform pool dispatch (#71)
+def poll_kimi(t, prev=None, account=None):  # noqa: ARG001 — uniform pool dispatch (#71)
     """Return one Kimi poll result (never raises):
       name, kind, provider, ok, ts, good_ts, stale, http, err, retry_after, reading
     reading is the §1.5 normalized reading (_kimi_reading), None on a failure."""
     out = {"name": "kimi", "kind": "provider", "provider": "kimi",
            "ok": 0, "ts": time.time(), "good_ts": None, "stale": 0,
            "http": 0, "err": "", "retry_after": None, "reading": None}
-    key = _kimi_key()
+    key = _kimi_key(t)
     if not key:
-        out["err"] = "kimi key not configured (KIMI_API_KEY env or enrolled creds file)"
+        out["err"] = "kimi key not configured (enroll one on /auth)"
         return out
     raw = None
     try:
@@ -246,26 +238,26 @@ def poll_kimi(prev=None, account=None):  # noqa: ARG001 — uniform pool dispatc
     return out
 
 
-def _kimi_auth_status(now):
+def _kimi_auth_status(t, now):
     """A single row (kimi is one key, not a pool) carrying where the key comes
     from and its fingerprint — never the key."""
-    key = _kimi_key()
+    key = _kimi_key(t)
     if not key:
         return []
-    rows = core._account_health(["kimi"], now)["accounts"]
+    rows = core._account_health(t, ["kimi"], now)["accounts"]
     for r in rows:
-        r["source"] = _kimi_key_source()
+        r["source"] = _kimi_key_source(t)
         r["key_fingerprint"] = core._key_fingerprint(key)
     return rows
 
 
-def _kimi_auth_begin(account=None):
+def _kimi_auth_begin(t, account=None):
     """No redirect grant here — mint a bare one-shot state so complete has the same
     shape (and TTL) as every other provider's flow."""
-    return None, core._auth_grant_mint("kimi", "add", account=account)
+    return None, core._auth_grant_mint(t, "kimi", "add", account=account)
 
 
-def _kimi_auth_complete(grant, fields):  # noqa: ARG001 — uniform authority signature
+def _kimi_auth_complete(t, grant, fields):  # noqa: ARG001 — uniform authority signature
     key = str(fields.get("api_key") or "").strip()
     if not key:
         raise ValueError("api_key is required")
@@ -283,10 +275,10 @@ def _kimi_auth_complete(grant, fields):  # noqa: ARG001 — uniform authority si
         # A new plan without a weekly window enrolls (K1); `{}` reads no
         # window at all, and is not entitled until C9 says so.
         raise ValueError("key was accepted but returned no usable quota payload — nothing was saved")
-    _persist_kimi_key(key)
-    with core._poll_health_lock:
-        core._poll_fails.pop("kimi", None)
-        core._poll_schedule.pop("kimi", None)  # due immediately
+    _persist_kimi_key(t, key)
+    with t.poll_health_lock:
+        t.poll_fails.pop("kimi", None)
+        t.poll_schedule.pop("kimi", None)  # due immediately
     core._poll_wakeup.set()
     return {"account": "kimi", "enrolled": True, "reauthorized": False,
             "note": "the routing proxy holds its own copy of this key "
@@ -294,7 +286,7 @@ def _kimi_auth_complete(grant, fields):  # noqa: ARG001 — uniform authority si
 
 
 register("kimi", {
-    "poll": poll_kimi, "enabled": lambda: bool(_kimi_key()),
+    "poll": poll_kimi, "enabled": lambda t: bool(_kimi_key(t)),
     "auth": {
         "kind": "static-key",
         "label": "Kimi for Coding (Moonshot)",

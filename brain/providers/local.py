@@ -120,7 +120,7 @@ def _local_reading(as_of):
             "beside": [], "models": {}}
 
 
-def poll_local(prev=None, account=None):  # noqa: ARG001 — uniform pool dispatch (#71)
+def poll_local(t, prev=None, account=None):  # noqa: ARG001 — uniform pool dispatch (#71)
     """Return one local-server poll result (never raises), shaped as poll_kimi's.
     Fails when llama-server is unreachable, lacks a declared member, or its
     non-loading inventory cannot confirm that member's declared context_window."""
@@ -157,4 +157,4 @@ def poll_local(prev=None, account=None):  # noqa: ARG001 — uniform pool dispat
 
 # No `auth` record: nothing to enroll, LOCAL_UPSTREAM is a LAN address, and the
 # proxy strips every credential on the hop.
-register("local", {"poll": poll_local, "enabled": lambda: bool(LOCAL_UPSTREAM)})
+register("local", {"poll": poll_local, "enabled": lambda t: bool(LOCAL_UPSTREAM)})

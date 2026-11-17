@@ -23,12 +23,12 @@ func TestFastRouteKeepsHealthyCapacityOffRecoveryProbes(t *testing.T) {
 			// Even a freshly re-pointed binding or an old half-open election
 			// cannot spend healthy fast capacity on recovery.
 			sess := uniq("fast-session")
-			bindMu.Lock()
-			bindCache[bindKey("fast", sess)] = classBind{member: a, fetchedAt: time.Now(), memberSince: time.Now()}
-			bindMu.Unlock()
-			t.Cleanup(func() { bindMu.Lock(); delete(bindCache, bindKey("fast", sess)); bindMu.Unlock() })
+			lan.bindMu.Lock()
+			lan.bindCache[bindKey("fast", sess)] = classBind{member: a, fetchedAt: time.Now(), memberSince: time.Now()}
+			lan.bindMu.Unlock()
+			t.Cleanup(func() { lan.bindMu.Lock(); delete(lan.bindCache, bindKey("fast", sess)); lan.bindMu.Unlock() })
 			h.elect(a.ID, "fast", b.ID)
-			lead := decideHealthRoute(context.Background(), "fast", sess, a, []classMemberPref{a, b, ready}, []byte(`{}`), false, uniq("request"), false)
+			lead := lan.decideHealthRoute(context.Background(), "fast", sess, a, []classMemberPref{a, b, ready}, []byte(`{}`), false, uniq("request"), false)
 			want := ready.ID
 			if boundState == hsHealthy {
 				want = a.ID
@@ -63,7 +63,7 @@ func TestFastRouteHonorsPinsAndProbesWithoutHealthyCapacity(t *testing.T) {
 			case "sole":
 				members = members[:1]
 			}
-			lead := decideHealthRoute(context.Background(), "fast", uniq("s"), a, members, []byte(`{}`), false, uniq("request"), condition == "pinned")
+			lead := lan.decideHealthRoute(context.Background(), "fast", uniq("s"), a, members, []byte(`{}`), false, uniq("request"), condition == "pinned")
 			if lead.m.ID != a.ID || lead.lease == nil {
 				t.Fatalf("got %+v, want original probe when %s", lead, condition)
 			}

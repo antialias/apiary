@@ -104,15 +104,15 @@ func (h *healthStore) snapshotLocked(gap *string) map[string]any {
 	}
 	return map[string]any{"ts": nowFn().UTC().Format(time.RFC3339Nano), "gap_since": gap, "keys": keys}
 }
-func publishHealthSnapshot(gap *string) {
-	h := health
+func (tn *tenant) publishHealthSnapshot(gap *string) {
+	h := tn.health
 	if h == nil || healthModeV == healthOff || !eventsArmed() {
 		return
 	}
 	h.mu.Lock()
 	data := h.snapshotLocked(gap)
 	h.mu.Unlock()
-	publish("member_health_snapshot", data)
+	publish(tn.id, "member_health_snapshot", data)
 }
 func (h *healthStore) publishTransitionLocked(st *epState, from, to string) {
 	if !eventsArmed() || healthModeV == healthOff {
@@ -135,7 +135,7 @@ func (h *healthStore) publishTransitionLocked(st *epState, from, to string) {
 	case hsHealthy:
 		cause = "convalescent_elapsed"
 	}
-	publish("member_health", map[string]any{"key": st.key, "from": from, "to": to, "ep": nullable(st.ep), "k": st.k, "cause": cause,
+	publish(h.tenantID, "member_health", map[string]any{"key": st.key, "from": from, "to": to, "ep": nullable(st.ep), "k": st.k, "cause": cause,
 		"evidence": evidenceLocked(h, st, "", false), "hold_until": timeValue(st.holdUntil), "next_transition": nextTransitionLocked(h, st)})
 }
 func (h *healthStore) noteBinding(class, member string, pinned bool) {
@@ -172,12 +172,12 @@ func (h *healthStore) noteAuthFailure(key string) {
 	h.authFailures[key]++
 }
 
-func healthStatus() map[string]any {
+func (tn *tenant) healthStatus() map[string]any {
 	out := map[string]any{"mode": healthModeV.String()}
-	if healthRecovery != nil {
-		out["background_recovery"] = healthRecovery.snapshot()
+	if tn.healthRecovery != nil {
+		out["background_recovery"] = tn.healthRecovery.snapshot()
 	}
-	h := health
+	h := tn.health
 	if h == nil {
 		return out
 	}

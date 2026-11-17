@@ -130,33 +130,33 @@ func TestRecordsGolden(t *testing.T) {
 		t.Fatalf("golden reset slack %vs, recResetSlack %v", d.ResetSlackS, recResetSlack)
 	}
 	oldNow := nowFn
-	recMu.Lock()
-	oldRecords := records
-	records = map[recKey]refusalRecord{}
-	recMu.Unlock()
+	lan.recMu.Lock()
+	oldRecords := lan.records
+	lan.records = map[recKey]refusalRecord{}
+	lan.recMu.Unlock()
 	t.Cleanup(func() {
 		nowFn = oldNow
-		recMu.Lock()
-		records = oldRecords
-		recMu.Unlock()
+		lan.recMu.Lock()
+		lan.records = oldRecords
+		lan.recMu.Unlock()
 	})
 	for _, c := range d.Cases {
 		t.Run(c.Name, func(t *testing.T) {
 			key := recKey{"a", c.Record.Window}
-			recMu.Lock()
-			records = map[recKey]refusalRecord{key: c.Record.refusalRecord()}
-			recMu.Unlock()
+			lan.recMu.Lock()
+			lan.records = map[recKey]refusalRecord{key: c.Record.refusalRecord()}
+			lan.recMu.Unlock()
 			for i, s := range c.Steps {
 				now := goldenTime(s.Now)
 				nowFn = func() time.Time { return now }
 				if s.Standing.Allowance.Windows == nil {
 					s.Standing.Allowance.Windows = map[string]checkWindow{}
 				}
-				pruneRecords(map[string]acctStanding{"a": s.Standing})
+				lan.pruneRecords(map[string]acctStanding{"a": s.Standing})
 
-				recMu.Lock()
-				got, held := records[key]
-				recMu.Unlock()
+				lan.recMu.Lock()
+				got, held := lan.records[key]
+				lan.recMu.Unlock()
 				if held == s.Want.Ends {
 					t.Fatalf("step %d: ends = %v, want %v", i, !held, s.Want.Ends)
 				}

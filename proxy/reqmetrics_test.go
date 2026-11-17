@@ -38,7 +38,7 @@ func stuckAfterStream(release <-chan struct{}) http.Handler {
 func TestReqMetricsBlockedHandlerStaysInFlight(t *testing.T) {
 	rm := swapReqMetrics(t)
 	release := make(chan struct{})
-	srv := httptest.NewServer(requestHandler(stuckAfterStream(release)))
+	srv := httptest.NewServer(clientGate("", requestHandler(stuckAfterStream(release))))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/not-v1")
@@ -85,7 +85,7 @@ func TestReqMetricsBlockedHandlerStaysInFlight(t *testing.T) {
 	if v := mustMetric(t, out, "switch_proxy_oldest_in_flight_seconds "); v != "0" {
 		t.Fatalf("oldest age with nothing in flight = %s, want 0", v)
 	}
-	if v := mustMetric(t, out, `switch_proxy_requests_total{lane="other",code="200"}`); v != "1" {
+	if v := mustMetric(t, out, `switch_proxy_requests_total{lane="other",tenant="`+testLanTenant+`",code="200"}`); v != "1" {
 		t.Fatalf("requests_total = %s:\n%s", v, out)
 	}
 	if v := mustMetric(t, out, `switch_proxy_request_duration_seconds_count{lane="other"}`); v != "1" {
@@ -100,7 +100,7 @@ func TestReqMetricsBlockedHandlerStaysInFlight(t *testing.T) {
 
 func TestReqMetricsLaneAndStatus(t *testing.T) {
 	rm := swapReqMetrics(t)
-	srv := httptest.NewServer(requestHandler(http.NotFoundHandler()))
+	srv := httptest.NewServer(clientGate("", requestHandler(http.NotFoundHandler())))
 	defer srv.Close()
 	// An unknown /v1 path is denied before routing: lane other, code 404.
 	resp, err := http.Post(srv.URL+"/v1/nope", "application/json", strings.NewReader("{}"))
@@ -110,7 +110,7 @@ func TestReqMetricsLaneAndStatus(t *testing.T) {
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	out := rm.render(time.Now())
-	if v := mustMetric(t, out, `requests_total{lane="other",code="404"}`); v != "1" {
+	if v := mustMetric(t, out, `requests_total{lane="other",tenant="`+testLanTenant+`",code="404"}`); v != "1" {
 		t.Fatalf("denied request not counted under other/404:\n%s", out)
 	}
 	// Denials write a body, so TTFB is observed for them too.
@@ -124,10 +124,10 @@ func TestReqMetricsHistogramAndExposition(t *testing.T) {
 	t0 := time.Unix(1000, 0)
 	for _, d := range []time.Duration{30 * time.Millisecond, 700 * time.Millisecond, 45 * time.Second, 20 * time.Minute} {
 		id := rm.begin(t0)
-		rm.end(id, "opus", 200, t0, t0.Add(d/2).UnixNano(), t0.Add(d))
+		rm.end(id, "opus", "", 200, t0, t0.Add(d/2).UnixNano(), t0.Add(d))
 	}
 	id := rm.begin(t0)
-	rm.end(id, "class:frontier", 529, t0, 0, t0.Add(time.Second)) // no body byte: no TTFB sample
+	rm.end(id, "class:frontier", "", 529, t0, 0, t0.Add(time.Second)) // no body byte: no TTFB sample
 	out := rm.render(t0.Add(time.Hour))
 
 	// Same shape rules as the health exposition: one HELP/TYPE per family,
@@ -183,7 +183,7 @@ func TestReqMetricsHistogramAndExposition(t *testing.T) {
 	if _, ok := metricLine(t, out, `request_ttfb_seconds_count{lane="class:frontier"}`); ok {
 		t.Error("a request with no body byte produced a TTFB sample")
 	}
-	if v := mustMetric(t, out, `requests_total{lane="class:frontier",code="529"}`); v != "1" {
+	if v := mustMetric(t, out, `requests_total{lane="class:frontier",tenant="",code="529"}`); v != "1" {
 		t.Errorf("class 529 count = %s", v)
 	}
 	if v := mustMetric(t, out, "switch_proxy_process_start_time_seconds "); v == "0" {
@@ -198,7 +198,7 @@ func TestReqMetricsHistogramAndExposition(t *testing.T) {
 // speaks: the endpoint serves the switch_proxy_* series alone.
 func TestReqMetricsServedWithoutHealthStore(t *testing.T) {
 	swapReqMetrics(t)
-	if health != nil {
+	if lan.health != nil {
 		t.Skip("a health store is armed by an earlier test")
 	}
 	w := httptest.NewRecorder()

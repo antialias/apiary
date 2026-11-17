@@ -107,7 +107,10 @@ const product = "apiary-proxy"
 var upstream = "https://api.anthropic.com"
 
 var (
-	brainURL       string
+	// brainBase is SWITCH_BRAIN_URL: the brain's root. A tenant's routes are
+	// under brainBase + "/t/" + id (tenant.brainURL); the index routes
+	// (/tenants) and nothing else are at the root.
+	brainBase      string
 	bridgeURL      string
 	switchKey      string
 	injectFile     string
@@ -384,26 +387,23 @@ type decision struct {
 // /preferred that carries thresholds has been decoded.
 const defaultHardPct = 95.0
 
-var pref = &decision{}
-
 // laneParseFailures counts /v1 POSTs whose body yielded no top-level "model" (they
 // route on the default lane = old behavior, but a Claude Code payload change must be
 // visible, not silent). Exposed in /_switch/status.
 var laneParseFailures int64
 
 // ---- effective-account tracking (drives switch detection), PER LANE ----
-var (
-	effMu         sync.Mutex
-	lastEffective = map[string]string{}     // lane -> account that last served it
-	lastState     = map[string]routeState{} // lane -> most recent routeState (ROUTED/STALE/FAILED), for /_switch/status
-)
+//
+// Per tenant: tenant.effMu, tenant.lastEffective (lane -> account that last
+// served it) and tenant.lastState (lane -> most recent routeState, for
+// /_switch/status).
 
 // noteState records a lane's most recent routing outcome so /_switch/status (and the
 // status-line script that reads it) can show whether a lane is ROUTED / STALE / FAILED.
-func noteState(lane string, s routeState) {
-	effMu.Lock()
-	lastState[lane] = s
-	effMu.Unlock()
+func (tn *tenant) noteState(lane string, s routeState) {
+	tn.effMu.Lock()
+	tn.lastState[lane] = s
+	tn.effMu.Unlock()
 }
 
 // ---- stats for /_switch/status ----
@@ -480,6 +480,7 @@ func (s routeState) String() string {
 // .body is the request body buffered ONCE in requestHandler — the transport replays it
 // on a 429 retry instead of re-reading (bodies can be multi-MB with images).
 type reqInfo struct {
+	tenant   *tenant     // whose request: every per-tenant read below the entry goes through it
 	token    string      // bearer to inject (account lanes; also a wire's per-request credential)
 	eff      string      // effective account label this request was routed to
 	state    routeState  // ROUTED / STALE (account lanes; bypass leaves it zero-value)
@@ -551,13 +552,13 @@ func readToken(path string) string {
 // brainFail flips pref.ok false, logging only the TRANSITION into failure (a
 // client away from the brain's network is a normal, designed state — logging every failed
 // reconnect there would be noise; logging nothing cost a diagnosis once).
-func brainFail(why string, err error) {
-	pref.mu.Lock()
-	was := pref.ok
-	pref.ok = false
-	pref.mu.Unlock()
+func (tn *tenant) brainFail(why string, err error) {
+	tn.pref.mu.Lock()
+	was := tn.pref.ok
+	tn.pref.ok = false
+	tn.pref.mu.Unlock()
 	if was {
-		log.Printf("brain unreachable (%s): %v — serving STALE (last-good decision on cached tokens) until it returns", why, err)
+		log.Printf("brain unreachable for %s (%s): %v — serving STALE (last-good decision on cached tokens) until it returns", tn.id, why, err)
 	}
 }
 
@@ -573,10 +574,13 @@ func brainFail(why string, err error) {
 var prewarmWG sync.WaitGroup
 
 // applyPreferred decodes one /preferred document (the data of a `preferred`
-// event on the brain's /events stream) and, when it holds everything the proxy
-// reads, makes it the decision. A document that does not is a decode failure:
-// the view goes not-ok (brainFail) and the last good state stays.
-func applyPreferred(body io.Reader) {
+// event on the tenant's /t/<tenant>/events stream) and, when it holds
+// everything the proxy reads, makes it the tenant's decision. A document that
+// does not is a decode failure: the view goes not-ok (brainFail) and the last
+// good state stays. The class rows (/_switch/classes, /v1/models) are global
+// and derive from the lan tenant's document alone.
+func (tn *tenant) applyPreferred(body io.Reader) {
+	pref := tn.pref
 	var d struct {
 		Account   string              `json:"account"`
 		Reason    string              `json:"reason"`
@@ -633,7 +637,7 @@ func applyPreferred(body io.Reader) {
 		err = fmt.Errorf("payload lacks settings.stale_max: keeping the last good state")
 	}
 	if err != nil {
-		brainFail("decode", err)
+		tn.brainFail("decode", err)
 		return
 	}
 	var classes map[string]classPref
@@ -669,28 +673,32 @@ func applyPreferred(body io.Reader) {
 	if logFleet {
 		log.Printf("brain fleet unreadable, sessions show no room until a readable one: %v", fleetErr)
 	}
-	pruneRecords(accounts)
+	tn.pruneRecords(accounts)
 	// The ledger just pulled covers what it covers; what it does not waits in
 	// the reporter's queue (reports.go), which this wakes. Nothing is posted
 	// here: this runs on the /events reader, and a post that waited on a slow
 	// brain would stop it, and its silence watchdog would call a healthy
 	// brain unreachable.
-	ledgerPulled(d.Ledger, unixSeconds(time.Now()))
-	reportWake()
+	tn.ledgerPulled(d.Ledger, unixSeconds(time.Now()))
+	tn.reportWake()
 	if !wasOK {
-		log.Printf("brain reachable: preferred=%s lanes=%d", d.Account, len(d.LaneRules))
+		log.Printf("brain reachable for %s: preferred=%s lanes=%d", tn.id, d.Account, len(d.LaneRules))
 	}
 	// #93 (B2): the classes payload is the source of the advertised class picker
 	// rows — derive, tombstone what vanished, persist the last-good snapshot.
+	// The rows are one registry for every tenant, read from the lan tenant's
+	// document (the classes document is the operator's, one for all).
 	if d.Classes != nil {
-		shapes := make(map[string]string, len(d.Consumers))
-		for _, c := range d.Consumers {
-			if c.ID != "" {
-				shapes[c.ID] = c.RequestShape
+		if tn.lan {
+			shapes := make(map[string]string, len(d.Consumers))
+			for _, c := range d.Consumers {
+				if c.ID != "" {
+					shapes[c.ID] = c.RequestShape
+				}
 			}
+			updateClassRowsFromPreferred(classes, shapes)
 		}
-		updateClassRowsFromPreferred(classes, shapes)
-		if health != nil {
+		if tn.health != nil {
 			// #115: freeze health keys that left the registry, unfreeze the
 			// returning ones — the union across classes is the present set.
 			present := map[string]bool{}
@@ -699,7 +707,7 @@ func applyPreferred(body io.Reader) {
 					present[m.ID] = true
 				}
 			}
-			health.syncRegistry(present)
+			tn.health.syncRegistry(present)
 		}
 	}
 	// Every account any lane routes to (not just the default): each actuator
@@ -711,7 +719,7 @@ func applyPreferred(body io.Reader) {
 			warm[lp.Account] = true
 		}
 	}
-	warmAccounts(warm)
+	tn.warmAccounts(warm)
 }
 
 // laneDecision is one Anthropic dial's account (§2.2 rows 11, 16): the
@@ -728,6 +736,10 @@ type laneDecision struct {
 	// unactuated is, on a FAILED decision, the kind of the route's account
 	// that this build has no actuator for (writeNoActuator); "" otherwise.
 	unactuated string
+	// notTenant is, on a FAILED decision, an account the route named that
+	// the tenant's document does not list, when the route named no other
+	// (writeNotTenantAccount: the typed 503 of MEMBERS-PLAN 1b); "" otherwise.
+	notTenant string
 }
 
 // laneRouteID is a bare lane's route id.
@@ -752,32 +764,34 @@ func laneRouteID(lane string) string { return "lane:" + lane }
 // The manual inject file passes the check of the account whose token it holds
 // (a token no account of this proxy holds has no reading: no (unknown)) and
 // never grants pay: it serves only while that check is included.
-func decideRoute(routeID, lane, model string, entitlementOnly bool) laneDecision {
-	pref.mu.RLock()
-	p, r := pref.account, pref.reason
-	if lp, has := pref.lanes[lane]; has && lp.Account != "" {
+func (tn *tenant) decideRoute(routeID, lane, model string, entitlementOnly bool) laneDecision {
+	tn.pref.mu.RLock()
+	p, r := tn.pref.account, tn.pref.reason
+	if lp, has := tn.pref.lanes[lane]; has && lp.Account != "" {
 		p, r = lp.Account, lp.Reason
 	}
-	pref.mu.RUnlock()
-	return decideOn(routeID, lane, model, p, r, entitlementOnly)
+	tn.pref.mu.RUnlock()
+	return tn.decideOn(routeID, lane, model, p, r, entitlementOnly)
 }
 
 // decideOn is decideRoute from the brain's pick p (why: r) for the route: the
 // lane's pick for a bare lane, the member's incumbent for a class member.
-func decideOn(routeID, lane, model, p, r string, entitlementOnly bool) laneDecision {
-	pref.mu.RLock()
-	ok := pref.ok
-	pref.mu.RUnlock()
+func (tn *tenant) decideOn(routeID, lane, model, p, r string, entitlementOnly bool) laneDecision {
+	tn.pref.mu.RLock()
+	ok := tn.pref.ok
+	tn.pref.mu.RUnlock()
 	state := stateRouted
 	if !ok {
 		state = stateStale // brain down: the last-good decision, on cached standing and tokens
 	}
 	now := nowFn()
-	if injectFile != "" { // manual override / test hook
+	// The operator's manual override / test hook is the household's alone: a
+	// member's request is never served on a token the operator put on the host.
+	if injectFile != "" && tn.lan {
 		if t := readToken(injectFile); t != "" {
 			eff := "manual:" + fp("Bearer "+t)
-			a := accountOfCredential(t)
-			c, _ := routeCheck(routeID, a, model, now)
+			a := tn.accountOfCredential(t)
+			c, _ := tn.routeCheck(routeID, a, model, now)
 			if entitlementOnly || c.included() {
 				return laneDecision{tok: t, acct: eff, reason: "manual inject file", state: stateRouted, check: c}
 			}
@@ -793,11 +807,30 @@ func decideOn(routeID, lane, model, p, r string, entitlementOnly bool) laneDecis
 		// The brain names no pick only where none of the route's accounts
 		// passes; the ranking below says why, account by account. A route it
 		// does not serve has no decision at all.
-		if _, _, _, known := routeOf(routeID); !known {
+		if _, _, _, known := tn.routeOf(routeID); !known {
 			return laneDecision{reason: "no brain decision yet", state: stateFailed} // nothing to route to
 		}
 	}
-	cands, refused := rankRouteAccounts(routeID, model, checkRequest{}, p, routeAccounts(routeID), lanePct(lane), now)
+	// The credential boundary, before any check: an account the tenant's
+	// document does not list is not the tenant's to dial, whatever the route
+	// (or a wrong-tenant bug) names. Nothing is fetched or ranked for it.
+	accts, notTenant := tn.routeAccounts(routeID), ""
+	own := make([]string, 0, len(accts))
+	for _, a := range accts {
+		if _, _, err := tn.actuatorFor(a); err != nil {
+			log.Printf("route %s: %v", routeID, err)
+			if notTenant == "" {
+				notTenant = a
+			}
+			continue
+		}
+		own = append(own, a)
+	}
+	if len(own) == 0 && notTenant != "" {
+		return laneDecision{acct: p, reason: "account " + notTenant + " is not tenant " + tn.id + "'s",
+			state: stateFailed, notTenant: notTenant}
+	}
+	cands, refused := tn.rankRouteAccounts(routeID, model, checkRequest{}, p, own, tn.lanePct(lane), now)
 	if entitlementOnly {
 		cands = append(cands, refused...)
 		sort.SliceStable(cands, func(i, j int) bool { return cands[i].account == p && cands[j].account != p })
@@ -809,7 +842,13 @@ func decideOn(routeID, lane, model, p, r string, entitlementOnly bool) laneDecis
 	}
 	unactuated := ""
 	for _, c := range cands {
-		act, kind := actuatorFor(c.account)
+		act, kind, err := tn.actuatorFor(c.account)
+		if err != nil {
+			// Not the tenant's account (the document named one it does not
+			// list): never dialled, as if absent from the route.
+			log.Printf("route %s: %v", routeID, err)
+			continue
+		}
 		if act == nil {
 			// A kind this build cannot sign for: never dialled, and named.
 			if unactuated == "" {
@@ -817,7 +856,7 @@ func decideOn(routeID, lane, model, p, r string, entitlementOnly bool) laneDecis
 			}
 			continue
 		}
-		tok := act.credential(c.account)
+		tok := act.credential(tn, c.account)
 		if tok == "" {
 			continue
 		}
@@ -855,14 +894,14 @@ func pickOf(account string, lists ...[]acctPick) string {
 
 // lanePct is the use the swap orders an Anthropic route's accounts by: the
 // lane's effective, else the account's weekly; nil when neither is known.
-func lanePct(lane string) func(string) *float64 {
-	pref.mu.RLock()
-	weekly := pref.weekly
+func (tn *tenant) lanePct(lane string) func(string) *float64 {
+	tn.pref.mu.RLock()
+	weekly := tn.pref.weekly
 	var laneEff map[string]float64
-	if lp, has := pref.lanes[lane]; has {
+	if lp, has := tn.pref.lanes[lane]; has {
 		laneEff = lp.Effective
 	}
-	pref.mu.RUnlock()
+	tn.pref.mu.RUnlock()
 	return func(a string) *float64 {
 		if v, ok := laneEff[a]; ok {
 			return &v
@@ -877,13 +916,13 @@ func lanePct(lane string) func(string) *float64 {
 // failoverRoute is the same-lane account swap after `not` refused (§2.2 row
 // 8): the next account rankRouteAccounts admits, never `not`, with a fetchable
 // token. ok=false when there is none (the caller surfaces the refusal).
-func failoverRoute(routeID, lane, model, not string) (string, string, dialCheck, bool) {
-	cands, _ := rankRouteAccounts(routeID, model, checkRequest{}, "", routeAccounts(routeID), lanePct(lane), nowFn())
+func (tn *tenant) failoverRoute(routeID, lane, model, not string) (string, string, dialCheck, bool) {
+	cands, _ := tn.rankRouteAccounts(routeID, model, checkRequest{}, "", tn.routeAccounts(routeID), tn.lanePct(lane), nowFn())
 	for _, c := range cands {
 		if c.account == not {
 			continue
 		}
-		if t := credentialFor(c.account); t != "" {
+		if t := tn.credentialFor(c.account); t != "" {
 			return t, c.account, c.check, true
 		}
 	}
@@ -893,26 +932,26 @@ func failoverRoute(routeID, lane, model, not string) (string, string, dialCheck,
 // forceEffective sets a lane's effective account WITHOUT firing a switch alert — used
 // after the Transport already fired one for a 429 failover, so the next request doesn't
 // fire a duplicate when noteEffective sees the same change.
-func forceEffective(lane, a string) {
-	effMu.Lock()
-	lastEffective[lane] = a
-	effMu.Unlock()
+func (tn *tenant) forceEffective(lane, a string) {
+	tn.effMu.Lock()
+	tn.lastEffective[lane] = a
+	tn.effMu.Unlock()
 }
 
 // noteEffective records which account served a lane's request and fires the switch
 // alert on a real change (never on the lane's first request, never to/from an empty
 // account). Detection is at REQUEST time: an idle lane reports its flip on the first
 // request after it — the alert text says so.
-func noteEffective(lane, effective, reason string) {
-	effMu.Lock()
-	prev := lastEffective[lane]
-	lastEffective[lane] = effective
-	effMu.Unlock()
+func (tn *tenant) noteEffective(lane, effective, reason string) {
+	tn.effMu.Lock()
+	prev := tn.lastEffective[lane]
+	tn.lastEffective[lane] = effective
+	tn.effMu.Unlock()
 	if prev != "" && effective != "" && prev != effective {
 		st.mu.Lock()
 		st.switches++
 		st.mu.Unlock()
-		fireSwitchAlert(lane, prev, effective, reason)
+		tn.fireSwitchAlert(lane, prev, effective, reason)
 	}
 }
 
@@ -939,13 +978,14 @@ const (
 	switchTitleLastHop = "🚨 Claude switched to its LAST account"
 )
 
-func fireSwitchAlert(lane, from, to, reason string) {
-	log.Printf("🔀 SWITCHOVER[%s] %s -> %s (%s)", lane, from, to, reason)
+func (tn *tenant) fireSwitchAlert(lane, from, to, reason string) {
+	log.Printf("🔀 SWITCHOVER[%s %s] %s -> %s (%s)", tn.id, lane, from, to, reason)
+	pref := tn.pref
 	// The hub's only publisher (#59). Deliberately here: above the bridgeURL return so
 	// it fires with no bridge configured, and above pref.mu.RLock() so hub.mu never
 	// nests inside pref.mu. A few flips a day, off the hot path — the request-path taps
 	// are #60/#61.
-	publish("switchover", map[string]any{"lane": lane, "from": from, "to": to, "reason": reason})
+	publish(tn.id, "switchover", map[string]any{"lane": lane, "from": from, "to": to, "reason": reason})
 	if bridgeTarget() == "" {
 		log.Printf("   (no SWITCH_BRIDGE_URL set — switch alert skipped)")
 		return
@@ -1007,7 +1047,7 @@ func fireSwitchAlert(lane, from, to, reason string) {
 			"description": desc,
 		},
 	}
-	rec := &alertRecord{alertname: "ClaudeAccountSwitchover", lane: lane, from: from, to: to, tier: delivery}
+	rec := &alertRecord{alertname: "ClaudeAccountSwitchover", tenant: tn.id, lane: lane, from: from, to: to, tier: delivery}
 	// Demote closure for gate 1 (lane-scoped critical cooldown): map writes
 	// only — it runs under alertMu inside gateAndEnqueue.
 	demote := func(ago time.Duration) {
@@ -1030,7 +1070,7 @@ func fireSwitchAlert(lane, from, to, reason string) {
 		// Suppressed candidates never reach the flush, so their dispatch is
 		// published here — enqueued ones publish from flushSwitchAlerts (see
 		// alert_history.go's ordering contract).
-		publish("alert_dispatch", out.dispatch)
+		publish(tn.id, "alert_dispatch", out.dispatch)
 		log.Printf("   suppressed: identical alert (lane=%s %s->%s) fired within %s", lane, from, to, alertRepeatWindow)
 		return
 	}
@@ -1082,14 +1122,16 @@ func flushSwitchAlerts() {
 	// caller instead.
 	ids := make([]string, 0, len(batch))
 	for _, qa := range batch {
-		publish("alert_dispatch", qa.dispatch)
+		publish(qa.rec.tenant, "alert_dispatch", qa.dispatch)
 		ids = append(ids, qa.rec.id)
 	}
 	// delivery emits the batch's single alert_delivery event — every exit path
 	// below reports one, success or not, so the feed never has a dangling
 	// dispatched-but-unaccounted batch. bridgeStatus nil = no HTTP exchange.
+	// One batch may hold several tenants' flips: the delivery event is the
+	// proxy's, with no tenant.
 	delivery := func(bridgeStatus any, delivered, rolledBack bool, channels map[string]any) {
-		publish("alert_delivery", map[string]any{
+		publish("", "alert_delivery", map[string]any{
 			"ids": ids, "at": time.Now().UnixMilli(), "bridge_status": bridgeStatus,
 			"delivered": delivered, "rolled_back": rolledBack, "channels": channels,
 		})
@@ -1518,6 +1560,16 @@ type failoverTransport struct {
 
 func (t *failoverTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	info, _ := req.Context().Value(infoKey).(reqInfo)
+	if info.tenant == nil {
+		info.tenant = tenantFrom(req.Context())
+	}
+	tn := info.tenant
+	if tn == nil {
+		// No tenant on the hop: nothing below may read anyone's state. A
+		// request that reached the transport without one is a bug in an
+		// entry, answered as the typed 503, never on an account.
+		return noTenantResponse(req), nil
+	}
 	// Drop the client's Accept-Encoding on EVERY upstream hop and let the
 	// transport own gzip (it decodes transparently when it negotiated it), so
 	// every body this proxy inspects — usage rewrites, 429 classification, the
@@ -1570,7 +1622,7 @@ func (t *failoverTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	// WE minted for the class. An upstream that sent it would switch that off
 	// for its own pooled-account numbers.
 	resp.Header.Del("X-Switch-Quota")
-	noteServedHop(hop, info, resp, t.anthropic.Host, sent)
+	tn.noteServedHop(hop, info, resp, t.anthropic.Host, sent)
 	if cc := info.classCtx; cc != nil && cc.image != nil {
 		// An image hop (§2.9): the door reads the upstream's own reply through
 		// the wire's image side, so nothing here may translate, scale or
@@ -1597,7 +1649,7 @@ func (t *failoverTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		// collapses the upstream SSE into one JSON reply inside translate, so
 		// the tap never sees it — score off the translated status here. Head
 		// rows (non-200 upstream) were already recorded at the head site.
-		if health != nil && info.classCtx != nil && upstreamStatus == 200 {
+		if info.classCtx != nil && info.classCtx.tenant.health != nil && upstreamStatus == 200 {
 			if cw, ok := w.(codexWire); ok && !cw.clientStream(info) {
 				cc := info.classCtx
 				skey := cc.served.snapshot().member
@@ -1647,7 +1699,7 @@ func (t *failoverTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	// an anthropic-wire hop both deliver the upstream body as-is — tap it for
 	// §3 shape evidence (rows 1/2/3/4a/4b/5/20). Installed BEFORE the #44
 	// scaler wraps the body so the tap reads the upstream's own bytes.
-	if health != nil && info.classCtx != nil && resp.StatusCode == 200 {
+	if info.classCtx != nil && info.classCtx.tenant.health != nil && resp.StatusCode == 200 {
 		cc := info.classCtx
 		resp.Body = newHealthTap(resp.Body, hop.Context(), cc, cc.served.snapshot().member, wantsStream(cc.origBody))
 	}
@@ -1693,7 +1745,7 @@ func (t *failoverTransport) RoundTrip(req *http.Request) (*http.Response, error)
 // reading or by time. Once an image batch's success, read just after
 // a sibling's 429, cleared that 429's spent record, and the batch answered the
 // raw 429 instead of the class's unavailable reply.
-func noteServedHop(hop *http.Request, info reqInfo, resp *http.Response, anthropicHost string, sent time.Time) {
+func (tn *tenant) noteServedHop(hop *http.Request, info reqInfo, resp *http.Response, anthropicHost string, sent time.Time) {
 	if hop.URL == nil {
 		return
 	}
@@ -1701,8 +1753,8 @@ func noteServedHop(hop *http.Request, info reqInfo, resp *http.Response, anthrop
 	var account, scope, model, provider string
 	switch {
 	case hop.URL.Host == anthropicHost:
-		account = accountOfHop(hop.Header)
-		scope = laneScope(servedLane(hop, info))
+		account = tn.accountOfHop(hop.Header)
+		scope = tn.laneScope(servedLane(hop, info))
 		model = extractModel(info.body)
 		provider = "anthropic"
 	case info.classCtx != nil:
@@ -1721,22 +1773,22 @@ func noteServedHop(hop *http.Request, info reqInfo, resp *http.Response, anthrop
 	// The headers are parsed once, at the instant the head arrived: the served
 	// event's readings and the overlay's, and so the reading reports, are the
 	// same parse (quota-model 66 §1).
-	hr, hasReading := parseHeaderReading(resp.Header, now)
+	hr, hasReading := tn.parseHeaderReading(resp.Header, now)
 	noteServedCap(hop, info, resp, anthropicHost, account, model, now, hr)
 	if hasReading {
-		keepHeaderReading(account, hr)
+		tn.keepHeaderReading(account, hr)
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		chk := servedCheck(hop, info)
 		switch {
 		case chk.onAllowance():
-			noteServed(account, scope, model, sent)
+			tn.noteServed(account, scope, model, sent)
 		case chk.paid():
 			// The pot paid: an unpaid record on it is disproved (§2.6).
-			notePaidServed(account, strings.TrimPrefix(chk.Pot, account+"/"), sent)
+			tn.notePaidServed(account, strings.TrimPrefix(chk.Pot, account+"/"), sent)
 		}
-		noteSessionFunding(info.classCtx, sessionFunding{Tier: chk.funding()})
-		noteServedSession(hop, info, account, model, provider, chk)
+		tn.noteSessionFunding(info.classCtx, sessionFunding{Tier: chk.funding()})
+		tn.noteServedSession(hop, info, account, model, provider, chk)
 	}
 }
 
@@ -1762,7 +1814,7 @@ func servedMemberProvider(cc *classRoute, memberID string) string {
 // under the model the client asked for (not the upstream model the hop
 // sent). count_tokens is free and says nothing of what serves the session,
 // so it writes nothing.
-func noteServedSession(hop *http.Request, info reqInfo, account, model, provider string, chk dialCheck) {
+func (tn *tenant) noteServedSession(hop *http.Request, info reqInfo, account, model, provider string, chk dialCheck) {
 	f := sessionFact{account: account, model: model, route: chk.route, tier: chk.funding(),
 		provider: provider, lane: servedLane(hop, info)}
 	session := hop.Header.Get("x-claude-code-session-id")
@@ -1786,7 +1838,7 @@ func noteServedSession(hop *http.Request, info reqInfo, account, model, provider
 	if provider != "anthropic" {
 		f.lane = "" // a lane is an Anthropic account's; a provider hop has none
 	}
-	noteSessionServed(session, key, f)
+	tn.noteSessionServed(session, key, f)
 }
 
 // servedCheckKey carries the check that admitted a hop a swap or the class
@@ -1800,13 +1852,15 @@ type servedCheckKey struct{}
 type anthDialKey struct{}
 
 type anthDial struct {
-	acct string
-	body []byte
+	tenant *tenant // whose account: the reauth asks its brain routes, signs by its actuator
+	acct   string
+	body   []byte
 }
 
-// withAnthDial stamps the account and body a hop dials.
+// withAnthDial stamps the account and body a hop dials, for the request's
+// tenant (tenantFrom ctx).
 func withAnthDial(ctx context.Context, acct string, body []byte) context.Context {
-	return context.WithValue(ctx, anthDialKey{}, anthDial{acct: acct, body: body})
+	return context.WithValue(ctx, anthDialKey{}, anthDial{tenant: tenantFrom(ctx), acct: acct, body: body})
 }
 
 // anthDialOf is the account and body an Anthropic hop dials: the swap's or
@@ -1817,10 +1871,11 @@ func anthDialOf(req *http.Request) (anthDial, bool) {
 		return d, true
 	}
 	info, ok := req.Context().Value(infoKey).(reqInfo)
-	if !ok || info.token == "" || signedCredential(req.Header, info.eff) != info.token {
+	tn := tenantFrom(req.Context())
+	if !ok || tn == nil || info.token == "" || tn.signedCredential(req.Header, info.eff) != info.token {
 		return anthDial{}, false
 	}
-	return anthDial{acct: info.eff, body: info.body}, true
+	return anthDial{tenant: tn, acct: info.eff, body: info.body}, true
 }
 
 // servedCheck is the check that admitted the hop that served: the swap's or
@@ -1858,6 +1913,7 @@ func (t *failoverTransport) dispatch(req *http.Request, info reqInfo) (*http.Res
 	if info.lane == "" {
 		info.lane = "default" // request bypassed requestHandler (tests) — behave legacy
 	}
+	tn := info.tenant
 
 	// requestHandler already buffered the body (info.body) — reuse it for the replay.
 	// Read it here only when the request bypassed the handler.
@@ -1867,7 +1923,7 @@ func (t *failoverTransport) dispatch(req *http.Request, info reqInfo) (*http.Res
 		req.Body.Close()
 		req.Body = io.NopCloser(bytes.NewReader(body))
 		req.ContentLength = int64(len(body))
-		if info.token != "" && signedCredential(req.Header, info.eff) == info.token {
+		if info.token != "" && tn.signedCredential(req.Header, info.eff) == info.token {
 			req = req.WithContext(withAnthDial(req.Context(), info.eff, body)) // the reauth replays this body
 		}
 	}
@@ -1882,7 +1938,7 @@ func (t *failoverTransport) dispatch(req *http.Request, info reqInfo) (*http.Res
 	// The adapter classifies the refusal (refusal.go, §2.6); only the classes
 	// that walk swap the account. Anything else goes back as it came.
 	model := extractModel(body)
-	ref := anthropicRefusal(resp, model, nowFn())
+	ref := tn.anthropicRefusal(resp, model, nowFn())
 	if !ref.walks() {
 		return resp, err
 	}
@@ -1903,7 +1959,7 @@ func (t *failoverTransport) dispatch(req *http.Request, info reqInfo) (*http.Res
 	// The refusal is recorded on what it names (records.go): a rejected window
 	// closes that window on this account for every route it binds; a 429 that
 	// rejects nothing is a throttle, which only deranks.
-	kind, what := recordRefusal(info.eff, ref, resp)
+	kind, what := tn.recordRefusal(info.eff, ref, resp)
 	snippet := string(ref.body)
 	if len(snippet) > 300 {
 		snippet = snippet[:300] + "…"
@@ -1912,7 +1968,7 @@ func (t *failoverTransport) dispatch(req *http.Request, info reqInfo) (*http.Res
 		resp.StatusCode, info.eff, info.lane, kind, what, ratelimitDetail(resp.Header), snippet)
 
 	route := laneRouteID(info.lane)
-	ftok, facct, fc, ok := failoverRoute(route, info.lane, model, info.eff)
+	ftok, facct, fc, ok := tn.failoverRoute(route, info.lane, model, info.eff)
 	if !ok {
 		return resp, err // no other account may be dialled — surface the refusal
 	}
@@ -1924,21 +1980,21 @@ func (t *failoverTransport) dispatch(req *http.Request, info reqInfo) (*http.Res
 	}
 	resp.Body.Close()
 	log.Printf("⚠️  %d on %s — auto-failing over to %s check=%s and retrying", resp.StatusCode, info.eff, facct, fc)
-	forceEffective(info.lane, facct)
+	tn.forceEffective(info.lane, facct)
 	st.mu.Lock()
 	st.switches++
 	st.mu.Unlock()
-	fireSwitchAlert(info.lane, info.eff, facct, "hit a usage limit ("+ref.class+") — auto-flipped mid-request")
+	tn.fireSwitchAlert(info.lane, info.eff, facct, "hit a usage limit ("+ref.class+") — auto-flipped mid-request")
 
 	req2 := req.Clone(withAnthDial(context.WithValue(req.Context(), servedCheckKey{}, fc), facct, body))
 	req2.Body = io.NopCloser(bytes.NewReader(body))
 	req2.ContentLength = int64(len(body))
-	signAccount(req2.Header, facct, ftok) // always inject the alt account's credential
+	tn.signAccount(req2.Header, facct, ftok) // always inject the alt account's credential
 	resp2, err2 := t.tripWithReauth(req2)
 	if err2 == nil && resp2 != nil && resp2.StatusCode >= 400 {
 		// One swap keeps the ladder bounded; the second refusal is recorded so
 		// the next request's decide sees it, and goes back to the client.
-		if kind, what := recordRefusal(facct, anthropicRefusal(resp2, model, nowFn()), resp2); kind != "" {
+		if kind, what := tn.recordRefusal(facct, tn.anthropicRefusal(resp2, model, nowFn()), resp2); kind != "" {
 			log.Printf("⚠️  %d on %s lane=%s (account swap) %s=%s ratelimit[%s]",
 				resp2.StatusCode, facct, info.lane, kind, what, ratelimitDetail(resp2.Header))
 		}
@@ -1996,7 +2052,7 @@ func (t *failoverTransport) accountRefused(req *http.Request, resp *http.Respons
 	if !ok || d.acct == "" || strings.HasPrefix(d.acct, "manual:") {
 		return resp, nil
 	}
-	if a, _ := actuatorFor(d.acct); a != nil && a.refused != nil {
+	if a, _, err := d.tenant.actuatorFor(d.acct); err == nil && a != nil && a.refused != nil {
 		return a.refused(t, req, resp)
 	}
 	return resp, nil
@@ -2015,7 +2071,7 @@ func main() {
 	listen := flag.String("listen", "127.0.0.1:8787", "listen address")
 	flag.Parse()
 
-	brainURL = strings.TrimRight(os.Getenv("SWITCH_BRAIN_URL"), "/")
+	brainBase = strings.TrimRight(os.Getenv("SWITCH_BRAIN_URL"), "/")
 	bridgeURL = os.Getenv("SWITCH_BRIDGE_URL")
 	switchKey = os.Getenv("SWITCH_KEY")
 	if switchKey == "" {
@@ -2172,18 +2228,20 @@ func main() {
 	}
 	if healthModeV != healthOff {
 		// Observe records evidence; enforce also consumes it for class routing.
-		cfg := defaultHealthCfg()
-		cfg.stateFile = "/var/lib/switch/health.json"
+		// One store per tenant, each persisted beside the configured file
+		// (healthStatePath); tenant.start makes them.
+		healthStateBase = "/var/lib/switch/health.json"
 		if v := os.Getenv("SWITCH_HEALTH_STATE_FILE"); v != "" {
-			cfg.stateFile = v
+			healthStateBase = v
 		}
 		if v := os.Getenv("SWITCH_HEALTH_LARGE_PROMPT_TOK"); v != "" {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				healthLargePromptTok = n
 			}
 		}
-		health = loadHealthStore(cfg)
-		go healthTickLoop()
+		// Recovery probes run on a separate connection pool; recovery never
+		// occupies a customer's hop.
+		healthRecoveryOn = strings.EqualFold(strings.TrimSpace(os.Getenv("SWITCH_HEALTH_RECOVERY")), "on")
 		log.Printf("🩺 SWITCH_HEALTH=%v (enforced classes: %v, notes enabled: %t)", healthModeV, healthEnforceClasses(), healthNotesEnabled)
 	}
 	gated, core := buildHandlers()
@@ -2193,20 +2251,28 @@ func main() {
 	// means the rows are in place for the first request. Loading never touches
 	// the network, so startup still never blocks on the brain.
 	loadClassRowsState()
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("SWITCH_HEALTH_RECOVERY")), "on") && healthEnforcedClass(recoveryClass) {
-		// Separate connection pool; recovery never occupies a customer's hop.
-		healthRecovery = &recoveryRunner{transport: &failoverTransport{base: http.DefaultTransport.(*http.Transport).Clone()}, deadline: recoveryDeadline}
-		go healthRecovery.run(context.Background())
-	}
 
+	// The tenants (MEMBERS-PLAN 1b): the last index from beside the class-rows
+	// snapshot first, so a brain outage at boot does not blind the household;
+	// then the brain's own, kept by its /tenants/events. Each tenant's start
+	// opens its own /t/<tenant>/events stream and reporter.
+	//
 	// No brain configured -> direct-providers-only: account lanes have nothing to route
 	// to and FAIL loud (there is no ambient passthrough anymore). Production always sets
 	// SWITCH_BRAIN_URL, so this is a tests/misconfig path, not a supported production mode.
+	if classStateFilePath != "" {
+		tenantsStateFilePath = filepath.Join(filepath.Dir(classStateFilePath), "tenants.json")
+	}
+	loadTenantIndexState()
 	mode := "direct (no brain — account lanes will FAIL)"
-	if brainURL != "" {
+	if brainBase != "" {
 		mode = "brain"
-		startReporter(brainURL, switchKey) // reports to the brain's POST /reports (reports.go)
-		go runBrainStream(context.Background())
+		go func() {
+			if err := fetchTenantIndex(context.Background()); err != nil {
+				log.Printf("tenants: GET /tenants at boot: %v — serving the last-good index (%d tenants) until /tenants/events delivers one", err, len(allTenants()))
+			}
+			runTenantEvents(context.Background())
+		}()
 	}
 
 	srv := &http.Server{Addr: *listen, Handler: gated, ReadHeaderTimeout: 10 * time.Second}
@@ -2223,7 +2289,7 @@ func main() {
 	} else {
 		log.Printf("client gate: off — no SWITCH_CLIENT_SECRET; run this way only on a loopback listener")
 	}
-	log.Printf("brain=%q (stream %s/events, silent after %s) bridge=%v 429-cooldown=%s", brainURL, brainURL, brainSilence, bridgeURL != "", forcedCooldown)
+	log.Printf("brain=%q (index %s/tenants, one stream per tenant at %s/t/<tenant>/events, silent after %s) bridge=%v 429-cooldown=%s", brainBase, brainBase, brainBase, brainSilence, bridgeURL != "", forcedCooldown)
 	log.Printf("events: GET /_switch/events (SSE, epoch=%s) — ring %d frames / %d MiB, %d subscribers max, keepalive %s",
 		evEpoch, evRingSize, evRingMaxBytes>>20, evMaxSubs, evKeepalive)
 	if alwaysLoud {
@@ -2489,8 +2555,8 @@ func buildHandlers() (gated, core http.Handler) {
 			pr.Out.Host = target.Host
 			// anthropic-beta / anthropic-version forwarded verbatim; the account's
 			// actuator signs (actuator.go) and adds what its kind requires.
-			if info, ok := pr.In.Context().Value(infoKey).(reqInfo); ok && info.token != "" {
-				signAccount(pr.Out.Header, info.eff, info.token)
+			if info, ok := pr.In.Context().Value(infoKey).(reqInfo); ok && info.token != "" && info.tenant != nil {
+				info.tenant.signAccount(pr.Out.Header, info.eff, info.token)
 				// The body's ttl:"1h" rewrite happens at the Anthropic actuation sites
 				// (replay-safe); the matching beta capability goes on here. This branch is
 				// Anthropic-only, so kimi/codex never receive it.
@@ -2564,7 +2630,7 @@ func shutdown(srv *http.Server) {
 		}
 	}
 	log.Printf("shutdown: signal received (no second entry: no drain)")
-	reportsFlush()
+	reportsFlushAll()
 	if srv != nil {
 		_ = srv.Close()
 	}
@@ -2586,14 +2652,24 @@ func shutdown(srv *http.Server) {
 
 // clientGate wraps next with the client-secret check; secret "" = no gate (the
 // loopback deployment, and every pre-#35 test).
+//
+// It is also the base-URL entry's tenant stamp (MEMBERS-PLAN 1b): every
+// request on :8787 is the lan tenant's, and this is the one place that says
+// so — withTenant here, read by tenantFrom below, which maps nothing else to
+// the household. With no lan tenant in the index the stamp is nil and the
+// routed paths answer the typed 503. The stamp precedes the gate so the
+// ungated deployment gets it too.
 func clientGate(secret string, next http.Handler) http.Handler {
+	stamped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r.WithContext(withTenant(r.Context(), lanTenant())))
+	})
 	if secret == "" {
-		return next
+		return stamped
 	}
 	want := sha256.Sum256([]byte(secret))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/_switch/healthz" {
-			next.ServeHTTP(w, r)
+			stamped.ServeHTTP(w, r)
 			return
 		}
 		auth := r.Header.Get("Authorization")
@@ -2608,7 +2684,7 @@ func clientGate(secret string, next http.Handler) http.Handler {
 		// no ambient client credential may survive past this point either.
 		r.Header.Del("Authorization")
 		r.Header.Del("X-Api-Key")
-		next.ServeHTTP(w, r)
+		stamped.ServeHTTP(w, r)
 	})
 }
 
@@ -2719,12 +2795,25 @@ func requestHandler(proxy http.Handler) http.Handler {
 		// this line — the final log line included — stays in flight.
 		fbw := &firstByteWriter{ResponseWriter: w}
 		metricLane := "other" // set by the routing branch that claims the request
+		metricTenant := ""    // the request's tenant, once known
 		rec := &recorder{ResponseWriter: fbw, status: http.StatusOK}
 		reqID := reqMetrics.begin(start)
 		defer func() {
-			reqMetrics.end(reqID, metricLane, rec.status, start, fbw.first.Load(), time.Now())
+			reqMetrics.end(reqID, metricLane, metricTenant, rec.status, start, fbw.first.Load(), time.Now())
 		}()
 		inFP := fp(r.Header.Get("Authorization"))
+		// The request's tenant, stamped by its entry (MEMBERS-PLAN 1b). Every
+		// per-tenant read below goes through tn; a request without one is
+		// refused here, before any state is read. (Pass-through paths never
+		// reach this handler: the door serves them on its own.)
+		tn := tenantFrom(r.Context())
+		if tn == nil {
+			writeNoTenant(w, entryFrom(r.Context()).tenant)
+			st.record(r.Method, r.URL.Path, http.StatusServiceUnavailable, inFP, "")
+			log.Printf("%-4s %-28s -> 503  bearer=%s NO-TENANT[%s]", r.Method, r.URL.Path, inFP, entryFrom(r.Context()).tenant)
+			return
+		}
+		metricTenant = tn.id
 		ctx := context.WithValue(r.Context(), reqStartKey, start)
 		ctx, rec.mark = withLedgerMark(ctx)
 		ctx, served := withServedCap(ctx)
@@ -2766,6 +2855,7 @@ func requestHandler(proxy http.Handler) http.Handler {
 		tag, eff := "", ""
 		failed := false               // account-lane route with no usable token -> 503, never ride ambient
 		failedKind := ""              // with failed: the account kind this build has no actuator for
+		failedNotTenant := ""         // with failed: the account the route named that is not the tenant's
 		unroutable, unModel := "", "" // quarantined registry id -> typed 503, never the Anthropic path
 		unRetry := 0                  // >0 => the refusal is transient; tell the client how long to wait
 		var laneRefusal *laneDecision // bare lane whose every account's check is `no` -> 429, dial nobody
@@ -2797,7 +2887,7 @@ func requestHandler(proxy http.Handler) http.Handler {
 			// Claude Code's transcript dialect, and wire sessions are never
 			// observed by the tap anyway.
 			if r.Method == http.MethodPost && r.URL.Path == "/v1/messages" && !wireOpenAI {
-				if injected, reservation := injectRequest(body, r.Header.Get("x-claude-code-session-id")); reservation != nil {
+				if injected, reservation := tn.injectRequest(body, r.Header.Get("x-claude-code-session-id")); reservation != nil {
 					body, injection = injected, reservation
 					r.Body = io.NopCloser(bytes.NewReader(body))
 					r.ContentLength = int64(len(body))
@@ -2826,7 +2916,7 @@ func requestHandler(proxy http.Handler) http.Handler {
 			// Not on the OpenAI wire: like the tap and the inject queue, the
 			// labels read Claude Code's dialect only.
 			if r.Method == http.MethodPost && r.URL.Path == "/v1/messages" && !wireOpenAI {
-				sessionLabelsObserve(r.Header.Get("x-claude-code-session-id"), facts, time.Now())
+				tn.sessionLabelsObserve(r.Header.Get("x-claude-code-session-id"), facts, time.Now())
 			}
 			served.request(model, facts, r.Method == http.MethodPost && r.URL.Path == "/v1/messages")
 			ceClass, isClass := matchRegistryClass(model)
@@ -2874,7 +2964,7 @@ func requestHandler(proxy http.Handler) http.Handler {
 					decision.record.Reason = "bind:pointer"
 					requestID = []string{decision.record.DecisionID}
 				}
-				out := routeClass(ce, sess, classReq{origBody: body, inPath: r.URL.Path, wireOpenAI: wireOpenAI, ctx: r.Context()}, r.Header, requestID...)
+				out := tn.routeClass(ce, sess, classReq{origBody: body, inPath: r.URL.Path, wireOpenAI: wireOpenAI, ctx: r.Context()}, r.Header, requestID...)
 				if out.info.classCtx != nil {
 					out.info.classCtx.trace = decision
 				}
@@ -2933,18 +3023,18 @@ func requestHandler(proxy http.Handler) http.Handler {
 						r.ContentLength = int64(len(body))
 					}
 				}
-				pref.mu.RLock()
-				rules := pref.laneRules
-				pref.mu.RUnlock()
+				tn.pref.mu.RLock()
+				rules := tn.pref.laneRules
+				tn.pref.mu.RUnlock()
 				lane := laneForModel(routed, rules)
 				metricLane = lane // brain lane names (opus/sonnet/haiku/fable) or "default"
 				if r.Method == http.MethodPost && len(body) > 0 && model == "" {
 					atomic.AddInt64(&laneParseFailures, 1)
 				}
-				d := decideRoute(laneRouteID(lane), lane, routed, strings.HasSuffix(r.URL.Path, "/count_tokens"))
+				d := tn.decideRoute(laneRouteID(lane), lane, routed, strings.HasSuffix(r.URL.Path, "/count_tokens"))
 				tok, effective, reason, state := d.tok, d.acct, d.reason, d.state
 				eff = effective
-				noteState(lane, state)
+				tn.noteState(lane, state)
 				if d.none {
 					// §2.2 row 11: the lane's route admits no account. Refused
 					// here, in the client's usage-limit terms, before any dial.
@@ -2954,10 +3044,10 @@ func requestHandler(proxy http.Handler) http.Handler {
 					// No account has a usable token. Fail LOUD — never forward the
 					// client's ambient login (that silent misroute is the whole bug we
 					// deleted). The request is answered 503 below, before any upstream call.
-					failed, failedKind = true, d.unactuated
+					failed, failedKind, failedNotTenant = true, d.unactuated, d.notTenant
 					tag = " FAILED [" + effective + "] lane=" + lane + " (" + reason + ")"
 				} else {
-					noteEffective(lane, effective, reason)
+					tn.noteEffective(lane, effective, reason)
 					// Anthropic lane (wire==nil): optionally force the 1h prompt-cache TTL.
 					// Rewrite `body` so BOTH the first send (r.Body) and the 429 replay
 					// (reqInfo.body) carry it; the matching beta goes on in Rewrite.
@@ -2969,13 +3059,14 @@ func requestHandler(proxy http.Handler) http.Handler {
 						}
 					}
 					ctx = context.WithValue(ctx, infoKey, reqInfo{
-						token: tok,
-						eff:   effective,
-						state: state,
-						lane:  lane,
-						body:  body,
-						check: d.check,
-						asked: model,
+						tenant: tn,
+						token:  tok,
+						eff:    effective,
+						state:  state,
+						lane:   lane,
+						body:   body,
+						check:  d.check,
+						asked:  model,
 					})
 					tag = " " + state.String() + "->" + fp("Bearer "+tok) + " [" + effective + "] lane=" + lane + " check=" + d.check.String()
 				}
@@ -2984,7 +3075,7 @@ func requestHandler(proxy http.Handler) http.Handler {
 			// upstream call: it reads the pre-rewrite body (requestBody) yet carries the
 			// decision that served it, so a turn joins to its route. Emitting before
 			// ServeHTTP is the point — a streamed answer can take a minute and the
-			// transcript is meant to be live. No lock is held here: pref.mu was
+			// transcript is meant to be live. No lock is held here: tn.pref.mu was
 			// released inside the branch above and st.mu is not taken until st.record
 			// below, which is what keeps hub.mu a leaf.
 			if wireOpenAI {
@@ -2993,17 +3084,19 @@ func requestHandler(proxy http.Handler) http.Handler {
 				// also keeps the response tap uninstalled below.
 				tag += " WIRE[openai]"
 			} else {
-				ident = tapTurn(ctx, r, requestBody, model, tag, eff, inFP)
+				ident = tn.tapTurn(ctx, r, requestBody, model, tag, eff, inFP)
 			}
 		}
 		decision.correlate(ident)
 		decision.headers(rec.Header())
-		if failed && failedKind != "" {
+		if failed && failedNotTenant != "" {
+			writeNotTenantAccount(rec, tn, failedNotTenant)
+		} else if failed && failedKind != "" {
 			writeNoActuator(rec, eff, failedKind)
 		} else if failed {
 			writeRouteFailed(rec, eff)
 		} else if laneRefusal != nil {
-			writeLaneRefused(rec, laneRefusal, r.Header, nowFn())
+			tn.writeLaneRefused(rec, laneRefusal, r.Header, nowFn())
 		} else if unroutable != "" {
 			writeModelUnroutable(rec, unModel, unroutable, unRetry)
 		} else {
@@ -3022,7 +3115,7 @@ func requestHandler(proxy http.Handler) http.Handler {
 		// The response has ended: the served event, if an account answered.
 		served.finish(r.Context().Err() != nil)
 		tag += decision.finish(ctx, rec.status)
-		finishInject(injection, rec.status >= 200 && rec.status < 300)
+		tn.finishInject(injection, rec.status >= 200 && rec.status < 300)
 		st.record(r.Method, r.URL.Path, rec.status, inFP, eff)
 		if requestBody != nil {
 			tag += facts.logTag()
@@ -3060,11 +3153,15 @@ func switchHandler(w http.ResponseWriter, r *http.Request) {
 				_, _ = io.WriteString(w, h.metrics())
 			}
 		}
-		if health == nil {
-			// Mode off: no store, so no switch_health_* series.
-			return
+		// Mode off: no stores, so no switch_health_* series. Every tenant's
+		// store renders into one buffer, each under its tenant label.
+		m := newMetricsBuf()
+		for _, tn := range allTenants() {
+			if tn.health != nil {
+				tn.health.renderMetrics(m, tn)
+			}
 		}
-		_, _ = io.WriteString(w, health.renderMetrics())
+		_, _ = io.WriteString(w, m.String())
 	case "/_switch/quota-drill":
 		// Read-only rendering of the refusal a class would be served right now
 		// (see quotaDrillHandler). Behind the client gate like everything but
@@ -3074,143 +3171,46 @@ func switchHandler(w http.ResponseWriter, r *http.Request) {
 		// What a status line draws for one session (docs/session-facts.md).
 		sessionHandler(w, r)
 	case "/_switch/status":
-		pref.mu.RLock()
-		prefAcct, prefReason, prefOK := pref.account, pref.reason, pref.ok
-		laneMode := "single-fallback"
-		if len(pref.laneRules) > 0 {
-			laneMode = "lanes"
+		// The per-tenant keys nest under members.<tenant> (MEMBERS-PLAN 1b),
+		// the household's under members[lan_tenant]; the proxy-wide keys stay
+		// at the top. Each tenant's snapshot takes only that tenant's leaf
+		// mutexes, before st.mu.
+		members := map[string]any{}
+		for _, tn := range allTenants() {
+			members[tn.id] = tn.statusSnapshot()
 		}
-		rules := make([]map[string]any, 0, len(pref.laneRules))
-		for _, lr := range pref.laneRules {
-			rules = append(rules, map[string]any{"lane": lr.Lane, "match": lr.Match, "scope": lr.Scope})
+		lan := ""
+		if tn := lanTenant(); tn != nil {
+			lan = tn.id
 		}
-		lanes := map[string]any{}
-		for ln, lp := range pref.lanes {
-			lanes[ln] = map[string]any{"preferred": lp.Account, "reason": lp.Reason, "effective": lp.Effective}
-		}
-		pref.mu.RUnlock()
-		effMu.Lock()
-		effByLane := make(map[string]string, len(lastEffective))
-		for ln, a := range lastEffective {
-			effByLane[ln] = a
-		}
-		stateByLane := make(map[string]string, len(lastState))
-		for ln, s := range lastState {
-			stateByLane[ln] = s.String()
-		}
-		effMu.Unlock()
-		tokMu.Lock()
-		cached := make(map[string]string, len(tokens))
-		for a, e := range tokens {
-			cached[a] = time.Until(e.exp).Round(time.Minute).String()
-		}
-		anthTokens := anthropicTokensStatus()
-		tokMu.Unlock()
 		// An edition's keys (statusExtras), each taking only its own leaf
 		// mutex, before st.mu.
 		extras := map[string]any{}
 		for _, f := range statusExtras {
 			f(extras)
 		}
-		bindMu.Lock()
-		classBindings := map[string]map[string]any{}
-		for k, cb := range bindCache {
-			cls, sess, ok := strings.Cut(k, "\x00")
-			if !ok {
-				continue
-			}
-			if classBindings[cls] == nil {
-				classBindings[cls] = map[string]any{}
-			}
-			classBindings[cls][fpSess(sess)] = map[string]any{
-				"member": cb.member.ID, "reason": cb.reason,
-				// The bound member's r_p as the brain served it (1.0 on an
-				// anthropic member): what this proxy scales that hop's usage by.
-				"anthropic_token_ratio": cb.member.AnthropicTokenRatio,
-				"served_member":         nullable(cb.servedMember), "served_reason": nullable(cb.servedReason),
-				"age_seconds": int(time.Since(cb.fetchedAt).Seconds()),
-			}
-		}
-		classFunding := map[string]map[string]any{}
-		for k, f := range sessionFundings {
-			cls, sess, ok := strings.Cut(k, "\x00")
-			if !ok {
-				continue
-			}
-			if classFunding[cls] == nil {
-				classFunding[cls] = map[string]any{}
-			}
-			classFunding[cls][fpSess(sess)] = f.json()
-		}
-		bindMu.Unlock()
-		codexTokMu.Lock()
-		codexBearers := map[string]string{}
-		for acct, e := range codexToks {
-			if acct == "" {
-				acct = "(incumbent)"
-			}
-			codexBearers[acct] = time.Until(e.exp).Round(time.Minute).String()
-		}
-		codexTokMu.Unlock()
-		ledger := ledgerStatus()
-		reports := reportsStatus()
 		st.mu.Lock()
 		snap := map[string]any{
-			"service":           "claude-switch-proxy",
-			"mode":              map[bool]string{true: "brain", false: "direct"}[brainURL != ""],
-			"preferred_account": prefAcct,
-			"preferred_reason":  prefReason,
-			"brain_reachable":   prefOK,
-			// legacy mirror: the default lane's last effective account
-			"effective_account":   effByLane["default"],
-			"effective_by_lane":   effByLane,
-			"state_by_lane":       stateByLane,
-			"lane_mode":           laneMode,
-			"lane_rules":          rules,
-			"lanes":               lanes,
+			"service":             "claude-switch-proxy",
+			"mode":                map[bool]string{true: "brain", false: "direct"}[brainBase != ""],
+			"lan_tenant":          lan,
+			"tenants":             tenantsStatus(),
+			"members":             members,
 			"lane_parse_failures": atomic.LoadInt64(&laneParseFailures),
 			"direct_providers":    directProvidersStatus(),
 			"registry":            registryStatus(),
 			// eventsStatus takes hub.mu, which is a leaf — it must never reach for
 			// st.mu, which is held across this whole literal.
 			"events":       eventsStatus(),
-			"injection":    injectStatus(),
 			"response_tap": respTapStatus(),
 			// usageScalingStatus takes scaleStatsMu — a leaf, same rule as
 			// eventsStatus above. #77: display only, no alerting hooks.
 			"usage_scaling":       usageScalingStatus(),
 			"client_models_cache": clientCachePath,
-			"tokens_cached_ttl":   cached,
-			// Per account: the cached copy (fp, fetched_at, expires_at), the
-			// last refusal of an injected copy (last_refused: at, fp, msg) and
-			// the reauths refusals caused. tokens_cached_ttl stays as it is:
-			// Scry reads it as record<string,string>.
-			"anthropic_tokens": anthTokens,
-			"class_bindings":   classBindings,
-			// C6 (§2.11's statusline): per class and session, the tier its last
-			// request was served on, or the class unavailable until a time.
-			"class_funding": classFunding,
-			// The one record store (records.go): "<account>/<limit>" -> the
-			// refusal and when it ends. recordsStatus takes recMu — a leaf.
-			"refusal_records": recordsStatus(nowFn()),
-			// C6: the ledger entries of ours the brain has not counted yet,
-			// and the spend of the ledger last pulled (ledger.go).
-			"ledger": ledger,
-			// 64 §5: the events waiting for the brain's POST /reports, and the
-			// last post's failure (reports.go).
-			"reports": reports,
-			// #71: the per-account codex bearer cache ("" = the incumbent-follow slot).
-			"codex_bearers_ttl": codexBearers,
-			// C8: each api account's dispensed key, its state and, with none,
-			// why (apikey.go; never the key). apiKeyStatus takes apiKeyMu — a leaf.
-			"api_keys":          apiKeyStatus(),
-			"bridge_configured": bridgeTarget() != "",
-			// healthStatus takes the store's own mutex — a leaf, same rule as
-			// eventsStatus above. Minimal until T6 (#125).
-			"member_health":  healthStatus(),
-			"requests":       st.requests,
-			"switches":       st.switches,
-			"uptime_seconds": int(time.Since(st.started).Seconds()),
+			"bridge_configured":   bridgeTarget() != "",
+			"requests":            st.requests,
+			"switches":            st.switches,
+			"uptime_seconds":      int(time.Since(st.started).Seconds()),
 		}
 		st.mu.Unlock()
 		for k, v := range extras {
@@ -3238,4 +3238,127 @@ func hpUnwrapURLError(err error) error {
 		return ue.Err
 	}
 	return err
+}
+
+// statusSnapshot is one tenant's /_switch/status keys: what the top level
+// carried before the proxy was keyed per tenant, under members.<tenant> now.
+// Takes only the tenant's own leaf mutexes, one at a time.
+func (tn *tenant) statusSnapshot() map[string]any {
+	pref := tn.pref
+	pref.mu.RLock()
+	prefAcct, prefReason, prefOK := pref.account, pref.reason, pref.ok
+	laneMode := "single-fallback"
+	if len(pref.laneRules) > 0 {
+		laneMode = "lanes"
+	}
+	rules := make([]map[string]any, 0, len(pref.laneRules))
+	for _, lr := range pref.laneRules {
+		rules = append(rules, map[string]any{"lane": lr.Lane, "match": lr.Match, "scope": lr.Scope})
+	}
+	lanes := map[string]any{}
+	for ln, lp := range pref.lanes {
+		lanes[ln] = map[string]any{"preferred": lp.Account, "reason": lp.Reason, "effective": lp.Effective}
+	}
+	pref.mu.RUnlock()
+	tn.effMu.Lock()
+	effByLane := make(map[string]string, len(tn.lastEffective))
+	for ln, a := range tn.lastEffective {
+		effByLane[ln] = a
+	}
+	stateByLane := make(map[string]string, len(tn.lastState))
+	for ln, s := range tn.lastState {
+		stateByLane[ln] = s.String()
+	}
+	tn.effMu.Unlock()
+	tn.tokMu.Lock()
+	cached := make(map[string]string, len(tn.tokens))
+	for a, e := range tn.tokens {
+		cached[a] = time.Until(e.exp).Round(time.Minute).String()
+	}
+	anthTokens := tn.anthropicTokensStatus()
+	tn.tokMu.Unlock()
+	tn.bindMu.Lock()
+	classBindings := map[string]map[string]any{}
+	for k, cb := range tn.bindCache {
+		cls, sess, ok := strings.Cut(k, "\x00")
+		if !ok {
+			continue
+		}
+		if classBindings[cls] == nil {
+			classBindings[cls] = map[string]any{}
+		}
+		classBindings[cls][fpSess(sess)] = map[string]any{
+			"member": cb.member.ID, "reason": cb.reason,
+			// The bound member's r_p as the brain served it (1.0 on an
+			// anthropic member): what this proxy scales that hop's usage by.
+			"anthropic_token_ratio": cb.member.AnthropicTokenRatio,
+			"served_member":         nullable(cb.servedMember), "served_reason": nullable(cb.servedReason),
+			"age_seconds": int(time.Since(cb.fetchedAt).Seconds()),
+		}
+	}
+	classFunding := map[string]map[string]any{}
+	for k, f := range tn.sessionFundings {
+		cls, sess, ok := strings.Cut(k, "\x00")
+		if !ok {
+			continue
+		}
+		if classFunding[cls] == nil {
+			classFunding[cls] = map[string]any{}
+		}
+		classFunding[cls][fpSess(sess)] = f.json()
+	}
+	tn.bindMu.Unlock()
+	tn.codexTokMu.Lock()
+	codexBearers := map[string]string{}
+	for acct, e := range tn.codexToks {
+		if acct == "" {
+			acct = "(incumbent)"
+		}
+		codexBearers[acct] = time.Until(e.exp).Round(time.Minute).String()
+	}
+	tn.codexTokMu.Unlock()
+	return map[string]any{
+		"tenant":            tn.id,
+		"name":              tn.name,
+		"lan":               tn.lan,
+		"tap":               tn.tap,
+		"preferred_account": prefAcct,
+		"preferred_reason":  prefReason,
+		"brain_reachable":   prefOK,
+		// legacy mirror: the default lane's last effective account
+		"effective_account": effByLane["default"],
+		"effective_by_lane": effByLane,
+		"state_by_lane":     stateByLane,
+		"lane_mode":         laneMode,
+		"lane_rules":        rules,
+		"lanes":             lanes,
+		"injection":         tn.injectStatus(),
+		"tokens_cached_ttl": cached,
+		// Per account: the cached copy (fp, fetched_at, expires_at), the
+		// last refusal of an injected copy (last_refused: at, fp, msg) and
+		// the reauths refusals caused. tokens_cached_ttl stays as it is:
+		// Scry reads it as record<string,string>.
+		"anthropic_tokens": anthTokens,
+		"class_bindings":   classBindings,
+		// C6 (§2.11's statusline): per class and session, the tier its last
+		// request was served on, or the class unavailable until a time.
+		"class_funding": classFunding,
+		// The one record store (records.go): "<account>/<limit>" -> the
+		// refusal and when it ends. recordsStatus takes recMu — a leaf.
+		"refusal_records": tn.recordsStatus(nowFn()),
+		// C6: the ledger entries of ours the brain has not counted yet,
+		// and the spend of the ledger last pulled (ledger.go).
+		"ledger": tn.ledgerStatus(),
+		// 64 §5: the events waiting for the brain's POST /reports, and the
+		// last post's failure (reports.go).
+		"reports": tn.reportsStatus(),
+		// #71: the per-account codex bearer cache ("" = the incumbent-follow slot).
+		"codex_bearers_ttl": codexBearers,
+		// C8: each api account's dispensed key, its state and, with none,
+		// why (apikey.go; never the key). apiKeyStatus takes apiKeyMu — a leaf.
+		"api_keys": tn.apiKeyStatus(),
+		// healthStatus takes the store's own mutex — a leaf, same rule as
+		// eventsStatus above. Minimal until T6 (#125).
+		"member_health": tn.healthStatus(),
+	}
 }

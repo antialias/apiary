@@ -139,10 +139,10 @@ func swapAlertTestWorld(t *testing.T, bc *bridgeCapture, loud bool,
 	oldCrit, oldRepeat := alertCritCooldown, alertRepeatWindow
 	oldBridge := swapBridgeURL(bc.srv.URL)
 	oldHistory := swapAlertHistory(nil)
-	pref.mu.Lock()
-	oldWeekly, oldLanes := pref.weekly, pref.lanes
-	pref.weekly, pref.lanes = weekly, lanes
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	oldWeekly, oldLanes := lan.pref.weekly, lan.pref.lanes
+	lan.pref.weekly, lan.pref.lanes = weekly, lanes
+	lan.pref.mu.Unlock()
 	alwaysLoud, loudWeeklyPct = loud, 80.0
 	alertCritCooldown, alertRepeatWindow, alertCoalesce = crit, repeat, coalesce
 	// No stale queue/timer may flush a prior test's alerts into this bridge, and
@@ -157,9 +157,9 @@ func swapAlertTestWorld(t *testing.T, bc *bridgeCapture, loud bool,
 		swapAlertHistory(oldHistory)
 		alwaysLoud, loudWeeklyPct, alertCoalesce = oldLoud, oldPct, oldCoalesce
 		alertCritCooldown, alertRepeatWindow = oldCrit, oldRepeat
-		pref.mu.Lock()
-		pref.weekly, pref.lanes = oldWeekly, oldLanes
-		pref.mu.Unlock()
+		lan.pref.mu.Lock()
+		lan.pref.weekly, lan.pref.lanes = oldWeekly, oldLanes
+		lan.pref.mu.Unlock()
 	})
 }
 
@@ -180,7 +180,7 @@ func TestFirstLoudFiresCritical(t *testing.T) {
 	bc := newBridgeCapture(t)
 	swapAlertTestWorld(t, bc, false, loudWeekly, nil, testCritDefault, testRepeatDefault, testCoalesce)
 
-	fireSwitchAlert("opus", native, other, "test")
+	lan.fireSwitchAlert("opus", native, other, "test")
 	bc.waitForN(t, 1)
 	if got := bc.tiers()[0]; got != "critical" {
 		t.Fatalf("first loud alert tier = %q, want critical", got)
@@ -195,8 +195,8 @@ func TestSecondLoudSameLaneDemotesWithinCritCooldown(t *testing.T) {
 	bc := newBridgeCapture(t)
 	swapAlertTestWorld(t, bc, false, loudWeekly, nil, testCritDefault, testRepeatDefault, testCoalesce)
 
-	fireSwitchAlert("opus", native, other, "test") // critical
-	fireSwitchAlert("opus", other, native, "test") // same lane, reversed pair → demoted
+	lan.fireSwitchAlert("opus", native, other, "test") // critical
+	lan.fireSwitchAlert("opus", other, native, "test") // same lane, reversed pair → demoted
 	bc.waitForN(t, 2)
 
 	got := bc.captured()
@@ -227,15 +227,15 @@ func TestQuietThenLoudSamePairPagesImmediately(t *testing.T) {
 	bc := newBridgeCapture(t)
 	swapAlertTestWorld(t, bc, false, quietWeekly, nil, testCritDefault, testRepeatDefault, testCoalesce)
 
-	fireSwitchAlert("opus", native, other, "test") // quiet (other=41%)
+	lan.fireSwitchAlert("opus", native, other, "test") // quiet (other=41%)
 	bc.waitForN(t, 1)
 
 	// Destination crosses the threshold between the two flips.
-	pref.mu.Lock()
-	pref.weekly = loudWeekly
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	lan.pref.weekly = loudWeekly
+	lan.pref.mu.Unlock()
 
-	fireSwitchAlert("opus", native, other, "test") // same pair, now loud
+	lan.fireSwitchAlert("opus", native, other, "test") // same pair, now loud
 	bc.waitForN(t, 2)
 
 	tiers := bc.tiers()
@@ -248,8 +248,8 @@ func TestIdenticalPairWithinRepeatWindowSuppressed_SwitchPath(t *testing.T) {
 	bc := newBridgeCapture(t)
 	swapAlertTestWorld(t, bc, false, quietWeekly, nil, testCritDefault, testRepeatDefault, testCoalesce)
 
-	fireSwitchAlert("opus", native, other, "test")
-	fireSwitchAlert("opus", native, other, "test") // identical, within the window
+	lan.fireSwitchAlert("opus", native, other, "test")
+	lan.fireSwitchAlert("opus", native, other, "test") // identical, within the window
 	bc.waitForN(t, 1)
 	bc.assertCountStable(t, 1, 250*time.Millisecond)
 
@@ -262,8 +262,8 @@ func TestIdenticalPairWithinRepeatWindowSuppressed_ClassPath(t *testing.T) {
 	bc := newBridgeCapture(t)
 	swapAlertTestWorld(t, bc, false, nil, nil, testCritDefault, testRepeatDefault, testCoalesce)
 
-	fireClassAlert("helpdesk", "sess-a", "anthropic", "kimi", "test")
-	fireClassAlert("helpdesk", "sess-a", "anthropic", "kimi", "test")
+	lan.fireClassAlert("helpdesk", "sess-a", "anthropic", "kimi", "test")
+	lan.fireClassAlert("helpdesk", "sess-a", "anthropic", "kimi", "test")
 	bc.waitForN(t, 1)
 	bc.assertCountStable(t, 1, 250*time.Millisecond)
 }
@@ -272,8 +272,8 @@ func TestDifferentPairSameLaneFires(t *testing.T) {
 	bc := newBridgeCapture(t)
 	swapAlertTestWorld(t, bc, false, quietWeekly, nil, testCritDefault, testRepeatDefault, testCoalesce)
 
-	fireSwitchAlert("opus", native, other, "test")
-	fireSwitchAlert("opus", other, native, "test") // reversed pair = a different alert
+	lan.fireSwitchAlert("opus", native, other, "test")
+	lan.fireSwitchAlert("opus", other, native, "test") // reversed pair = a different alert
 	bc.waitForN(t, 2)
 	bc.assertCountStable(t, 2, 250*time.Millisecond)
 }
@@ -285,15 +285,15 @@ func TestCritCooldownExpiryRefiresReminder(t *testing.T) {
 	swapAlertTestWorld(t, bc, false, loudWeekly, nil,
 		750*time.Millisecond, 200*time.Millisecond, 25*time.Millisecond)
 
-	fireSwitchAlert("opus", native, other, "test") // t≈0: critical
+	lan.fireSwitchAlert("opus", native, other, "test") // t≈0: critical
 	bc.waitForN(t, 1)
 
-	time.Sleep(500 * time.Millisecond)             // past repeat window, within crit cooldown
-	fireSwitchAlert("opus", native, other, "test") // demoted telegram
+	time.Sleep(500 * time.Millisecond)                 // past repeat window, within crit cooldown
+	lan.fireSwitchAlert("opus", native, other, "test") // demoted telegram
 	bc.waitForN(t, 2)
 
-	time.Sleep(750 * time.Millisecond)             // now past the crit cooldown from t≈0
-	fireSwitchAlert("opus", native, other, "test") // reminder critical
+	time.Sleep(750 * time.Millisecond)                 // now past the crit cooldown from t≈0
+	lan.fireSwitchAlert("opus", native, other, "test") // reminder critical
 	bc.waitForN(t, 3)
 
 	tiers := bc.tiers()
@@ -313,7 +313,7 @@ func TestFlushFailurePrunesHistory(t *testing.T) {
 	swapAlertTestWorld(t, bc, false, loudWeekly, nil, testCritDefault, testRepeatDefault, 25*time.Millisecond)
 
 	bc.setStatus(500)
-	fireSwitchAlert("opus", native, other, "test")
+	lan.fireSwitchAlert("opus", native, other, "test")
 	bc.waitForN(t, 1) // the bridge still SAW the POST (and 500'd it)
 	time.Sleep(100 * time.Millisecond)
 	if hist := historySnapshot(); len(hist) != 0 {
@@ -321,7 +321,7 @@ func TestFlushFailurePrunesHistory(t *testing.T) {
 	}
 
 	bc.setStatus(200)
-	fireSwitchAlert("opus", native, other, "test") // identical, within both windows — must still fire
+	lan.fireSwitchAlert("opus", native, other, "test") // identical, within both windows — must still fire
 	bc.waitForN(t, 2)
 	if got := bc.tiers()[1]; got != "critical" {
 		t.Fatalf("re-fire after failed flush tier = %q, want critical", got)
@@ -332,8 +332,8 @@ func TestAlwaysLoudDampedByCritCooldown(t *testing.T) {
 	bc := newBridgeCapture(t)
 	swapAlertTestWorld(t, bc, true, quietWeekly, nil, testCritDefault, testRepeatDefault, testCoalesce)
 
-	fireSwitchAlert("opus", native, other, "test") // alwaysLoud → critical
-	fireSwitchAlert("opus", other, native, "test") // still damped by the lane's cooldown
+	lan.fireSwitchAlert("opus", native, other, "test") // alwaysLoud → critical
+	lan.fireSwitchAlert("opus", other, native, "test") // still damped by the lane's cooldown
 	bc.waitForN(t, 2)
 
 	tiers := bc.tiers()
@@ -355,12 +355,12 @@ func TestCriticalFlapStormSuppressedAfterDemotion(t *testing.T) {
 	swapAlertTestWorld(t, bc, false, loudWeekly, nil,
 		5*time.Second, 300*time.Millisecond, 25*time.Millisecond)
 
-	fireSwitchAlert("opus", native, other, "test") // critical: the onset page
-	fireSwitchAlert("opus", other, native, "test") // critical candidate → demoted telegram
+	lan.fireSwitchAlert("opus", native, other, "test") // critical: the onset page
+	lan.fireSwitchAlert("opus", other, native, "test") // critical candidate → demoted telegram
 	bc.waitForN(t, 2)
 
-	fireSwitchAlert("opus", native, other, "test") // repeat vs a CRITICAL record → suppressed
-	fireSwitchAlert("opus", other, native, "test") // repeat vs the DEMOTED record → suppressed (the fix)
+	lan.fireSwitchAlert("opus", native, other, "test") // repeat vs a CRITICAL record → suppressed
+	lan.fireSwitchAlert("opus", other, native, "test") // repeat vs the DEMOTED record → suppressed (the fix)
 	bc.assertCountStable(t, 2, 250*time.Millisecond)
 
 	tiers := bc.tiers()
@@ -381,7 +381,7 @@ func TestCriticalFlapStormSuppressedAfterDemotion(t *testing.T) {
 	// Past the repeat window (cooldown still armed): each pair re-admits ONCE,
 	// demoted — the ≤1 message per pair per window bound, not silence forever.
 	time.Sleep(400 * time.Millisecond)
-	fireSwitchAlert("opus", other, native, "test")
+	lan.fireSwitchAlert("opus", other, native, "test")
 	bc.waitForN(t, 3)
 	if got := bc.tiers()[2]; got != "telegram" {
 		t.Fatalf("re-admitted fire tier = %q, want telegram (cooldown still armed)", got)
@@ -392,12 +392,12 @@ func TestClassAlertDropsSessionForDedup(t *testing.T) {
 	bc := newBridgeCapture(t)
 	swapAlertTestWorld(t, bc, false, nil, nil, testCritDefault, testRepeatDefault, testCoalesce)
 
-	fireClassAlert("helpdesk", "sess-A", "anthropic", "kimi", "test")
-	fireClassAlert("helpdesk", "sess-B", "anthropic", "kimi", "test") // same move, other session: dup
+	lan.fireClassAlert("helpdesk", "sess-A", "anthropic", "kimi", "test")
+	lan.fireClassAlert("helpdesk", "sess-B", "anthropic", "kimi", "test") // same move, other session: dup
 	bc.waitForN(t, 1)
 	bc.assertCountStable(t, 1, 250*time.Millisecond)
 
-	fireClassAlert("helpdesk", "sess-B", "kimi", "anthropic", "test") // reversed pair: new alert
+	lan.fireClassAlert("helpdesk", "sess-B", "kimi", "anthropic", "test") // reversed pair: new alert
 	bc.waitForN(t, 2)
 }
 
@@ -453,8 +453,8 @@ func TestSuppressedFlipStillPublishes(t *testing.T) {
 	evTest(t)
 	evArm()
 
-	fireSwitchAlert("opus", native, other, "test")
-	fireSwitchAlert("opus", native, other, "test") // suppressed from the bridge
+	lan.fireSwitchAlert("opus", native, other, "test")
+	lan.fireSwitchAlert("opus", native, other, "test") // suppressed from the bridge
 	bc.waitForN(t, 1)
 	bc.assertCountStable(t, 1, 250*time.Millisecond)
 
@@ -479,9 +479,9 @@ func TestDispatchSuppressedLinksSuppressor(t *testing.T) {
 	evTest(t)
 	evArm()
 
-	fireSwitchAlert("opus", native, other, "brain says so")
+	lan.fireSwitchAlert("opus", native, other, "brain says so")
 	bc.waitForN(t, 1) // flush done → the admitted dispatch is on the ring
-	fireSwitchAlert("opus", native, other, "brain says so")
+	lan.fireSwitchAlert("opus", native, other, "brain says so")
 
 	disp := awaitEvents(t, "alert_dispatch", 2)
 	passed, supp := disp[0], disp[1]
@@ -515,9 +515,9 @@ func TestDispatchDemotedCarriesGateAndTierInputs(t *testing.T) {
 	evTest(t)
 	evArm()
 
-	fireSwitchAlert("opus", native, other, "test") // to=other 84% → critical
+	lan.fireSwitchAlert("opus", native, other, "test") // to=other 84% → critical
 	bc.waitForN(t, 1)
-	fireSwitchAlert("opus", other, native, "test") // to=native 96% → critical candidate, demoted
+	lan.fireSwitchAlert("opus", other, native, "test") // to=native 96% → critical candidate, demoted
 
 	disp := awaitEvents(t, "alert_dispatch", 2)
 	demotedEv := disp[1]
@@ -545,7 +545,7 @@ func TestDeliveryEventSuccessParsesChannels(t *testing.T) {
 	evTest(t)
 	evArm()
 
-	fireSwitchAlert("opus", native, other, "test")
+	lan.fireSwitchAlert("opus", native, other, "test")
 	del := awaitEvents(t, "alert_delivery", 1)[0]
 	disp := awaitEvents(t, "alert_dispatch", 1)[0]
 
@@ -585,7 +585,7 @@ func TestDeliveryEventOn502RollsBack(t *testing.T) {
 	evTest(t)
 	evArm()
 
-	fireSwitchAlert("opus", native, other, "test")
+	lan.fireSwitchAlert("opus", native, other, "test")
 	del := awaitEvents(t, "alert_delivery", 1)[0]
 	if del["delivered"] != false || del["rolled_back"] != true || del["bridge_status"] != 502.0 {
 		t.Fatalf("delivery = %v, want delivered=false rolled_back=true bridge_status=502", del)
@@ -608,7 +608,7 @@ func TestDeliveryEventOnPostError(t *testing.T) {
 	evArm()
 	bc.srv.Close() // connection refused from here on
 
-	fireSwitchAlert("opus", native, other, "test")
+	lan.fireSwitchAlert("opus", native, other, "test")
 	del := awaitEvents(t, "alert_delivery", 1)[0]
 	if del["delivered"] != false || del["rolled_back"] != true || del["bridge_status"] != nil {
 		t.Fatalf("delivery = %v, want delivered=false rolled_back=true bridge_status=null", del)
@@ -626,9 +626,9 @@ func TestClassDispatchEvents(t *testing.T) {
 	evTest(t)
 	evArm()
 
-	fireClassAlert("helpdesk", "sess-a", "anthropic", "kimi", "quota 429")
+	lan.fireClassAlert("helpdesk", "sess-a", "anthropic", "kimi", "quota 429")
 	bc.waitForN(t, 1)
-	fireClassAlert("helpdesk", "sess-b", "anthropic", "kimi", "quota 429") // suppressed (session-blind dedup)
+	lan.fireClassAlert("helpdesk", "sess-b", "anthropic", "kimi", "quota 429") // suppressed (session-blind dedup)
 
 	disp := awaitEvents(t, "alert_dispatch", 2)
 	passed, supp := disp[0], disp[1]
@@ -648,11 +648,11 @@ func TestHistoryBoundedByAgePrune(t *testing.T) {
 	swapAlertTestWorld(t, bc, false, quietWeekly, nil,
 		30*time.Millisecond, 30*time.Millisecond, 25*time.Millisecond)
 
-	fireSwitchAlert("opus", native, other, "test")
+	lan.fireSwitchAlert("opus", native, other, "test")
 	bc.waitForN(t, 1)
 	time.Sleep(120 * time.Millisecond) // both windows long past — the record is dead weight
 
-	fireSwitchAlert("opus", other, native, "test") // its gateAndEnqueue run age-prunes
+	lan.fireSwitchAlert("opus", other, native, "test") // its gateAndEnqueue run age-prunes
 	bc.waitForN(t, 2)
 
 	hist := historySnapshot()
@@ -670,8 +670,8 @@ func TestCritCooldownIsLaneScoped(t *testing.T) {
 	bc := newBridgeCapture(t)
 	swapAlertTestWorld(t, bc, false, loudWeekly, nil, testCritDefault, testRepeatDefault, testCoalesce)
 
-	fireSwitchAlert("fable", native, other, "test") // critical
-	fireSwitchAlert("opus", native, other, "test")  // different lane — must stay critical
+	lan.fireSwitchAlert("fable", native, other, "test") // critical
+	lan.fireSwitchAlert("opus", native, other, "test")  // different lane — must stay critical
 	bc.waitForN(t, 2)
 
 	tiers := bc.tiers()
@@ -688,15 +688,15 @@ func TestSuppressedFireDoesNotExtendRepeatWindow(t *testing.T) {
 	swapAlertTestWorld(t, bc, false, quietWeekly, nil,
 		testCritDefault, 500*time.Millisecond, 25*time.Millisecond)
 
-	fireSwitchAlert("opus", native, other, "test") // t≈0: admitted
+	lan.fireSwitchAlert("opus", native, other, "test") // t≈0: admitted
 	bc.waitForN(t, 1)
 
-	time.Sleep(200 * time.Millisecond)             // within the window from t≈0
-	fireSwitchAlert("opus", native, other, "test") // suppressed
+	time.Sleep(200 * time.Millisecond)                 // within the window from t≈0
+	lan.fireSwitchAlert("opus", native, other, "test") // suppressed
 	time.Sleep(100 * time.Millisecond)
 
-	time.Sleep(400 * time.Millisecond)             // t≈700: past the window MEASURED FROM t≈0
-	fireSwitchAlert("opus", native, other, "test") // admitted
+	time.Sleep(400 * time.Millisecond)                 // t≈700: past the window MEASURED FROM t≈0
+	lan.fireSwitchAlert("opus", native, other, "test") // admitted
 	bc.waitForN(t, 2)
 	bc.assertCountStable(t, 2, 250*time.Millisecond)
 }

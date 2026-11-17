@@ -27,39 +27,37 @@ import (
 // resetReports empties the reports' queue and memory, returning the restore.
 // resetQuotaState calls it.
 func resetReports() func() {
-	repMu.Lock()
-	oq, ol, oe := repQueue, repLast, repLastErr
-	repQueue, repLast, repLastErr = map[reportKey]queuedReport{}, map[reportKey]reportEvent{}, ""
-	osrv, oseq, odrop, oref, ounenc, omax := repServed, repServedSeq, repServedDropped, repServedRefused, repServedUnencodable, reportServedMax
-	repServed, repServedSeq, repServedDropped, repServedRefused, repServedUnencodable = nil, 0, 0, 0, 0
-	repMu.Unlock()
+	lan.repMu.Lock()
+	oq, ol, oe := lan.repQueue, lan.repLast, lan.repLastErr
+	lan.repQueue, lan.repLast, lan.repLastErr = map[reportKey]queuedReport{}, map[reportKey]reportEvent{}, ""
+	osrv, oseq, odrop, oref, ounenc, omax := lan.repServed, lan.repServedSeq, lan.repServedDropped, lan.repServedRefused, lan.repServedUnencodable, reportServedMax
+	lan.repServed, lan.repServedSeq, lan.repServedDropped, lan.repServedRefused, lan.repServedUnencodable = nil, 0, 0, 0, 0
+	lan.repMu.Unlock()
 	return func() {
-		repMu.Lock()
-		repQueue, repLast, repLastErr = oq, ol, oe
-		repServed, repServedSeq, repServedDropped, repServedRefused, repServedUnencodable, reportServedMax = osrv, oseq, odrop, oref, ounenc, omax
-		repMu.Unlock()
+		lan.repMu.Lock()
+		lan.repQueue, lan.repLast, lan.repLastErr = oq, ol, oe
+		lan.repServed, lan.repServedSeq, lan.repServedDropped, lan.repServedRefused, lan.repServedUnencodable, reportServedMax = osrv, oseq, odrop, oref, ounenc, omax
+		lan.repMu.Unlock()
 	}
 }
 
 // runReporterFor runs the sender against brain for the rest of the test.
 func runReporterFor(t *testing.T, brain, key string) {
 	t.Helper()
-	startReporter(brain, key)
-	t.Cleanup(stopReporterNow)
-}
-
-// stopReporterNow stops the sender, cancelling its post in flight.
-func stopReporterNow() {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	stopReporter(ctx)
+	oldBrain, oldKey := brainBase, switchKey
+	brainBase, switchKey = brain, key
+	lan.startReporter()
+	t.Cleanup(func() {
+		lan.stopReporterNow(context.Background())
+		brainBase, switchKey = oldBrain, oldKey
+	})
 }
 
 // reportsSettle waits (tests only) up to 5 s for the running sender to have
 // sent everything queued.
 func reportsSettle() {
 	deadline := time.Now().Add(5 * time.Second)
-	for reportsPending() > 0 && time.Now().Before(deadline) {
+	for lan.reportsPending() > 0 && time.Now().Before(deadline) {
 		time.Sleep(2 * time.Millisecond)
 	}
 }
@@ -71,7 +69,7 @@ func fakeReportsBrain(t *testing.T, replies ...func(events []map[string]any) (in
 	var mu sync.Mutex
 	var posts [][]map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/reports" || r.Method != http.MethodPost {
+		if r.URL.Path != tpath("/reports") || r.Method != http.MethodPost {
 			http.NotFound(w, r)
 			return
 		}
@@ -113,22 +111,22 @@ func resultsAll(es []map[string]any, result string, seq int64) map[string]any {
 }
 
 func queuedOf(k reportKey) (reportEvent, bool) {
-	repMu.Lock()
-	defer repMu.Unlock()
-	q, ok := repQueue[k]
+	lan.repMu.Lock()
+	defer lan.repMu.Unlock()
+	q, ok := lan.repQueue[k]
 	return q.ev, ok
 }
 
 func queueLen() int {
-	repMu.Lock()
-	defer repMu.Unlock()
-	return len(repQueue)
+	lan.repMu.Lock()
+	defer lan.repMu.Unlock()
+	return len(lan.repQueue)
 }
 
 func clearQueue() {
-	repMu.Lock()
-	repQueue = map[reportKey]queuedReport{}
-	repMu.Unlock()
+	lan.repMu.Lock()
+	lan.repQueue = map[reportKey]queuedReport{}
+	lan.repMu.Unlock()
 }
 
 func readingKey(account, window string) reportKey {
@@ -162,12 +160,12 @@ func TestReportsCoalescePerKey(t *testing.T) {
 	t.Cleanup(resetQuotaState())
 	now := time.Now()
 	r := epoch(now.Add(3 * time.Hour))
-	reportHeaderReading("a", reading(now, map[string][2]*float64{"five_hour": {ptr(50), r}, "seven_day": {ptr(10), nil}}))
-	reportHeaderReading("a", reading(now.Add(time.Second), map[string][2]*float64{"five_hour": {ptr(60), r}}))
-	repMu.Lock()
-	queueReportLocked(readingKey("a", "five_hour"), reportEvent{kind: reportReading, account: "a",
+	lan.reportHeaderReading("a", reading(now, map[string][2]*float64{"five_hour": {ptr(50), r}, "seven_day": {ptr(10), nil}}))
+	lan.reportHeaderReading("a", reading(now.Add(time.Second), map[string][2]*float64{"five_hour": {ptr(60), r}}))
+	lan.repMu.Lock()
+	lan.queueReportLocked(readingKey("a", "five_hour"), reportEvent{kind: reportReading, account: "a",
 		window: "five_hour", readAt: unixSeconds(now.Add(-time.Minute)), usedPct: ptr(70)})
-	repMu.Unlock()
+	lan.repMu.Unlock()
 	if ev, ok := queuedOf(readingKey("a", "five_hour")); !ok || *ev.usedPct != 60 {
 		t.Fatalf("five_hour queued %+v, want the newer reading (60) and not the older (70)", ev)
 	}
@@ -176,8 +174,8 @@ func TestReportsCoalescePerKey(t *testing.T) {
 	}
 	// A refusal is its own key on the same window, and its end replaces it.
 	rec := refusalRecord{kind: recSpent, limKind: limWindow, refusedAt: now, attributed: true}
-	reportRecord("a", "five_hour", rec, false, time.Time{})
-	reportRecord("a", "five_hour", rec, true, now.Add(time.Second))
+	lan.reportRecord("a", "five_hour", rec, false, time.Time{})
+	lan.reportRecord("a", "five_hour", rec, true, now.Add(time.Second))
 	if ev, ok := queuedOf(windowRefusalKey("a", "five_hour")); !ok || !ev.ended {
 		t.Fatalf("refusal queued %+v, want its end", ev)
 	}
@@ -187,16 +185,16 @@ func TestReportsCoalescePerKey(t *testing.T) {
 	// Two entries on one pot are two events.
 	enter(0.1, now)
 	enter(0.1, now)
-	if b := reportBatch(); len(b) != 5 || b[0].entry != nil || b[2].entry != nil || b[3].entry == nil || b[4].entry == nil {
+	if b := lan.reportBatch(); len(b) != 5 || b[0].entry != nil || b[2].entry != nil || b[3].entry == nil || b[4].entry == nil {
 		t.Fatalf("batch of %d, want the three, then both entries", len(b))
 	}
 	for i := range 600 {
-		repMu.Lock()
-		queueReportLocked(readingKey("b", fmt.Sprintf("window:%dm", i+1)),
+		lan.repMu.Lock()
+		lan.queueReportLocked(readingKey("b", fmt.Sprintf("window:%dm", i+1)),
 			reportEvent{kind: reportReading, account: "b", window: fmt.Sprintf("window:%dm", i+1), readAt: unixSeconds(now)})
-		repMu.Unlock()
+		lan.repMu.Unlock()
 	}
-	if b := reportBatch(); len(b) != reportBatchMax || b[0].entry != nil || b[reportBatchMax-1].entry != nil {
+	if b := lan.reportBatch(); len(b) != reportBatchMax || b[0].entry != nil || b[reportBatchMax-1].entry != nil {
 		t.Fatalf("batch of %d, want %d of the queue", len(b), reportBatchMax)
 	}
 }
@@ -210,9 +208,9 @@ func TestReportsBatchReadingsBeforeLedger(t *testing.T) {
 	for range 600 {
 		enter(0.1, now)
 	}
-	reportHeaderReading("a", reading(now, map[string][2]*float64{"five_hour": {ptr(50), nil}, "seven_day": {ptr(10), nil}}))
-	reportRecord("a", "five_hour", refusalRecord{kind: recSpent, limKind: limWindow, refusedAt: now, attributed: true}, false, time.Time{})
-	b := reportBatch()
+	lan.reportHeaderReading("a", reading(now, map[string][2]*float64{"five_hour": {ptr(50), nil}, "seven_day": {ptr(10), nil}}))
+	lan.reportRecord("a", "five_hour", refusalRecord{kind: recSpent, limKind: limWindow, refusedAt: now, attributed: true}, false, time.Time{})
+	b := lan.reportBatch()
 	if len(b) != reportBatchMax {
 		t.Fatalf("batch of %d, want %d", len(b), reportBatchMax)
 	}
@@ -232,7 +230,7 @@ func TestReportsBatchReadingsBeforeLedger(t *testing.T) {
 		}
 		return 200, map[string]any{"results": rs, "seq": 1}
 	})
-	if ok, more := reportPost(context.Background(), url, "k"); ok || !more {
+	if ok, more := lan.reportPost(context.Background(), tbase(url), "k"); ok || !more {
 		t.Fatalf("ok %v more %v, want the entries left to retry", ok, more)
 	}
 	if n := queueLen(); n != 0 {
@@ -297,10 +295,10 @@ func TestReportsNewsFilter(t *testing.T) {
 			st := standingAt("anthropic", at(c.brainAt), map[string]checkWindow{"five_hour": fiveHour(40, reset)}, "")
 			seedQuota(t, map[string]acctStanding{"a": st}, nil, nil, nil)
 			for _, s := range c.steps {
-				reportHeaderReading("a", reading(at(s.at), map[string][2]*float64{"five_hour": {s.used, s.rs}}))
+				lan.reportHeaderReading("a", reading(at(s.at), map[string][2]*float64{"five_hour": {s.used, s.rs}}))
 			}
 			clearQueue()
-			reportHeaderReading("a", reading(at(c.judge.at), map[string][2]*float64{"five_hour": {c.judge.used, c.judge.rs}}))
+			lan.reportHeaderReading("a", reading(at(c.judge.at), map[string][2]*float64{"five_hour": {c.judge.used, c.judge.rs}}))
 			if _, got := queuedOf(readingKey("a", "five_hour")); got != c.news {
 				t.Fatalf("queued %v, want %v", got, c.news)
 			}
@@ -308,7 +306,7 @@ func TestReportsNewsFilter(t *testing.T) {
 	}
 	t.Run("a window the brain does not publish", func(t *testing.T) {
 		seedQuota(t, map[string]acctStanding{"a": standingAt("anthropic", at(-time.Minute), map[string]checkWindow{}, "")}, nil, nil, nil)
-		reportHeaderReading("a", reading(now, map[string][2]*float64{"scoped:Fable": {ptr(10), nil}}))
+		lan.reportHeaderReading("a", reading(now, map[string][2]*float64{"scoped:Fable": {ptr(10), nil}}))
 		if _, ok := queuedOf(readingKey("a", "scoped:Fable")); !ok {
 			t.Fatal("not queued")
 		}
@@ -319,7 +317,7 @@ func TestReportsNewsFilter(t *testing.T) {
 		judge := func(hr headerReading) bool {
 			clearQueue()
 			hr.credits = true
-			reportHeaderReading("g", hr)
+			lan.reportHeaderReading("g", hr)
 			_, ok := queuedOf(k)
 			return ok
 		}
@@ -340,7 +338,7 @@ func TestReportsNewsFilter(t *testing.T) {
 			t.Fatal("a response that said nothing of the pot was news")
 		}
 		clearQueue()
-		reportHeaderReading("g", headerReading{asOf: now.Add(4 * time.Second), credits: true, creditsOff: true, balance: ptr(0)})
+		lan.reportHeaderReading("g", headerReading{asOf: now.Add(4 * time.Second), credits: true, creditsOff: true, balance: ptr(0)})
 		ev, _ = queuedOf(k)
 		b, _ := json.Marshal(ev.wire())
 		var m map[string]any
@@ -357,7 +355,7 @@ func TestReportsNewsFilter(t *testing.T) {
 func TestReportsFromCodexHeaders(t *testing.T) {
 	t.Cleanup(resetQuotaState())
 	now := time.Now().Truncate(time.Second)
-	noteHeaderReading("gpt-a", http.Header{
+	lan.noteHeaderReading("gpt-a", http.Header{
 		"X-Codex-Primary-Used-Percent":     {"12"},
 		"X-Codex-Primary-Window-Minutes":   {"300"},
 		"X-Codex-Secondary-Used-Percent":   {"101"},
@@ -387,7 +385,7 @@ func TestReportsFromCodexHeaders(t *testing.T) {
 	}
 	// An older response's reading is not kept, so it is not reported.
 	clearQueue()
-	noteHeaderReading("gpt-a", http.Header{"X-Codex-Primary-Used-Percent": {"50"}, "X-Codex-Primary-Window-Minutes": {"300"}}, now.Add(-time.Minute))
+	lan.noteHeaderReading("gpt-a", http.Header{"X-Codex-Primary-Used-Percent": {"50"}, "X-Codex-Primary-Window-Minutes": {"300"}}, now.Add(-time.Minute))
 	if n := queueLen(); n != 0 {
 		t.Fatalf("an older response queued %d", n)
 	}
@@ -402,7 +400,7 @@ func TestReportsFromCodexHeaders(t *testing.T) {
 func TestReportsResults(t *testing.T) {
 	t.Cleanup(resetQuotaState())
 	now := time.Now()
-	reportHeaderReading("a", reading(now, map[string][2]*float64{
+	lan.reportHeaderReading("a", reading(now, map[string][2]*float64{
 		"w1": {ptr(1), nil}, "w2": {ptr(2), nil}, "w3": {ptr(3), nil}, "w4": {ptr(4), nil}}))
 	enter(0.1, now)
 	enter(0.2, now)
@@ -423,11 +421,11 @@ func TestReportsResults(t *testing.T) {
 		func(es []map[string]any) (int, any) { return 200, map[string]any{"results": []any{}, "seq": 7} },
 		func(es []map[string]any) (int, any) {
 			if replaceInFlight.CompareAndSwap(false, true) {
-				reportHeaderReading("a", reading(now.Add(time.Second), map[string][2]*float64{"w4": {ptr(44), nil}}))
+				lan.reportHeaderReading("a", reading(now.Add(time.Second), map[string][2]*float64{"w4": {ptr(44), nil}}))
 			}
 			return 200, resultsAll(es, "applied", 7)
 		})
-	ok, more := reportPost(context.Background(), url, "k")
+	ok, more := lan.reportPost(context.Background(), tbase(url), "k")
 	if ok || !more {
 		t.Fatalf("ok %v more %v, want a retry left", ok, more)
 	}
@@ -437,31 +435,31 @@ func TestReportsResults(t *testing.T) {
 	if _, ok := queuedOf(readingKey("a", "w4")); !ok {
 		t.Fatal("the retry left the queue")
 	}
-	if st := ledgerStatus(); st["pending"] != 0 || st["refused"] != 1 || st["accepted_unpulled"] != 1 {
+	if st := lan.ledgerStatus(); st["pending"] != 0 || st["refused"] != 1 || st["accepted_unpulled"] != 1 {
 		t.Fatalf("ledger = %+v, want one accepted, one refused", st)
 	}
-	if st := reportsStatus(); st["pending"] != 1 || st["last_error"] == "" {
+	if st := lan.reportsStatus(); st["pending"] != 1 || st["last_error"] == "" {
 		t.Fatalf("reports = %+v, want the retry pending and said", st)
 	}
 	// An answer that is not one result per event: a failure, nothing moves.
-	if ok, _ := reportPost(context.Background(), url, "k"); ok {
+	if ok, _ := lan.reportPost(context.Background(), tbase(url), "k"); ok {
 		t.Fatal("a short answer read as a post the brain took")
 	}
-	if st := reportsStatus(); st["pending"] != 1 {
+	if st := lan.reportsStatus(); st["pending"] != 1 {
 		t.Fatalf("reports = %+v after a short answer", st)
 	}
 	// A newer reading of w4 replaces it while its post is in flight: the
 	// applied result is for the old one, and the new one stays.
-	if ok, more := reportPost(context.Background(), url, "k"); !ok || !more {
+	if ok, more := lan.reportPost(context.Background(), tbase(url), "k"); !ok || !more {
 		t.Fatalf("ok %v more %v, want the replacement left", ok, more)
 	}
 	if ev, ok := queuedOf(readingKey("a", "w4")); !ok || *ev.usedPct != 44 {
 		t.Fatalf("w4 queued %+v, want the replacement", ev)
 	}
-	if ok, more := reportPost(context.Background(), url, "k"); !ok || more {
+	if ok, more := lan.reportPost(context.Background(), tbase(url), "k"); !ok || more {
 		t.Fatalf("ok %v more %v, want done", ok, more)
 	}
-	if st := reportsStatus(); st["pending"] != 0 || st["last_error"] != "" {
+	if st := lan.reportsStatus(); st["pending"] != 0 || st["last_error"] != "" {
 		t.Fatalf("reports = %+v, want nothing pending and no error", st)
 	}
 	p := posts()
@@ -514,14 +512,14 @@ func TestReportsBackoff(t *testing.T) {
 			case <-stop:
 				return
 			case <-time.After(5 * time.Millisecond):
-				reportWake()
+				lan.reportWake()
 			}
 		}
 	}()
 	t.Cleanup(func() { close(stop); wakers.Wait() })
-	reportHeaderReading("a", reading(time.Now(), map[string][2]*float64{"five_hour": {ptr(1), nil}}))
+	lan.reportHeaderReading("a", reading(time.Now(), map[string][2]*float64{"five_hour": {ptr(1), nil}}))
 	runReporterFor(t, url, "k")
-	waitUntil(t, "the queue to empty", func() bool { return reportsPending() == 0 })
+	waitUntil(t, "the queue to empty", func() bool { return lan.reportsPending() == 0 })
 	mu.Lock()
 	defer mu.Unlock()
 	if len(at) != 5 {
@@ -532,7 +530,7 @@ func TestReportsBackoff(t *testing.T) {
 			t.Fatalf("gap %d = %s, want at least %dms", i+1, gap, want)
 		}
 	}
-	if st := reportsStatus(); st["last_error"] != "" {
+	if st := lan.reportsStatus(); st["last_error"] != "" {
 		t.Fatalf("reports = %+v after the brain took the post", st)
 	}
 }
@@ -570,11 +568,11 @@ func TestReportsWhichRecords(t *testing.T) {
 	clearQueue()
 	refuse(t, memGpt, "gpt-a", 429, nil, codexCreditExhausted429) // the credits pot
 	refuse(t, memKimi, "kimi", 403, nil, kimiNotEntitled403)      // the entitlement
-	recordRefusal("kimi", refusal{class: refThrottled, detail: "slow down"}, hResp(429, nil, ""))
-	pref.mu.Lock()
-	pref.accounts["rw"] = acctStanding{Provider: "runway", Kind: "api", AsOf: epoch(*now)}
-	pref.mu.Unlock()
-	recordRefusal("rw", refusal{class: refSpent, limits: []refLimit{{name: modelLimit("gen-4"), kind: limModel}}},
+	lan.recordRefusal("kimi", refusal{class: refThrottled, detail: "slow down"}, hResp(429, nil, ""))
+	lan.pref.mu.Lock()
+	lan.pref.accounts["rw"] = acctStanding{Provider: "runway", Kind: "api", AsOf: epoch(*now)}
+	lan.pref.mu.Unlock()
+	lan.recordRefusal("rw", refusal{class: refSpent, limits: []refLimit{{name: modelLimit("gen-4"), kind: limModel}}},
 		hResp(429, nil, "")) // Runway's: money
 	if n := queueLen(); n != 0 {
 		t.Fatalf("%d queued for a pot, the entitlement, a throttle and an api account's model, want none", n)
@@ -614,7 +612,7 @@ func TestReportsWhichRecords(t *testing.T) {
 	// A 2xx on the model ends its record, and the end is reported as the
 	// limit's, at the 2xx; the pool's stands.
 	clearQueue()
-	noteServed("kimi", "", "kimi-k3", now.Add(time.Minute))
+	lan.noteServed("kimi", "", "kimi-k3", now.Add(time.Minute))
 	ev, ok = queuedOf(limitRefusalKey("kimi", modelLimit("kimi-k3")))
 	if m, b = wireOf(ev); !ok || m["ended"] != true || m["read_at"] != unixSeconds(now.Add(time.Minute)) ||
 		m["limit"] != "model:kimi-k3" || m["class"] != "not_entitled" {
@@ -634,7 +632,7 @@ func TestReportsRefusalCarriesTheNamedReset(t *testing.T) {
 	t.Cleanup(resetQuotaState())
 	now := time.Now().Truncate(time.Second)
 	named := now.Add(72 * time.Hour)
-	rec := writeRecord("a", "five_hour", refusalRecord{kind: recSpent, limKind: limWindow, refusedAt: now, resets: named})
+	rec := lan.writeRecord("a", "five_hour", refusalRecord{kind: recSpent, limKind: limWindow, refusedAt: now, resets: named})
 	if !rec.until.Equal(now.Add(quotaCooldownCap)) {
 		t.Fatalf("fixture: until %v, want the 6 h clamp", rec.until)
 	}
@@ -653,7 +651,7 @@ func TestReportsRefusalCarriesTheNamedReset(t *testing.T) {
 			t.Fatalf("recordWindow resets at %v, the wire says %v", *w.ResetsAt, m["resets_at"])
 		}
 	}
-	none := writeRecord("a", "seven_day", refusalRecord{kind: recSpent, limKind: limWindow, refusedAt: now})
+	none := lan.writeRecord("a", "seven_day", refusalRecord{kind: recSpent, limKind: limWindow, refusedAt: now})
 	m := wireOf(refusalEvent("a", "seven_day", "", none, false, time.Time{}))
 	if r, has := m["resets_at"]; !has || r != nil || m["until"] != unixSeconds(now.Add(quotaCooldown)) {
 		t.Fatalf("refusal wire = %v, want resets_at null and until the floor", m)
@@ -668,15 +666,15 @@ func TestReportsEndedOnServed(t *testing.T) {
 	refuse(t, memGpt, "gpt-a", 429, nil, s9(r7))
 	refuse(t, memGpt, "gpt-a", 429, nil, codexCreditExhausted429)
 	clearQueue()
-	noteServed("gpt-a", "", "", now.Add(-time.Second))
+	lan.noteServed("gpt-a", "", "", now.Add(-time.Second))
 	if n := queueLen(); n != 0 {
 		t.Fatalf("a 2xx sent before the refusal queued %d", n)
 	}
-	notePaidServed("gpt-a", potCredits, now.Add(time.Second))
+	lan.notePaidServed("gpt-a", potCredits, now.Add(time.Second))
 	if n := queueLen(); n != 0 {
 		t.Fatalf("a paid 2xx on the pot queued %d", n)
 	}
-	noteServed("gpt-a", "", "", now.Add(2*time.Second))
+	lan.noteServed("gpt-a", "", "", now.Add(2*time.Second))
 	ev, ok := queuedOf(windowRefusalKey("gpt-a", "seven_day"))
 	if !ok || !ev.ended || ev.readAt != unixSeconds(now.Add(2*time.Second)) {
 		t.Fatalf("queued %+v, want the record's end at the 2xx", ev)
@@ -706,22 +704,22 @@ func TestReportsResync(t *testing.T) {
 	refuse(t, memGpt, "gpt-a", 429, nil, s9(r7))
 	refuse(t, memGpt, "gpt-a", 429, nil, codexCreditExhausted429)
 	refuse(t, memKimi, "kimi", 403, nil, kimiModel403) // a model's: a limit the brain has no window for
-	recordThrottle("kimi", 429, "slow", nil)
-	recMu.Lock()
-	records[recKey{"kimi", "five_hour"}] = refusalRecord{kind: recSpent, limKind: limWindow,
+	lan.recordThrottle("kimi", 429, "slow", nil)
+	lan.recMu.Lock()
+	lan.records[recKey{"kimi", "five_hour"}] = refusalRecord{kind: recSpent, limKind: limWindow,
 		refusedAt: now.Add(-time.Hour), until: now.Add(-time.Minute)} // expired
-	recMu.Unlock()
+	lan.recMu.Unlock()
 	// News: five_hour moved from the brain's 40, and the credits pot shut.
-	noteHeaderReading("gpt-a", http.Header{
+	lan.noteHeaderReading("gpt-a", http.Header{
 		"X-Codex-Primary-Used-Percent": {"45"}, "X-Codex-Primary-Window-Minutes": {"300"},
 		"X-Codex-Credits-Has-Credits": {"False"}, "X-Codex-Credits-Unlimited": {"False"},
 	}, *now)
 	// A later response that carries only the weekly window, at the brain's
 	// own 100: not news, never sent, so the resync does not send it either;
 	// five_hour's last report still goes.
-	noteHeaderReading("gpt-a", http.Header{"X-Codex-Secondary-Used-Percent": {"100"}, "X-Codex-Secondary-Window-Minutes": {"10080"}}, now.Add(time.Second))
+	lan.noteHeaderReading("gpt-a", http.Header{"X-Codex-Secondary-Used-Percent": {"100"}, "X-Codex-Secondary-Window-Minutes": {"10080"}}, now.Add(time.Second))
 	clearQueue()
-	reportResync()
+	lan.reportResync()
 	if ev, ok := queuedOf(readingKey("gpt-a", "five_hour")); !ok || *ev.usedPct != 45 {
 		t.Fatalf("resync's five_hour %v, want the reported 45", ev.wire())
 	}
@@ -769,10 +767,10 @@ func TestReportsResyncOnEachStreamConnection(t *testing.T) {
 		<-r.Context().Done()
 	})
 	now := time.Now()
-	recMu.Lock()
-	records[recKey{"acct-resync", "five_hour"}] = refusalRecord{kind: recSpent, limKind: limWindow, refusedAt: now, attributed: true}
-	recMu.Unlock()
-	reportHeaderReading("acct-resync", reading(now, map[string][2]*float64{"five_hour": {ptr(100), nil}}))
+	lan.recMu.Lock()
+	lan.records[recKey{"acct-resync", "five_hour"}] = refusalRecord{kind: recSpent, limKind: limWindow, refusedAt: now, attributed: true}
+	lan.recMu.Unlock()
+	lan.reportHeaderReading("acct-resync", reading(now, map[string][2]*float64{"five_hour": {ptr(100), nil}}))
 	clearQueue()
 	close(start)
 	waitUntil(t, "the first connection's resync", func() bool { return queueLen() == 2 })
@@ -851,15 +849,10 @@ func TestE2EReportsReachTheBrain(t *testing.T) {
 		t.Fatalf("reading of %s five_hour = %v among %v", account, rd, env.reports)
 	}
 
-	st, err := http.Get(env.proxy.URL + "/_switch/status")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Body.Close()
 	var s struct {
 		Reports map[string]any `json:"reports"`
 	}
-	if err := json.NewDecoder(st.Body).Decode(&s); err != nil {
+	if err := json.Unmarshal(statusMine(t, env.proxy.URL), &s); err != nil {
 		t.Fatal(err)
 	}
 	if s.Reports["pending"] != 0.0 || s.Reports["last_error"] != "" {
@@ -876,18 +869,18 @@ func TestReportsHoldUnderTheReportsAsOfIsNotNews(t *testing.T) {
 	reset := now.Add(3 * time.Hour)
 	seedQuota(t, map[string]acctStanding{"a": standingAt("anthropic", now.Add(-time.Minute),
 		map[string]checkWindow{"five_hour": fiveHour(40, reset)}, "")}, nil, nil, nil)
-	reportHeaderReading("a", reading(now, map[string][2]*float64{"five_hour": {ptr(97), epoch(reset)}}))
+	lan.reportHeaderReading("a", reading(now, map[string][2]*float64{"five_hour": {ptr(97), epoch(reset)}}))
 	if _, ok := queuedOf(readingKey("a", "five_hour")); !ok {
 		t.Fatal("the first reading was not news")
 	}
 	clearQueue()
 	// The brain applied it, then a hold: 100 under the report's read_at.
-	pref.mu.Lock()
-	pref.accounts = map[string]acctStanding{"a": standingAt("anthropic", now,
+	lan.pref.mu.Lock()
+	lan.pref.accounts = map[string]acctStanding{"a": standingAt("anthropic", now,
 		map[string]checkWindow{"five_hour": fiveHour(100, reset)}, "")}
-	pref.mu.Unlock()
+	lan.pref.mu.Unlock()
 	for i := 1; i <= 5; i++ {
-		reportHeaderReading("a", reading(now.Add(time.Duration(i)*time.Second), map[string][2]*float64{"five_hour": {ptr(97), epoch(reset)}}))
+		lan.reportHeaderReading("a", reading(now.Add(time.Duration(i)*time.Second), map[string][2]*float64{"five_hour": {ptr(97), epoch(reset)}}))
 		if ev, ok := queuedOf(readingKey("a", "five_hour")); ok {
 			t.Fatalf("reading %d under the hold queued %v, want nothing", i, ev.wire())
 		}
@@ -912,7 +905,7 @@ func TestReportsNonFiniteHeaderValuesAreRefused(t *testing.T) {
 	}
 	finite := func(p *float64) bool { return p == nil || (!math.IsNaN(*p) && !math.IsInf(*p, 0)) }
 
-	noteHeaderReading("gpt-a", http.Header{
+	lan.noteHeaderReading("gpt-a", http.Header{
 		"X-Codex-Primary-Used-Percent":     {"NaN"},
 		"X-Codex-Primary-Window-Minutes":   {"300"},
 		"X-Codex-Secondary-Used-Percent":   {"20"},
@@ -921,7 +914,7 @@ func TestReportsNonFiniteHeaderValuesAreRefused(t *testing.T) {
 		"X-Codex-Credits-Has-Credits":      {"True"},
 		"X-Codex-Credits-Balance":          {"Inf"},
 	}, now)
-	noteHeaderReading("anth-a", rlHeader(
+	lan.noteHeaderReading("anth-a", rlHeader(
 		"anthropic-ratelimit-unified-5h-status", "allowed",
 		"anthropic-ratelimit-unified-5h-utilization", "+Inf",
 		"anthropic-ratelimit-unified-5h-reset", "Inf",
@@ -929,34 +922,34 @@ func TestReportsNonFiniteHeaderValuesAreRefused(t *testing.T) {
 		"anthropic-ratelimit-unified-7d-utilization", "0.4",
 		"anthropic-ratelimit-unified-7d-reset", "NaN"), now)
 
-	recMu.Lock()
-	for acct, hr := range readings {
+	lan.recMu.Lock()
+	for acct, hr := range lan.readings {
 		for n, w := range hr.windows {
 			if !finite(w.UsedPct) || !finite(w.ResetsAt) {
-				recMu.Unlock()
+				lan.recMu.Unlock()
 				t.Fatalf("%s %s kept a non-finite reading: used %v reset %v", acct, n, *w.UsedPct, *w.ResetsAt)
 			}
 		}
 		if !finite(hr.balance) {
-			recMu.Unlock()
+			lan.recMu.Unlock()
 			t.Fatalf("%s kept a non-finite balance", acct)
 		}
 	}
-	recMu.Unlock()
+	lan.recMu.Unlock()
 	if ev, ok := queuedOf(readingKey("gpt-a", "seven_day")); !ok || *ev.usedPct != 20 || ev.resetsAt != nil {
 		t.Fatalf("codex seven_day queued %v, want its use and no reset", ev.wire())
 	}
 	if ev, ok := queuedOf(readingKey("anth-a", "seven_day")); !ok || *ev.usedPct != 40 || ev.resetsAt != nil {
 		t.Fatalf("anthropic seven_day queued %v, want its use and no reset", ev.wire())
 	}
-	repMu.Lock()
-	for k, q := range repQueue {
+	lan.repMu.Lock()
+	for k, q := range lan.repQueue {
 		if _, err := json.Marshal(q.ev.wire()); err != nil {
-			repMu.Unlock()
+			lan.repMu.Unlock()
 			t.Fatalf("%v queued unencodable: %v", k, err)
 		}
 	}
-	repMu.Unlock()
+	lan.repMu.Unlock()
 }
 
 // An event that cannot be encoded leaves the post with a log line, the rest
@@ -966,18 +959,18 @@ func TestReportsUnencodableEventIsDropped(t *testing.T) {
 	t.Cleanup(resetQuotaState())
 	now := time.Now()
 	bad := math.NaN()
-	repMu.Lock()
-	queueReportLocked(readingKey("a", "five_hour"), reportEvent{kind: reportReading, account: "a",
+	lan.repMu.Lock()
+	lan.queueReportLocked(readingKey("a", "five_hour"), reportEvent{kind: reportReading, account: "a",
 		window: "five_hour", readAt: unixSeconds(now), usedPct: &bad})
-	repMu.Unlock()
-	reportHeaderReading("a", reading(now, map[string][2]*float64{"seven_day": {ptr(10), nil}}))
+	lan.repMu.Unlock()
+	lan.reportHeaderReading("a", reading(now, map[string][2]*float64{"seven_day": {ptr(10), nil}}))
 	basis := "derived"
-	ledgerEnter(ledgerEntry{ID: newLedgerID(), At: unixSeconds(now), Account: "gpt", Pot: potCredits,
+	lan.ledgerEnter(ledgerEntry{ID: newLedgerID(), At: unixSeconds(now), Account: "gpt", Pot: potCredits,
 		Route: gptRoute, Charge: &bad, Unit: "codex_credit", Basis: &basis})
 	enter(0.1, now)
 
 	url, posts := fakeReportsBrain(t, func(es []map[string]any) (int, any) { return 200, resultsAll(es, "applied", 3) })
-	if ok, more := reportPost(context.Background(), url, "k"); !ok || more {
+	if ok, more := lan.reportPost(context.Background(), tbase(url), "k"); !ok || more {
 		t.Fatalf("ok %v more %v, want the rest taken and nothing left", ok, more)
 	}
 	p := posts()
@@ -987,24 +980,24 @@ func TestReportsUnencodableEventIsDropped(t *testing.T) {
 	if p[0][0]["window"] != "seven_day" || p[0][1]["charge"] != 0.1 {
 		t.Fatalf("post = %v", p[0])
 	}
-	if st := ledgerStatus(); st["pending"] != 0 || st["refused"] != 1 {
+	if st := lan.ledgerStatus(); st["pending"] != 0 || st["refused"] != 1 {
 		t.Fatalf("ledger = %+v, want the unencodable entry counted as refused", st)
 	}
-	if st := reportsStatus(); st["pending"] != 0 {
+	if st := lan.reportsStatus(); st["pending"] != 0 {
 		t.Fatalf("reports = %+v, want nothing pending", st)
 	}
 	// Only unencodable events: nothing is posted, and the drop is said.
-	repMu.Lock()
-	queueReportLocked(readingKey("a", "five_hour"), reportEvent{kind: reportReading, account: "a",
+	lan.repMu.Lock()
+	lan.queueReportLocked(readingKey("a", "five_hour"), reportEvent{kind: reportReading, account: "a",
 		window: "five_hour", readAt: unixSeconds(now.Add(time.Second)), usedPct: &bad})
-	repMu.Unlock()
-	if ok, more := reportPost(context.Background(), url, "k"); !ok || more {
+	lan.repMu.Unlock()
+	if ok, more := lan.reportPost(context.Background(), tbase(url), "k"); !ok || more {
 		t.Fatalf("ok %v more %v, want nothing left", ok, more)
 	}
 	if n := len(posts()); n != 1 {
 		t.Fatalf("%d posts, want no empty one", n)
 	}
-	if st := reportsStatus(); st["pending"] != 0 || st["last_error"] == "" {
+	if st := lan.reportsStatus(); st["pending"] != 0 || st["last_error"] == "" {
 		t.Fatalf("reports = %+v, want nothing pending and the drop said", st)
 	}
 }
@@ -1019,13 +1012,13 @@ func TestReportsHeaderPercentHasNoFloatNoise(t *testing.T) {
 		map[string]checkWindow{"five_hour": fiveHour(7, reset)}, "")}, nil, nil, nil)
 	for _, frac := range []string{"0.07", "0.29", "0.57", "0.58"} {
 		obs, ok := parseUnifiedRL(rlHeader("anthropic-ratelimit-unified-5h-status", "allowed",
-			"anthropic-ratelimit-unified-5h-utilization", frac), now, currentScopes())
+			"anthropic-ratelimit-unified-5h-utilization", frac), now, lan.currentScopes())
 		f, _ := strconv.ParseFloat(frac, 64)
 		if want := math.Round(f * 100); !ok || len(obs.windows) != 1 || obs.windows[0].pct != want {
 			t.Fatalf("%s read as %v, want %v", frac, obs.windows, want)
 		}
 	}
-	noteHeaderReading("a", rlHeader(
+	lan.noteHeaderReading("a", rlHeader(
 		"anthropic-ratelimit-unified-5h-status", "allowed",
 		"anthropic-ratelimit-unified-5h-utilization", "0.07",
 		"anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(reset.Unix(), 10)), now)
@@ -1058,11 +1051,11 @@ func TestOverlayKeepsTheBrainsUseAgainstAPointBelow(t *testing.T) {
 	for i, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			at := now.Add(time.Duration(i+1) * time.Second)
-			noteHeaderReading("a", rlHeader(
+			lan.noteHeaderReading("a", rlHeader(
 				"anthropic-ratelimit-unified-7d-status", "allowed_warning",
 				"anthropic-ratelimit-unified-7d-utilization", c.util,
 				"anthropic-ratelimit-unified-7d-reset", strconv.FormatInt(c.reset.Unix(), 10)), at)
-			w := standingRead("a", at).Allowance.Windows["seven_day"]
+			w := lan.standingRead("a", at).Allowance.Windows["seven_day"]
 			if *w.UsedPct != c.want || *w.AsOf != unixSeconds(at) {
 				t.Fatalf("seven_day = use %v as_of %v, want %v as of the response", *w.UsedPct, *w.AsOf, c.want)
 			}
@@ -1081,18 +1074,18 @@ func TestReadingWithNoUseNeverAddsAWindow(t *testing.T) {
 	seedQuota(t, map[string]acctStanding{"a": standingAt("anthropic", now.Add(-time.Minute),
 		map[string]checkWindow{"five_hour": fiveHour(30, reset)}, "")}, nil, nil, nil)
 	newReset := now.Add(3 * time.Hour)
-	noteHeaderReading("a", rlHeader(
+	lan.noteHeaderReading("a", rlHeader(
 		"anthropic-ratelimit-unified-5h-status", "allowed",
 		"anthropic-ratelimit-unified-5h-reset", strconv.FormatInt(newReset.Unix(), 10),
 		"anthropic-ratelimit-unified-7d-status", "allowed",
 		"anthropic-ratelimit-unified-7d-reset", strconv.FormatInt(now.Add(90*time.Hour).Unix(), 10)), now)
-	recMu.Lock()
-	_, kept7 := readings["a"].windows["seven_day"]
-	recMu.Unlock()
+	lan.recMu.Lock()
+	_, kept7 := lan.readings["a"].windows["seven_day"]
+	lan.recMu.Unlock()
 	if !kept7 {
 		t.Fatal("fixture: the response's seven_day was not read")
 	}
-	st := standingRead("a", now)
+	st := lan.standingRead("a", now)
 	if _, has := st.Allowance.Windows["seven_day"]; has {
 		t.Fatalf("a reading with no use added seven_day: %+v", st.Allowance.Windows["seven_day"])
 	}
@@ -1125,9 +1118,9 @@ func TestReadingWithNoUseNeverAddsAWindow(t *testing.T) {
 func TestHoldAgainstAPointBelow(t *testing.T) {
 	now, _, r7 := recWorld(t)
 	reread("a", now.Add(-time.Minute), setWindow("seven_day", 98, epoch(r7)))
-	pref.mu.RLock()
-	staleMax := pref.staleMax
-	pref.mu.RUnlock()
+	lan.pref.mu.RLock()
+	staleMax := lan.pref.staleMax
+	lan.pref.mu.RUnlock()
 	if staleMax <= 0 {
 		t.Fatalf("fixture: stale_max %v", staleMax)
 	}
@@ -1155,8 +1148,8 @@ func TestHoldAgainstAPointBelow(t *testing.T) {
 	}
 	// The brain applies both and publishes its hold: 100 under the refusal's as_of.
 	publish := func(used float64, asOf time.Time) {
-		pref.mu.Lock()
-		st := pref.accounts["a"]
+		lan.pref.mu.Lock()
+		st := lan.pref.accounts["a"]
 		ws := make(map[string]checkWindow, len(st.Allowance.Windows))
 		for n, w := range st.Allowance.Windows {
 			ws[n] = w
@@ -1165,10 +1158,10 @@ func TestHoldAgainstAPointBelow(t *testing.T) {
 		w.UsedPct, w.AsOf = ptr(used), epoch(asOf)
 		ws["seven_day"] = w
 		st.Allowance.Windows = ws
-		pref.accounts["a"] = st
-		accounts := pref.accounts
-		pref.mu.Unlock()
-		pruneRecords(accounts)
+		lan.pref.accounts["a"] = st
+		accounts := lan.pref.accounts
+		lan.pref.mu.Unlock()
+		lan.pruneRecords(accounts)
 	}
 	publish(100, refused)
 	clearQueue()
@@ -1176,7 +1169,7 @@ func TestHoldAgainstAPointBelow(t *testing.T) {
 	ok99 := func(at time.Time) {
 		t.Helper()
 		*now = at
-		noteHeaderReading("a", rlHeader(
+		lan.noteHeaderReading("a", rlHeader(
 			"anthropic-ratelimit-unified-status", "allowed_warning",
 			"anthropic-ratelimit-unified-7d-status", "allowed_warning",
 			"anthropic-ratelimit-unified-7d-utilization", "0.99",
@@ -1187,10 +1180,10 @@ func TestHoldAgainstAPointBelow(t *testing.T) {
 		if _, ok := recOf("a", "seven_day"); !ok {
 			t.Fatal("the record ended")
 		}
-		if w := standingRead("a", at).Allowance.Windows["seven_day"]; *w.UsedPct != 100 || *w.AsOf != unixSeconds(at) {
+		if w := lan.standingRead("a", at).Allowance.Windows["seven_day"]; *w.UsedPct != 100 || *w.AsOf != unixSeconds(at) {
 			t.Fatalf("overlay seven_day = %v as of %v, want 100 as of the 2xx", *w.UsedPct, *w.AsOf)
 		}
-		if w := standingFor("a", at).Allowance.Windows["seven_day"]; *w.UsedPct != 100 {
+		if w := lan.standingFor("a", at).Allowance.Windows["seven_day"]; *w.UsedPct != 100 {
 			t.Fatalf("standing seven_day = %v, want 100", *w.UsedPct)
 		}
 	}
@@ -1213,7 +1206,7 @@ func TestHoldAgainstAPointBelow(t *testing.T) {
 
 	*now = refresh.Add(time.Minute)
 	clearQueue()
-	reportResync()
+	lan.reportResync()
 	ev, ok = queuedOf(readingKey("a", "seven_day"))
 	if !ok || *ev.usedPct != 99 || ev.readAt != unixSeconds(refresh) {
 		t.Fatalf("resync queued %v, want the newest reading, 99, at its own read_at", ev.wire())
@@ -1227,7 +1220,7 @@ func TestHoldAgainstAPointBelow(t *testing.T) {
 	if _, ok := recOf("a", "seven_day"); !ok {
 		t.Fatal("a 99 published after the refusal ended the record seen at 100")
 	}
-	if w := standingFor("a", restarted).Allowance.Windows["seven_day"]; *w.UsedPct != 100 {
+	if w := lan.standingFor("a", restarted).Allowance.Windows["seven_day"]; *w.UsedPct != 100 {
 		t.Fatalf("standing seven_day = %v, want the record's 100", *w.UsedPct)
 	}
 }
@@ -1257,7 +1250,7 @@ func TestReportsResyncSendsTheLastReportedReading(t *testing.T) {
 	clearQueue()
 	later := refused.Add(time.Second)
 	*now = later
-	noteHeaderReading("a", rlHeader(
+	lan.noteHeaderReading("a", rlHeader(
 		"anthropic-ratelimit-unified-status", "allowed_warning",
 		"anthropic-ratelimit-unified-7d-status", "allowed_warning",
 		"anthropic-ratelimit-unified-7d-utilization", "0.99",
@@ -1265,7 +1258,7 @@ func TestReportsResyncSendsTheLastReportedReading(t *testing.T) {
 	if ev, ok := queuedOf(readingKey("a", "seven_day")); ok {
 		t.Fatalf("the 0.99 a point below queued %v, want nothing", ev.wire())
 	}
-	reportResync()
+	lan.reportResync()
 	ev, ok := queuedOf(readingKey("a", "seven_day"))
 	if !ok || *ev.usedPct != 100 || ev.readAt != unixSeconds(refused) {
 		t.Fatalf("resync queued %v (ok %v), want the reported 100 read at the refusal", ev.wire(), ok)
@@ -1327,7 +1320,7 @@ func TestReportsRefusalsGolden(t *testing.T) {
 		rec := refusalRecord{kind: rc.Class, limKind: rc.LimKind, refusedAt: at(&rc.RefusedAt), until: at(rc.Until),
 			resets: at(rc.Resets), attributed: rc.Attributed,
 			seen: limitSeen{usedPct: rc.Seen.UsedPct, resetsAt: rc.Seen.ResetsAt}}
-		window, lim, ok := reportedAs(rc.Account, rc.Limit, rec)
+		window, lim, ok := lan.reportedAs(rc.Account, rc.Limit, rec)
 		if !ok {
 			t.Errorf("%s: the record is not reported", c.Name)
 			continue
@@ -1378,25 +1371,25 @@ func wantPotShut(t *testing.T, account, pot string, at time.Time) {
 // another pot of the api account, or a refusal that is not money, sends none.
 func TestReportsPotShutOnAnApiMoneyRefusal(t *testing.T) {
 	now, _, _ := recWorld(t)
-	pref.mu.Lock()
-	pref.accounts["acme"] = acctStanding{Provider: "acme", Kind: "api", AsOf: epoch(*now),
+	lan.pref.mu.Lock()
+	lan.pref.accounts["acme"] = acctStanding{Provider: "acme", Kind: "api", AsOf: epoch(*now),
 		Money: map[string]moneyPot{"balance": {}}}
-	pref.mu.Unlock()
-	recordRefusal("acme", refusal{class: refSpent, limits: []refLimit{{name: modelLimit("m"), kind: limModel}}},
+	lan.pref.mu.Unlock()
+	lan.recordRefusal("acme", refusal{class: refSpent, limits: []refLimit{{name: modelLimit("m"), kind: limModel}}},
 		hResp(429, nil, ""))
-	recordRefusal("acme", refusal{class: refUnpaid, limits: []refLimit{{name: "other", kind: limPot}}},
+	lan.recordRefusal("acme", refusal{class: refUnpaid, limits: []refLimit{{name: "other", kind: limPot}}},
 		hResp(402, nil, ""))
 	refuse(t, memGpt, "gpt-a", 429, nil, codexCreditExhausted429) // a subscription's credits: its headers report it
 	if n := queueLen(); n != 0 {
 		t.Fatalf("%d queued for a model, another pot and a subscription's credits, want none", n)
 	}
-	recordRefusal("acme", refusal{class: refUnpaid, limits: []refLimit{{name: "balance", kind: limPot, readable: true}}},
+	lan.recordRefusal("acme", refusal{class: refUnpaid, limits: []refLimit{{name: "balance", kind: limPot, readable: true}}},
 		hResp(402, nil, ""))
 	wantPotShut(t, "acme", "balance", *now)
 	clearQueue()
-	reportResync()
+	lan.reportResync()
 	wantPotShut(t, "acme", "balance", *now)
-	if apiMoneyPot("gpt-a") != "" || apiMoneyPot("nobody") != "" || apiMoneyPot("acme") != "balance" {
+	if lan.apiMoneyPot("gpt-a") != "" || lan.apiMoneyPot("nobody") != "" || lan.apiMoneyPot("acme") != "balance" {
 		t.Fatal("apiMoneyPot names only an api account's one money pot")
 	}
 }

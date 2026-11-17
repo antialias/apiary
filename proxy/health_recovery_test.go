@@ -28,13 +28,13 @@ func recoveryFixture(t *testing.T, handler http.HandlerFunc) (*recoveryRunner, *
 	t.Cleanup(func() { providers = oldProviders })
 	id := uniq("recovery")
 	m := classMemberPref{ID: id, Kind: "provider", Provider: "recovery-test", Model: "test-model", Route: uRoute(id)}
-	pref.mu.Lock()
-	oldClasses := pref.classes
-	pref.classes = map[string]classPref{recoveryClass: {Members: []classMemberPref{m}}}
-	pref.mu.Unlock()
-	t.Cleanup(func() { pref.mu.Lock(); pref.classes = oldClasses; pref.mu.Unlock() })
+	lan.pref.mu.Lock()
+	oldClasses := lan.pref.classes
+	lan.pref.classes = map[string]classPref{recoveryClass: {Members: []classMemberPref{m}}}
+	lan.pref.mu.Unlock()
+	t.Cleanup(func() { lan.pref.mu.Lock(); lan.pref.classes = oldClasses; lan.pref.mu.Unlock() })
 	halfOpenK(t, h, c, m.ID)
-	return &recoveryRunner{transport: &failoverTransport{base: srv.Client().Transport}, deadline: time.Second}, c, m.ID
+	return &recoveryRunner{tenant: lan, transport: &failoverTransport{base: srv.Client().Transport}, deadline: time.Second}, c, m.ID
 }
 
 func TestRecoveryBackgroundClosesWithoutCustomerTraffic(t *testing.T) {
@@ -48,15 +48,15 @@ func TestRecoveryBackgroundClosesWithoutCustomerTraffic(t *testing.T) {
 		io.WriteString(w, `{"type":"message","stop_reason":"end_turn","content":[{"type":"text","text":"OK"}]}`)
 	})
 	r.pass(context.Background())
-	mustState(t, health, key, hsHalfOpen)
+	mustState(t, lan.health, key, hsHalfOpen)
 	r.pass(context.Background())
 	if calls.Load() != 1 {
 		t.Fatal("rate limit failed")
 	}
 	c.advance(time.Minute)
 	r.pass(context.Background())
-	mustState(t, health, key, hsConvalescent)
-	if calls.Load() != 2 || r.totals["ok"] != 2 || snap(t, health, key).probeID != "" {
+	mustState(t, lan.health, key, hsConvalescent)
+	if calls.Load() != 2 || r.totals["ok"] != 2 || snap(t, lan.health, key).probeID != "" {
 		t.Fatal("probe accounting/settlement failed")
 	}
 }
@@ -76,7 +76,7 @@ func TestRecoveryDeadlineIncludesStreamingBodyAndDoesNotFallback(t *testing.T) {
 	start := time.Now()
 	go func() { r.pass(context.Background()); close(done) }()
 	<-entered
-	if health.claimProbe(key, recoveryClass, key, "customer", 1) != nil {
+	if lan.health.claimProbe(key, recoveryClass, key, "customer", 1) != nil {
 		t.Fatal("background lease did not exclude customer probe")
 	}
 	r.pass(context.Background())
@@ -84,8 +84,8 @@ func TestRecoveryDeadlineIncludesStreamingBodyAndDoesNotFallback(t *testing.T) {
 	if time.Since(start) > time.Second || calls.Load() != 1 || r.totals["deadline"] != 1 {
 		t.Fatalf("unbounded or repeated attempt: %+v", r.snapshot())
 	}
-	mustState(t, health, key, hsOpen)
-	if snap(t, health, key).probeID != "" {
+	mustState(t, lan.health, key, hsOpen)
+	if snap(t, lan.health, key).probeID != "" {
 		t.Fatal("leaked probe lease")
 	}
 }
@@ -117,11 +117,11 @@ func TestRecoveryGatesAndInvalidResults(t *testing.T) {
 				if calls.Load() != 0 {
 					t.Fatal("outbound probe in disabled mode")
 				}
-			} else if calls.Load() != 1 || r.totals[tc.result] != 1 || snap(t, health, key).probeID != "" {
+			} else if calls.Load() != 1 || r.totals[tc.result] != 1 || snap(t, lan.health, key).probeID != "" {
 				t.Fatalf("bad outcome: %+v", r.snapshot())
 			}
 			if tc.result != "degraded" {
-				mustState(t, health, key, hsHalfOpen)
+				mustState(t, lan.health, key, hsHalfOpen)
 			}
 		})
 	}
@@ -135,8 +135,8 @@ func TestRecoveryCancellationAbandonsLease(t *testing.T) {
 		<-req.Context().Done()
 	})
 	r.pass(ctx)
-	mustState(t, health, key, hsHalfOpen)
-	if r.totals["abandoned"] != 1 || snap(t, health, key).probeID != "" {
+	mustState(t, lan.health, key, hsHalfOpen)
+	if r.totals["abandoned"] != 1 || snap(t, lan.health, key).probeID != "" {
 		t.Fatal("cancellation scored or leaked lease")
 	}
 }
@@ -154,27 +154,27 @@ func TestRecoveryProbesOnlyAnIncludedCheck(t *testing.T) {
 	}{
 		{"included", func(string, time.Time) {}, true, checkIncluded},
 		{"included-over-hard", func(key string, _ time.Time) {
-			pref.mu.Lock()
-			m := pref.classes[recoveryClass].Members[0]
+			lan.pref.mu.Lock()
+			m := lan.pref.classes[recoveryClass].Members[0]
 			m.Effective = ptr(100)
-			pref.classes[recoveryClass] = classPref{Members: []classMemberPref{m}}
-			pref.mu.Unlock()
+			lan.pref.classes[recoveryClass] = classPref{Members: []classMemberPref{m}}
+			lan.pref.mu.Unlock()
 		}, true, checkIncluded},
 		{"paid", func(key string, now time.Time) {
 			acct := uAccount(key)
-			pref.mu.Lock()
-			r := pref.routes["u/"+key]
+			lan.pref.mu.Lock()
+			r := lan.pref.routes["u/"+key]
 			r.Pay = []string{acct + "/credits"}
-			pref.routes["u/"+key] = r
-			pref.accounts[acct] = standingAt("anthropic", now, map[string]checkWindow{
+			lan.pref.routes["u/"+key] = r
+			lan.pref.accounts[acct] = standingAt("anthropic", now, map[string]checkWindow{
 				"seven_day": week(100, now.Add(48*time.Hour))}, "open")
-			pref.mu.Unlock()
+			lan.pref.mu.Unlock()
 		}, false, checkPaid},
 		{"no-pay", func(key string, now time.Time) {
-			pref.mu.Lock()
-			pref.accounts[uAccount(key)] = standingAt("anthropic", now, map[string]checkWindow{
+			lan.pref.mu.Lock()
+			lan.pref.accounts[uAccount(key)] = standingAt("anthropic", now, map[string]checkWindow{
 				"seven_day": week(100, now.Add(48*time.Hour))}, "open")
-			pref.mu.Unlock()
+			lan.pref.mu.Unlock()
 		}, false, checkNo},
 		{"spent-record", func(key string, _ time.Time) {
 			seedSpent(uAccount(key), "seven_day", 429, "usage_limit_reached", time.Time{})
@@ -188,10 +188,10 @@ func TestRecoveryProbesOnlyAnIncludedCheck(t *testing.T) {
 				io.WriteString(w, `{"type":"message","stop_reason":"end_turn","content":[{"type":"text","text":"OK"}]}`)
 			})
 			tc.set(key, nowFn())
-			pref.mu.RLock()
-			m := pref.classes[recoveryClass].Members[0]
-			pref.mu.RUnlock()
-			c, _ := routeCheck(m.Route, uAccount(key), m.Model, nowFn())
+			lan.pref.mu.RLock()
+			m := lan.pref.classes[recoveryClass].Members[0]
+			lan.pref.mu.RUnlock()
+			c, _ := lan.routeCheck(m.Route, uAccount(key), m.Model, nowFn())
 			if c.Check != tc.check {
 				t.Fatalf("fixture: check %s, want %s", c, tc.check)
 			}
@@ -214,15 +214,15 @@ func TestRecoveryProbeUsesTheDialTimeCheck(t *testing.T) {
 		io.WriteString(w, `{"type":"message","stop_reason":"end_turn","content":[{"type":"text","text":"OK"}]}`)
 	})
 	acct, now := uAccount(key), nowFn()
-	pref.mu.Lock()
-	rt := pref.routes["u/"+key]
+	lan.pref.mu.Lock()
+	rt := lan.pref.routes["u/"+key]
 	rt.Pay = []string{acct + "/credits"}
-	pref.routes["u/"+key] = rt
-	pref.accounts[acct] = standingAt("anthropic", now, map[string]checkWindow{
+	lan.pref.routes["u/"+key] = rt
+	lan.pref.accounts[acct] = standingAt("anthropic", now, map[string]checkWindow{
 		"seven_day": week(100, now.Add(48*time.Hour))}, "open")
-	m := pref.classes[recoveryClass].Members[0]
-	pref.mu.Unlock()
-	if c, _ := routeCheck(m.Route, acct, m.Model, now); !c.paid() {
+	m := lan.pref.classes[recoveryClass].Members[0]
+	lan.pref.mu.Unlock()
+	if c, _ := lan.routeCheck(m.Route, acct, m.Model, now); !c.paid() {
 		t.Fatalf("fixture: check %s, want paid", c)
 	}
 	if _, result := r.probe(context.Background(), m); result != "unavailable" || calls.Load() != 0 {

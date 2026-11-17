@@ -11,12 +11,25 @@ package main
 // account whose kind has no actuator is never dialled: the route fails loud
 // with a typed 503 naming the kind (writeNoActuator), never the client's
 // ambient login.
+//
+// The credential boundary is per tenant (MEMBERS-PLAN 1b): actuatorFor(tenant,
+// account) is the one gate every token, key and door-client path goes
+// through, and it refuses an account the tenant's own document does not list
+// (errNotTenantAccount, a typed 503 at the request: writeNotTenantAccount).
+// Nothing below it can draw on another tenant's subscription, whatever named
+// the account.
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 )
+
+// errNotTenantAccount is actuatorFor's refusal of an account the tenant's
+// document does not list.
+var errNotTenantAccount = errors.New("not one of the tenant's accounts")
 
 // The kinds an account's standing names (the brain's _account_kind).
 // subscriptionKind is also what an account is before any standing says
@@ -29,22 +42,23 @@ const (
 
 // actuator is one kind's credential handling.
 type actuator struct {
-	// credential is a usable credential for account, "" when none can be had
-	// (the caller tries the route's next account, then FAILs loud).
-	credential func(account string) string
+	// credential is a usable credential for the tenant's account, "" when
+	// none can be had (the caller tries the route's next account, then FAILs
+	// loud). Only reached through actuatorFor, so account is the tenant's.
+	credential func(tn *tenant, account string) string
 	// sign puts cred on an outbound Anthropic request's headers.
 	sign func(h http.Header, cred string)
 	// signed is the credential h carries in this kind's header, "" for none.
 	signed func(h http.Header) string
-	// accountOf maps a credential this actuator handed out back to its
-	// account, "" when it is not one of ours.
-	accountOf func(cred string) string
+	// accountOf maps a credential this actuator handed out for the tenant
+	// back to its account, "" when it is not one of the tenant's.
+	accountOf func(tn *tenant, cred string) string
 	// refused answers the upstream's 401 on an account's credential; nil
 	// returns the 401 as it came.
 	refused func(t *failoverTransport, req *http.Request, resp *http.Response) (*http.Response, error)
-	// warm is told the accounts of this kind the brain's last document routes
-	// to, every time a document is applied (nil: nothing to warm).
-	warm func(accounts map[string]bool)
+	// warm is told the accounts of this kind the tenant's last document
+	// routes to, every time a document is applied (nil: nothing to warm).
+	warm func(tn *tenant, accounts map[string]bool)
 }
 
 // actuators is the actuator of each account kind: core's api, and whatever an
@@ -56,8 +70,8 @@ func init() { actuators[apiKind] = apiActuator }
 // apiActuator signs with the account's static key, dispensed by the brain's
 // GET /api-key?account=<id> (apikey.go): x-api-key, and no Authorization.
 var apiActuator = &actuator{
-	credential: func(account string) string {
-		key, err := getAPIKey(nil, account)
+	credential: func(tn *tenant, account string) string {
+		key, err := tn.getAPIKey(nil, account)
 		if err != nil {
 			return ""
 		}
@@ -73,7 +87,7 @@ var apiActuator = &actuator{
 		// A key the upstream refused is forgotten, so the next dial asks the
 		// brain again (a rotation is adopted at once). This hop's 401 stands.
 		if d, ok := anthDialOf(req); ok {
-			dropAPIKey(d.acct)
+			d.tenant.dropAPIKey(d.acct)
 		}
 		return resp, nil
 	},
@@ -101,29 +115,50 @@ func dropOAuthBetas(h http.Header) {
 	}
 }
 
-// accountKind is the account's kind as the brain's standing names it.
-func accountKind(account string) string {
-	pref.mu.RLock()
-	st, ok := pref.accounts[account]
-	pref.mu.RUnlock()
-	if ok && st.Kind != "" {
-		return st.Kind
+// accountKind is the account's kind as the tenant's standing names it, and
+// whether the tenant's document lists the account at all.
+func (tn *tenant) accountKind(account string) (kind string, listed bool) {
+	tn.pref.mu.RLock()
+	st, ok := tn.pref.accounts[account]
+	tn.pref.mu.RUnlock()
+	if !ok {
+		return subscriptionKind, false
 	}
-	return subscriptionKind
+	if st.Kind != "" {
+		return st.Kind, true
+	}
+	return subscriptionKind, true
 }
 
-// actuatorFor is the account's actuator, nil when its kind has none here, and
-// the kind.
-func actuatorFor(account string) (*actuator, string) {
-	kind := accountKind(account)
-	return actuators[kind], kind
+// actuatorFor is the tenant's account's actuator, nil when its kind has none
+// here, and the kind. The one credential boundary: an account the tenant's
+// document does not list is refused with errNotTenantAccount, and nothing is
+// fetched, signed or dialled for it. A nil tenant has no accounts.
+func (tn *tenant) actuatorFor(account string) (*actuator, string, error) {
+	if tn == nil {
+		return nil, "", fmt.Errorf("account %s for no tenant: %w", account, errNotTenantAccount)
+	}
+	if strings.HasPrefix(account, "manual:") {
+		// The operator's inject file (SWITCH_INJECT_TOKEN_FILE): a subscription
+		// bearer the operator put on this host, not a document's account. The
+		// household's alone; no member's request signs with it.
+		if !tn.lan {
+			return nil, "", fmt.Errorf("account %s is the operator's inject file, not tenant %s's: %w", account, tn.id, errNotTenantAccount)
+		}
+		return actuators[subscriptionKind], subscriptionKind, nil
+	}
+	kind, listed := tn.accountKind(account)
+	if !listed {
+		return nil, "", fmt.Errorf("account %s is not tenant %s's: %w", account, tn.id, errNotTenantAccount)
+	}
+	return actuators[kind], kind, nil
 }
 
-// credentialFor is a usable credential for account, "" when none can be had
-// or its kind has no actuator.
-func credentialFor(account string) string {
-	if a, _ := actuatorFor(account); a != nil {
-		return a.credential(account)
+// credentialFor is a usable credential for the tenant's account, "" when none
+// can be had, its kind has no actuator or it is not the tenant's.
+func (tn *tenant) credentialFor(account string) string {
+	if a, _, err := tn.actuatorFor(account); err == nil && a != nil {
+		return a.credential(tn, account)
 	}
 	return ""
 }
@@ -131,10 +166,11 @@ func credentialFor(account string) string {
 // signAccount puts account's credential cred on h, by the account's kind,
 // after clearing every credential h carried (strip, then sign): a hop cloned
 // from another account's, or from the client's request, carries only its
-// own account's. A kind with no actuator leaves h with none.
-func signAccount(h http.Header, account, cred string) {
+// own account's. A kind with no actuator, or an account not the tenant's,
+// leaves h with none.
+func (tn *tenant) signAccount(h http.Header, account, cred string) {
 	stripCredentials(h)
-	if a, _ := actuatorFor(account); a != nil {
+	if a, _, err := tn.actuatorFor(account); err == nil && a != nil {
 		a.sign(h, cred)
 	}
 }
@@ -146,33 +182,33 @@ func stripCredentials(h http.Header) {
 }
 
 // signedCredential is the credential h carries for account's kind, "" for none.
-func signedCredential(h http.Header, account string) string {
-	if a, _ := actuatorFor(account); a != nil {
+func (tn *tenant) signedCredential(h http.Header, account string) string {
+	if a, _, err := tn.actuatorFor(account); err == nil && a != nil {
 		return a.signed(h)
 	}
 	return ""
 }
 
-// accountOfCredential maps a credential back to the account it was handed
-// out for, by any actuator; "" when it is not one of ours.
-func accountOfCredential(cred string) string {
+// accountOfCredential maps a credential back to the tenant's account it was
+// handed out for, by any actuator; "" when it is not one of the tenant's.
+func (tn *tenant) accountOfCredential(cred string) string {
 	if cred = strings.TrimSpace(cred); cred == "" {
 		return ""
 	}
 	for _, a := range actuators {
-		if acct := a.accountOf(cred); acct != "" {
+		if acct := a.accountOf(tn, cred); acct != "" {
 			return acct
 		}
 	}
 	return ""
 }
 
-// accountOfHop is the account whose credential an outbound Anthropic hop
-// carries, "" when none of ours.
-func accountOfHop(h http.Header) string {
+// accountOfHop is the tenant's account whose credential an outbound Anthropic
+// hop carries, "" when none of the tenant's.
+func (tn *tenant) accountOfHop(h http.Header) string {
 	for _, a := range actuators {
 		if c := strings.TrimSpace(a.signed(h)); c != "" {
-			if acct := a.accountOf(c); acct != "" {
+			if acct := a.accountOf(tn, c); acct != "" {
 				return acct
 			}
 		}
@@ -180,12 +216,12 @@ func accountOfHop(h http.Header) string {
 	return ""
 }
 
-// warmAccounts hands each actuator the routed accounts of its kind (an empty
-// set included: a warm set that emptied must stop what it armed).
-func warmAccounts(warm map[string]bool) {
+// warmAccounts hands each actuator the tenant's routed accounts of its kind
+// (an empty set included: a warm set that emptied must stop what it armed).
+func (tn *tenant) warmAccounts(warm map[string]bool) {
 	byKind := map[string]map[string]bool{}
 	for a := range warm {
-		k := accountKind(a)
+		k, _ := tn.accountKind(a)
 		if byKind[k] == nil {
 			byKind[k] = map[string]bool{}
 		}
@@ -199,15 +235,15 @@ func warmAccounts(warm map[string]bool) {
 		if set == nil {
 			set = map[string]bool{}
 		}
-		a.warm(set)
+		a.warm(tn, set)
 	}
 }
 
-// apiKeyAccount maps a dispensed key back to its account.
-func apiKeyAccount(key string) string {
-	apiKeyMu.Lock()
-	defer apiKeyMu.Unlock()
-	for a, e := range apiKeys {
+// apiKeyAccount maps a dispensed key back to the tenant's account.
+func apiKeyAccount(tn *tenant, key string) string {
+	tn.apiKeyMu.Lock()
+	defer tn.apiKeyMu.Unlock()
+	for a, e := range tn.apiKeys {
 		if e.val != "" && e.val == key {
 			return a
 		}
@@ -220,6 +256,23 @@ func apiKeyAccount(key string) string {
 func writeNoActuator(w http.ResponseWriter, eff, kind string) {
 	msg := product + ": account " + eff + " is of kind " + kind +
 		", which this build has no actuator for — refusing to forward your ambient login. Check the brain: curl " + statusHint()
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"type":  "error",
+		"error": map[string]any{"type": "api_error", "message": msg},
+	})
+}
+
+// writeNotTenantAccount answers a request that named an account the tenant's
+// document does not list: HTTP 503 in the Anthropic error envelope, naming
+// the account and the tenant. Nothing was fetched for it.
+func writeNotTenantAccount(w http.ResponseWriter, tn *tenant, account string) {
+	id := "no tenant"
+	if tn != nil {
+		id = "tenant " + tn.id
+	}
+	msg := product + ": account " + account + " is not " + id + "'s — refusing to draw on it. Check the brain: curl " + statusHint()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_ = json.NewEncoder(w).Encode(map[string]any{

@@ -6,9 +6,10 @@
 # It builds both images from this checkout, runs init, brings the stack up with
 # docker-compose.smoke.yml (a stub Anthropic API in the compose network) and checks:
 #   1. init refuses a second run;
-#   2. the proxy's /_switch/healthz and the brain's /preferred answer;
+#   2. the proxy's /_switch/healthz and the brain's /t/<tenant>/preferred answer, the tenant the
+#      one init wrote to /creds/tenants.json;
 #   3. GET /v1/models without the client secret is refused, and with it lists the three classes;
-#   4. an anthropic-api key enrolled on the brain's /auth flow serves a claude-fast request: 200,
+#   4. an anthropic-api key enrolled on the brain's /t/<tenant>/auth flow serves a claude-fast request: 200,
 #      and the stub saw that key as x-api-key and no Authorization header;
 #   5. neither image holds a household path.
 # Nothing reaches the Anthropic API or any network beyond the compose one. Containers, volumes,
@@ -65,10 +66,15 @@ step "up -d"
 SECRET=$("${DC[@]}" exec -T brain cat /creds/client_secret)
 SWITCH_KEY=$("${DC[@]}" exec -T brain cat /creds/switch_key)
 [ "${#SECRET}" -eq 64 ] && [ "${#SWITCH_KEY}" -eq 64 ] || fail "init's secrets are not 32 bytes of hex"
+TENANT=$("${DC[@]}" exec -T brain cat /creds/tenants.json | json 'd[0]["tenant"]')
+[ "${#TENANT}" -eq 30 ] || fail "init's tenants.json names no tenant"
+BRAIN_T="$BRAIN/t/$TENANT"
 
 step "the proxy's healthz and the brain answer"
 wait_for "proxy /_switch/healthz" curl -fsS "$PROXY/_switch/healthz"
-wait_for "brain /preferred" curl -fsS "$BRAIN/preferred"
+wait_for "brain /t/<tenant>/preferred" curl -fsS "$BRAIN_T/preferred"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BRAIN/preferred")
+[ "$code" = 404 ] || fail "the brain's bare /preferred answered $code, not 404: a route without a tenant is refused"
 
 step "GET /v1/models: refused without the client secret, the three classes with it"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$PROXY/v1/models")
@@ -80,13 +86,16 @@ models_ok() {
 }
 wait_for "the three classes in /v1/models" models_ok
 
-step "enrol a made-up anthropic-api key on /auth"
+step "enrol a made-up anthropic-api key on /t/<tenant>/auth"
 state=$(curl -fsS -X POST -H "X-Switch-Key: $SWITCH_KEY" -H 'Content-Type: application/json' \
-	-d '{}' "$BRAIN/auth/anthropic-api/begin" | json 'd["state"]')
+	-d '{}' "$BRAIN_T/auth/anthropic-api/begin" | json 'd["state"]')
 curl -fsS -X POST -H "X-Switch-Key: $SWITCH_KEY" -H 'Content-Type: application/json' \
 	-d "{\"state\": \"$state\", \"name\": \"$KEY_NAME\", \"api_key\": \"$API_KEY\"}" \
-	"$BRAIN/auth/anthropic-api/complete" | json 'd["enrolled"]' | grep -qx True ||
+	"$BRAIN_T/auth/anthropic-api/complete" | json 'd["enrolled"]' | grep -qx True ||
 	fail "the brain did not enrol the key"
+# ...and it landed sealed: the file opens only through the brain's store.
+"${DC[@]}" exec -T brain head -c 16 "/creds/$TENANT/anthropic-api.json" | grep -q 'switch-sealed/1' ||
+	fail "the enrolled key was not written sealed"
 
 step "a claude-fast request through the proxy reaches the stub with that key"
 message() {

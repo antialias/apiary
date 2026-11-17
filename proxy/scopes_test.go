@@ -93,9 +93,9 @@ func aliasedAccounts(windows map[string]map[string]*windowAliases) map[string]ac
 // brain's poll of it publishes them; nil takes them off (a brain that knows
 // none).
 func setFableAliases(al *windowAliases) {
-	pref.mu.Lock()
-	defer pref.mu.Unlock()
-	for _, st := range pref.accounts {
+	lan.pref.mu.Lock()
+	defer lan.pref.mu.Unlock()
+	for _, st := range lan.pref.accounts {
 		if w, ok := st.Allowance.Windows["scoped:Fable"]; ok {
 			w.Aliases = al
 			st.Allowance.Windows["scoped:Fable"] = w
@@ -117,7 +117,7 @@ func fableWorld(t *testing.T, pct float64, reset, polled time.Time) {
 
 // laneCheck is account a's check on a bare lane.
 func laneCheck(lane string, at time.Time) dialCheck {
-	c, _ := routeCheck("lane:"+lane, "a", "", at)
+	c, _ := lan.routeCheck("lane:"+lane, "a", "", at)
 	return c
 }
 
@@ -176,7 +176,7 @@ func TestCapturedFable429MapsToFableScope(t *testing.T) {
 func recordAnthropic429(account, model string, h http.Header) (kind, what string) {
 	resp := &http.Response{StatusCode: http.StatusTooManyRequests, Header: h,
 		Body: io.NopCloser(strings.NewReader(`{"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}`))}
-	return recordRefusal(account, anthropicRefusal(resp, model, nowFn()), resp)
+	return lan.recordRefusal(account, lan.anthropicRefusal(resp, model, nowFn()), resp)
 }
 
 // A Fable 429 records on the Fable scope only (§2.6, A-D1, A-D2): the fable
@@ -201,7 +201,7 @@ func TestScopedFable429RecordsOnFableOnly(t *testing.T) {
 	if !c.no() || c.Reason != "spent" || !c.Until.Time().Equal(reset) {
 		t.Fatalf("fable on a = %s, want no(spent) until the 7d_oi reset", c)
 	}
-	u := laneUnavailable("fable", "", now)
+	u := lan.laneUnavailable("fable", "", now)
 	if m := u.message("lane fable", now); !strings.Contains(m, "a spent (Fable) until "+fmtAvail(reset, now)) {
 		t.Errorf("message = %q", m)
 	}
@@ -232,11 +232,11 @@ func TestRejectedResetIsExplicitQuotaRecord(t *testing.T) {
 	if c := laneCheck("opus", now); !c.included() {
 		t.Fatalf("opus = %s, want included", c)
 	}
-	pref.mu.Lock()
-	pref.routes["frontier/lane:fable"] = fableMemberRoute()
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	lan.pref.routes["frontier/lane:fable"] = fableMemberRoute()
+	lan.pref.mu.Unlock()
 	fable := classMemberPref{ID: "lane:fable", Kind: "anthropic", Lane: "fable", Model: "claude-fable-5", Route: "frontier/lane:fable"}
-	u := classUnavailable([]classMemberPref{fable}, classReq{}, now)
+	u := lan.classUnavailable([]classMemberPref{fable}, classReq{}, now)
 	if u == nil || len(u.Members) != 1 {
 		t.Fatalf("classUnavailable = %+v, want lane:fable unavailable", u)
 	}
@@ -250,13 +250,13 @@ func TestRejectedResetIsExplicitQuotaRecord(t *testing.T) {
 	}
 
 	// A sibling account that serves means the member is not spent.
-	pref.mu.Lock()
-	pref.accounts["b"] = standingAt("anthropic", now, map[string]checkWindow{"seven_day": week(10, reset)}, "")
-	r := pref.routes["frontier/lane:fable"]
+	lan.pref.mu.Lock()
+	lan.pref.accounts["b"] = standingAt("anthropic", now, map[string]checkWindow{"seven_day": week(10, reset)}, "")
+	r := lan.pref.routes["frontier/lane:fable"]
 	r.Accounts = []string{"a", "b"}
-	pref.routes["frontier/lane:fable"] = r
-	pref.mu.Unlock()
-	if u := classUnavailable([]classMemberPref{fable}, classReq{}, now); u != nil {
+	lan.pref.routes["frontier/lane:fable"] = r
+	lan.pref.mu.Unlock()
+	if u := lan.classUnavailable([]classMemberPref{fable}, classReq{}, now); u != nil {
 		t.Fatal("lane:fable read unavailable while account b serves it")
 	}
 }
@@ -303,7 +303,7 @@ func TestOverageOnly429IsAThrottle(t *testing.T) {
 	if c := laneCheck("fable", now); !c.included() {
 		t.Fatalf("fable = %s, want included: a throttle never makes the check no", c)
 	}
-	if throttledUntil("a", now).IsZero() {
+	if lan.throttledUntil("a", now).IsZero() {
 		t.Fatal("fable's account a is not throttled")
 	}
 }
@@ -323,7 +323,7 @@ func TestUnknownScopedTokenStaysUnmapped(t *testing.T) {
 		"anthropic-ratelimit-unified-representative-claim", "seven_day_opus",
 		"anthropic-ratelimit-unified-7d_opus-status", "rejected",
 		"anthropic-ratelimit-unified-7d_opus-reset", strconv.FormatInt(reset.Unix(), 10))
-	o, _ := parseUnifiedRL(h, now, currentScopes())
+	o, _ := parseUnifiedRL(h, now, lan.currentScopes())
 	if len(o.windows) != 1 || o.windows[0].name != "unmapped:7d_opus" || o.claimName != "unmapped:seven_day_opus" {
 		t.Fatalf("o = %+v, want 7d_opus and seven_day_opus unmapped", o)
 	}
@@ -333,21 +333,21 @@ func TestUnknownScopedTokenStaysUnmapped(t *testing.T) {
 	if kind, what := recordAnthropic429("a", "claude-opus-5", h); kind != recSpent || what != "model:claude-opus-5" {
 		t.Fatalf("recorded %s %s, want the model record", kind, what)
 	}
-	if c, held := routeCheck("lane:opus", "a", "claude-opus-5", now); !c.no() || !held {
+	if c, held := lan.routeCheck("lane:opus", "a", "claude-opus-5", now); !c.no() || !held {
 		t.Fatalf("opus/claude-opus-5 = %s held=%v, want no, held by the unattributed record alone", c, held)
 	}
 	for _, l := range []string{"opus", "fable", "sonnet", "default"} {
-		if c, _ := routeCheck("lane:"+l, "a", "claude-sonnet-5", now); !c.included() {
+		if c, _ := lan.routeCheck("lane:"+l, "a", "claude-sonnet-5", now); !c.included() {
 			t.Errorf("%s with another model = %s, want included", l, c)
 		}
 	}
 	// The poll's scoped:Opus at 100 % binds opus by the lane's scope, and
 	// only opus.
-	pref.mu.Lock()
-	st := pref.accounts["a"]
+	lan.pref.mu.Lock()
+	st := lan.pref.accounts["a"]
 	st.Allowance.Windows["scoped:Opus"] = scoped("Opus", 100, reset)
-	pref.accounts["a"] = st
-	pref.mu.Unlock()
+	lan.pref.accounts["a"] = st
+	lan.pref.mu.Unlock()
 	if c := laneCheck("opus", now); !c.no() {
 		t.Fatalf("opus = %s, want no on the poll's scoped:Opus", c)
 	}
@@ -365,7 +365,7 @@ func TestProxyWithoutBrainAliases(t *testing.T) {
 	reset := now.Add(28 * time.Hour)
 	fableWorld(t, 100, reset, now.Add(-time.Minute))
 	setFableAliases(nil)
-	sm := currentScopes()
+	sm := lan.currentScopes()
 	if len(sm.header) != 0 || len(sm.claim) != 0 || sm.lane["fable"] != "scoped:Fable" {
 		t.Fatalf("scopes = %+v, want the lane join and no aliases", sm)
 	}
@@ -452,11 +452,11 @@ func TestPollAt100IsSpent(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	reset := now.Add(28 * time.Hour)
 	fableWorld(t, 100, reset, now.Add(-time.Minute))
-	pref.mu.Lock()
-	pref.routes["frontier/lane:fable"] = fableMemberRoute()
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	lan.pref.routes["frontier/lane:fable"] = fableMemberRoute()
+	lan.pref.mu.Unlock()
 	fable := classMemberPref{ID: "lane:fable", Kind: "anthropic", Lane: "fable", Model: "m", Route: "frontier/lane:fable"}
-	u := classUnavailable([]classMemberPref{fable}, classReq{}, now)
+	u := lan.classUnavailable([]classMemberPref{fable}, classReq{}, now)
 	if u == nil || !u.timed() || *u.AvailableAt != unixSeconds(reset) {
 		t.Fatalf("classUnavailable = %+v, want lane:fable unavailable on its check until the reset", u)
 	}

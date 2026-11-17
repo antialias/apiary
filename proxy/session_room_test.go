@@ -39,22 +39,22 @@ func sfBrainDoc(t *testing.T, edit func(p map[string]any)) (load func(edit func(
 		}
 		set(p)
 		fetchPreferred()
-		pref.mu.RLock()
-		ok := pref.ok
-		pref.mu.RUnlock()
+		lan.pref.mu.RLock()
+		ok := lan.pref.ok
+		lan.pref.mu.RUnlock()
 		if !ok {
 			t.Fatal("the brain's document did not decode")
 		}
 	}
 	load(edit)
-	sessFactsMu.Lock()
-	oldFacts := sessFacts
-	sessFacts = map[string]sessionFact{}
-	sessFactsMu.Unlock()
+	lan.sessFactsMu.Lock()
+	oldFacts := lan.sessFacts
+	lan.sessFacts = map[string]sessionFact{}
+	lan.sessFactsMu.Unlock()
 	t.Cleanup(func() {
-		sessFactsMu.Lock()
-		sessFacts = oldFacts
-		sessFactsMu.Unlock()
+		lan.sessFactsMu.Lock()
+		lan.sessFacts = oldFacts
+		lan.sessFactsMu.Unlock()
 	})
 	return load, setNow
 }
@@ -182,9 +182,9 @@ func TestSessionFactsRoomUnreadableFleetStillApplies(t *testing.T) {
 				p["account"] = "after-probe"
 				probe(p)
 			})
-			pref.mu.RLock()
-			ok, account, routes, ledger, fleet := pref.ok, pref.account, len(pref.routes), pref.ledger, pref.fleet
-			pref.mu.RUnlock()
+			lan.pref.mu.RLock()
+			ok, account, routes, ledger, fleet := lan.pref.ok, lan.pref.account, len(lan.pref.routes), lan.pref.ledger, lan.pref.fleet
+			lan.pref.mu.RUnlock()
 			if !ok || account != "after-probe" || routes == 0 || ledger == nil {
 				t.Fatalf("routing state not applied: ok=%v account=%q routes=%d ledger=%v", ok, account, routes, ledger)
 			}
@@ -244,7 +244,7 @@ func TestSessionFactsRoomStampIsTheAppliedDocuments(t *testing.T) {
 	})
 	stamp := func() (heard, room string) {
 		t.Helper()
-		r, _, _ := roomFor("frontier")
+		r, _, _ := lan.roomFor("frontier")
 		if r == nil || r.HeardAt == nil {
 			t.Fatalf("room = %+v", r)
 		}
@@ -267,12 +267,12 @@ func TestSessionFactsRoomStampIsTheAppliedDocuments(t *testing.T) {
 	waitUntil(t, "the rejected document", func() bool { ok, _, _ := prefState(); return !ok })
 	// The view is not ok, so no figure is served (68 §4.5); what is held is
 	// still the last good document's, with its stamp.
-	if r, _, _ := roomFor("frontier"); r != nil {
+	if r, _, _ := lan.roomFor("frontier"); r != nil {
 		t.Fatalf("room while the brain's view is not ok = %+v, want none", r)
 	}
-	pref.mu.RLock()
-	heldAt, held := pref.fleetAt, pref.fleet
-	pref.mu.RUnlock()
+	lan.pref.mu.RLock()
+	heldAt, held := lan.pref.fleetAt, lan.pref.fleet
+	lan.pref.mu.RUnlock()
 	if !heldAt.Equal(t1) || held == nil || string(held.Selections["frontier"].Room) == "999" {
 		t.Fatalf("after a rejected document the held figure is stamped %s, want the last good one at %s", heldAt, t1)
 	}
@@ -318,9 +318,9 @@ func sfE2ERoom(t *testing.T, base, id, model string) any {
 // sfAppliedAt is the stamp of the document the proxy applied last, as a reply
 // states it.
 func sfAppliedAt() string {
-	pref.mu.RLock()
-	defer pref.mu.RUnlock()
-	return isoTime(pref.fleetAt)
+	lan.pref.mu.RLock()
+	defer lan.pref.mu.RUnlock()
+	return isoTime(lan.pref.fleetAt)
 }
 
 // A class session, bare-lane sessions (a named lane and the default lane),
@@ -332,11 +332,11 @@ func TestE2ESessionFactsRoomThroughTheServePath(t *testing.T) {
 	h.fleet = sfE2EFleet()
 	h.brainMu.Unlock()
 	fetchPreferredSync()
-	sessFactsMu.Lock()
-	oldFacts := sessFacts
-	sessFacts = map[string]sessionFact{}
-	sessFactsMu.Unlock()
-	t.Cleanup(func() { sessFactsMu.Lock(); sessFacts = oldFacts; sessFactsMu.Unlock() })
+	lan.sessFactsMu.Lock()
+	oldFacts := lan.sessFacts
+	lan.sessFacts = map[string]sessionFact{}
+	lan.sessFactsMu.Unlock()
+	t.Cleanup(func() { lan.sessFactsMu.Lock(); lan.sessFacts = oldFacts; lan.sessFactsMu.Unlock() })
 
 	for _, c := range []struct{ session, model string }{
 		{"sess-room-class", "claude-frontier"},

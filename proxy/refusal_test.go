@@ -160,7 +160,7 @@ func TestRefusalClassesFromRecordedResponses(t *testing.T) {
 		{"kimi 500", memKimi, 500, nil, ``, refDegraded, "", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			r := rungRefusal(c.m, hResp(c.status, c.hdr, c.body))
+			r := lan.rungRefusal(c.m, hResp(c.status, c.hdr, c.body))
 			if r.class != c.class || refLimits(r) != c.limits || r.walks() != c.walks {
 				t.Fatalf("got class %q limits %q walks %v, want %q %q %v", r.class, refLimits(r), r.walks(), c.class, c.limits, c.walks)
 			}
@@ -171,17 +171,17 @@ func TestRefusalClassesFromRecordedResponses(t *testing.T) {
 	}
 	// An invalid refusal carries the upstream's own code and words, for the
 	// client; a refusal that sent no code carries none.
-	if r := rungRefusal(memGpt, hResp(400, nil, codexInvalid400)); r.code != "invalid_value" ||
+	if r := lan.rungRefusal(memGpt, hResp(400, nil, codexInvalid400)); r.code != "invalid_value" ||
 		!strings.HasPrefix(r.detail, "Invalid size '7x7'") {
 		t.Fatalf("codex invalid 400: code %q detail %q", r.code, r.detail)
 	}
-	if r := rungRefusal(memGpt, hResp(400, nil, `{"error":{"message":"bad"}}`)); r.code != "" {
+	if r := lan.rungRefusal(memGpt, hResp(400, nil, `{"error":{"message":"bad"}}`)); r.code != "" {
 		t.Fatalf("a 400 with no code carries code %q", r.code)
 	}
 	// A model the plan no longer offers carries ChatGPT's own sentence, from
 	// either shape, so the record and the brain's ask say what refused.
 	for _, body := range []string{codexModelNotOffered400, codexModelNotOfferedDetail400} {
-		if r := rungRefusal(memGpt, hResp(400, nil, body)); !strings.HasPrefix(r.detail, "The 'gpt-6.1-sol' model is not supported") {
+		if r := lan.rungRefusal(memGpt, hResp(400, nil, body)); !strings.HasPrefix(r.detail, "The 'gpt-6.1-sol' model is not supported") {
 			t.Fatalf("model-not-offered detail %q from %s", r.detail, body)
 		}
 	}
@@ -192,7 +192,7 @@ func TestRefusalClassesFromRecordedResponses(t *testing.T) {
 	}
 	// A 2xx is no refusal, and its body is never read.
 	ok := hResp(200, nil, `{"stream":"untouched"}`)
-	if r := rungRefusal(memGpt, ok); r.class != "" || r.body != nil {
+	if r := lan.rungRefusal(memGpt, ok); r.class != "" || r.body != nil {
 		t.Fatalf("a 200 classified as %+v", r)
 	}
 }
@@ -203,15 +203,15 @@ func TestRefusalNamesItsReset(t *testing.T) {
 	withTestProviders(t)
 	now := time.Date(2026, 10, 29, 21, 0, 0, 0, time.UTC)
 	freezeQuotaLedger(t, now)
-	r := rungRefusal(memGpt, hResp(429, nil, codexS9))
+	r := lan.rungRefusal(memGpt, hResp(429, nil, codexS9))
 	if !r.limits[0].resets.Equal(time.Unix(codexS9At, 0)) {
 		t.Fatalf("codex S9 reset = %v, want resets_at", r.limits[0].resets)
 	}
-	r = rungRefusal(memKimi, hResp(429, map[string]string{"Retry-After": "600"}, kimiWeekly429))
+	r = lan.rungRefusal(memKimi, hResp(429, map[string]string{"Retry-After": "600"}, kimiWeekly429))
 	if !r.limits[0].resets.Equal(now.Add(10 * time.Minute)) {
 		t.Fatalf("kimi reset = %v, want Retry-After", r.limits[0].resets)
 	}
-	if r = rungRefusal(memKimi, hResp(403, nil, kimi403Cycle)); !r.limits[0].resets.IsZero() {
+	if r = lan.rungRefusal(memKimi, hResp(403, nil, kimi403Cycle)); !r.limits[0].resets.IsZero() {
 		t.Fatalf("the billing-cycle 403 names no reset (K7), got %v", r.limits[0].resets)
 	}
 	if !strings.Contains(r.detail, "billing cycle") {

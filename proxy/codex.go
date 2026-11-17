@@ -75,10 +75,7 @@ type codexTokEntry struct {
 	fetched time.Time
 }
 
-var (
-	codexTokMu sync.Mutex
-	codexToks  = map[string]codexTokEntry{}
-)
+// Per tenant: tenant.codexTokMu, tenant.codexToks.
 
 // codexTokenFresh is how long a dispensed bearer is used without re-confirming
 // with the brain. The bearer's own TTL is ~10 days; re-fetching every few
@@ -91,10 +88,10 @@ var codexTokenFresh = 5 * time.Minute
 // still unexpired (STALE), and ok=false only when there is nothing usable at
 // all. The returned pool name is the brain's own (response `name` key); an old
 // brain sends none and the requested name is echoed back so labels stay honest.
-func getCodexToken(account string) (string, string, string, bool) {
-	codexTokMu.Lock()
-	e, has := codexToks[account]
-	codexTokMu.Unlock()
+func (tn *tenant) getCodexToken(account string) (string, string, string, bool) {
+	tn.codexTokMu.Lock()
+	e, has := tn.codexToks[account]
+	tn.codexTokMu.Unlock()
 	now := time.Now()
 	if has && e.val != "" && now.Before(e.exp) && now.Sub(e.fetched) < codexTokenFresh {
 		return e.val, e.acct, e.name, true
@@ -105,10 +102,10 @@ func getCodexToken(account string) (string, string, string, bool) {
 		}
 		return "", "", "", false
 	}
-	if brainURL == "" {
+	if tn.brainURL() == "" {
 		return stale()
 	}
-	u := brainURL + "/openai-token"
+	u := tn.brainURL() + "/openai-token"
 	if account != "" {
 		u += "?account=" + url.QueryEscape(account)
 	}
@@ -129,10 +126,10 @@ func getCodexToken(account string) (string, string, string, bool) {
 				if name == "" {
 					name = account
 				}
-				codexTokMu.Lock()
-				codexToks[account] = codexTokEntry{val: d.AccessToken, acct: d.AccountID,
+				tn.codexTokMu.Lock()
+				tn.codexToks[account] = codexTokEntry{val: d.AccessToken, acct: d.AccountID,
 					name: name, exp: time.Unix(int64(d.ExpiresAt), 0), fetched: now}
-				codexTokMu.Unlock()
+				tn.codexTokMu.Unlock()
 				return d.AccessToken, d.AccountID, name, true
 			}
 		}
@@ -148,10 +145,10 @@ func getCodexToken(account string) (string, string, string, bool) {
 // dropCodexToken forgets one pool account's cached bearer (called on an
 // upstream 401 — the chain may have been revoked; the next request re-fetches
 // from the brain).
-func dropCodexToken(account string) {
-	codexTokMu.Lock()
-	delete(codexToks, account)
-	codexTokMu.Unlock()
+func (tn *tenant) dropCodexToken(account string) {
+	tn.codexTokMu.Lock()
+	delete(tn.codexToks, account)
+	tn.codexTokMu.Unlock()
 }
 
 // ---- Anthropic -> codex request translation ----

@@ -15,30 +15,30 @@ import (
 // entries and the reports' queue, returning the restore. Both are package globals: a prior test's standing or refusal must
 // not steer this one's routing.
 func resetQuotaState() func() {
-	pref.mu.Lock()
-	oa, or, op, oo, os, ol := pref.accounts, pref.routes, pref.pots, pref.payOrder, pref.staleMax, pref.ledger
-	pref.accounts, pref.routes, pref.pots, pref.payOrder, pref.ledger = nil, nil, nil, nil, nil
-	pref.staleMax = 1800 // the brain's default STALE_MAX
-	pref.mu.Unlock()
-	ledgerMu.Lock()
-	oown, oerr := ledgerOwn, ledgerLastErr
-	ledgerOwn, ledgerLastErr = nil, ""
-	ledgerMu.Unlock()
-	recMu.Lock()
-	orec, oread := records, readings
-	records, readings = map[recKey]refusalRecord{}, map[string]headerReading{}
-	recMu.Unlock()
+	lan.pref.mu.Lock()
+	oa, or, op, oo, os, ol := lan.pref.accounts, lan.pref.routes, lan.pref.pots, lan.pref.payOrder, lan.pref.staleMax, lan.pref.ledger
+	lan.pref.accounts, lan.pref.routes, lan.pref.pots, lan.pref.payOrder, lan.pref.ledger = nil, nil, nil, nil, nil
+	lan.pref.staleMax = 1800 // the brain's default STALE_MAX
+	lan.pref.mu.Unlock()
+	lan.ledgerMu.Lock()
+	oown, oerr := lan.ledgerOwn, lan.ledgerLastErr
+	lan.ledgerOwn, lan.ledgerLastErr = nil, ""
+	lan.ledgerMu.Unlock()
+	lan.recMu.Lock()
+	orec, oread := lan.records, lan.readings
+	lan.records, lan.readings = map[recKey]refusalRecord{}, map[string]headerReading{}
+	lan.recMu.Unlock()
 	restoreReports := resetReports()
 	return func() {
-		pref.mu.Lock()
-		pref.accounts, pref.routes, pref.pots, pref.payOrder, pref.staleMax, pref.ledger = oa, or, op, oo, os, ol
-		pref.mu.Unlock()
-		ledgerMu.Lock()
-		ledgerOwn, ledgerLastErr = oown, oerr
-		ledgerMu.Unlock()
-		recMu.Lock()
-		records, readings = orec, oread
-		recMu.Unlock()
+		lan.pref.mu.Lock()
+		lan.pref.accounts, lan.pref.routes, lan.pref.pots, lan.pref.payOrder, lan.pref.staleMax, lan.pref.ledger = oa, or, op, oo, os, ol
+		lan.pref.mu.Unlock()
+		lan.ledgerMu.Lock()
+		lan.ledgerOwn, lan.ledgerLastErr = oown, oerr
+		lan.ledgerMu.Unlock()
+		lan.recMu.Lock()
+		lan.records, lan.readings = orec, oread
+		lan.recMu.Unlock()
 		restoreReports()
 	}
 }
@@ -331,9 +331,9 @@ func seedQuota(t interface{ Cleanup(func()) }, accounts map[string]acctStanding,
 	pots map[string]potSettings, payOrder []string) {
 	restore := resetQuotaState()
 	t.Cleanup(restore)
-	pref.mu.Lock()
-	pref.accounts, pref.routes, pref.pots, pref.payOrder = accounts, routes, pots, payOrder
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	lan.pref.accounts, lan.pref.routes, lan.pref.pots, lan.pref.payOrder = accounts, routes, pots, payOrder
+	lan.pref.mu.Unlock()
 }
 
 // laneRoute is a bare lane's route over accounts.
@@ -363,18 +363,18 @@ func uAccount(memberID string) string { return "u-" + memberID }
 func uRoute(memberID string) string {
 	id, acct := "u/"+memberID, uAccount(memberID)
 	asOf := 1.0
-	pref.mu.Lock()
-	if pref.routes == nil {
-		pref.routes = map[string]routePref{}
+	lan.pref.mu.Lock()
+	if lan.pref.routes == nil {
+		lan.pref.routes = map[string]routePref{}
 	}
-	if pref.accounts == nil {
-		pref.accounts = map[string]acctStanding{}
+	if lan.pref.accounts == nil {
+		lan.pref.accounts = map[string]acctStanding{}
 	}
-	pref.routes[id] = memberRoute(id, "u", memberID, "", "anthropic", acct)
+	lan.pref.routes[id] = memberRoute(id, "u", memberID, "", "anthropic", acct)
 	st := acctStanding{Provider: "anthropic", AsOf: &asOf}
 	st.Allowance.Windows = map[string]checkWindow{}
-	pref.accounts[acct] = st
-	pref.mu.Unlock()
+	lan.pref.accounts[acct] = st
+	lan.pref.mu.Unlock()
 	return id
 }
 
@@ -383,7 +383,7 @@ func uRoute(memberID string) string {
 // Kimi billing-cycle pool), for a test whose subject is what a spent account
 // does to routing rather than how its refusal was classified.
 func seedSpent(account, limit string, status int, detail string, resets time.Time) refusalRecord {
-	return writeRecord(account, limit, refusalRecord{kind: recSpent, limKind: limPool,
+	return lan.writeRecord(account, limit, refusalRecord{kind: recSpent, limKind: limPool,
 		refusedAt: nowFn(), resets: resets, status: status, detail: detail})
 }
 
@@ -408,12 +408,12 @@ func uUnroutable(m classMemberPref) classMemberPref {
 // classMemberDialable is memberDialable for a member of a class the proxy
 // holds, by id ("" = dialable).
 func classMemberDialable(t interface{ Fatalf(string, ...any) }, class, id string) string {
-	pref.mu.RLock()
-	cp := pref.classes[class]
-	pref.mu.RUnlock()
+	lan.pref.mu.RLock()
+	cp := lan.pref.classes[class]
+	lan.pref.mu.RUnlock()
 	for _, m := range cp.Members {
 		if m.ID == id {
-			return memberDialable(m, nowFn())
+			return lan.memberDialable(m, nowFn())
 		}
 	}
 	t.Fatalf("class %s has no member %s", class, id)
@@ -422,17 +422,17 @@ func classMemberDialable(t interface{ Fatalf(string, ...any) }, class, id string
 
 // laneNo reports whether acct's check on the bare lane's route is `no` now.
 func laneNo(acct, lane string) bool {
-	c, _ := routeCheck(laneRouteID(lane), acct, "", nowFn())
+	c, _ := lan.routeCheck(laneRouteID(lane), acct, "", nowFn())
 	return c.no()
 }
 
 // recordsOn lists the live records on acct as "<kind>:<limit>", sorted.
 func recordsOn(acct string) []string {
 	now := nowFn()
-	recMu.Lock()
-	defer recMu.Unlock()
+	lan.recMu.Lock()
+	defer lan.recMu.Unlock()
 	var out []string
-	for k, r := range records {
+	for k, r := range lan.records {
 		if k.account == acct && r.live(now) {
 			out = append(out, r.kind+":"+k.limit)
 		}
@@ -442,15 +442,15 @@ func recordsOn(acct string) []string {
 }
 
 // throttledOn reports a live throttle on acct.
-func throttledOn(acct string) bool { return !throttledUntil(acct, nowFn()).IsZero() }
+func throttledOn(acct string) bool { return !lan.throttledUntil(acct, nowFn()).IsZero() }
 
 // liveRecords counts every live record in the store.
 func liveRecords() int {
 	now := nowFn()
-	recMu.Lock()
-	defer recMu.Unlock()
+	lan.recMu.Lock()
+	defer lan.recMu.Unlock()
 	n := 0
-	for _, r := range records {
+	for _, r := range lan.records {
 		if r.live(now) {
 			n++
 		}

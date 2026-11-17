@@ -37,7 +37,7 @@ func TestOverlayRefreshesTheLimitsAResponseCarries(t *testing.T) {
 					"scoped:Fable": scoped("Fable", 30, polled.Add(90*time.Hour))}, credits),
 			})
 			setFableAliases(fableAliases())
-			noteHeaderReading("a", opusHeaders(now.Add(-time.Minute)), now.Add(-time.Minute))
+			lan.noteHeaderReading("a", opusHeaders(now.Add(-time.Minute)), now.Add(-time.Minute))
 
 			if c := laneCheck("opus", now); !c.included() || c.Basis != "fresh" {
 				t.Fatalf("lane:opus = %s, want included on fresh 5h and 7d readings", c)
@@ -64,19 +64,19 @@ func TestOverlayKeepsCodexGateUntilItsWindowsReset(t *testing.T) {
 	gpt := standingAt("codex", t0, map[string]checkWindow{"five_hour": fiveHour(80, r5), "seven_day": week(60, r7)}, "")
 	gpt.Allowance.Open = &shut
 	availWorld(t, nil, map[string]acctStanding{"gpt-a": gpt})
-	pref.mu.Lock()
-	pref.routes["c/gpt"] = memberRoute("c/gpt", "c", "gpt", "", "codex", "gpt-a")
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	lan.pref.routes["c/gpt"] = memberRoute("c/gpt", "c", "gpt", "", "codex", "gpt-a")
+	lan.pref.mu.Unlock()
 	full := rlHeader("x-codex-primary-used-percent", "81", "x-codex-primary-window-minutes", "300",
 		"x-codex-primary-reset-at", strconv.FormatInt(r5.Unix(), 10),
 		"x-codex-secondary-used-percent", "61", "x-codex-secondary-window-minutes", "10080",
 		"x-codex-secondary-reset-at", strconv.FormatInt(r7.Unix(), 10))
-	noteHeaderReading("gpt-a", full, t0.Add(time.Minute))
-	if c, _ := routeCheck("c/gpt", "gpt-a", "", time.Now()); !c.no() || c.Until.At != unixSeconds(r7) {
+	lan.noteHeaderReading("gpt-a", full, t0.Add(time.Minute))
+	if c, _ := lan.routeCheck("c/gpt", "gpt-a", "", time.Now()); !c.no() || c.Until.At != unixSeconds(r7) {
 		t.Fatalf("gate closed, windows under 100 = %s, want no until the weekly reset", c)
 	}
 	// Once both windows it could mean have reset, the gate no longer stands.
-	if c, _ := routeCheck("c/gpt", "gpt-a", "", r7.Add(time.Minute)); c.no() && c.Reason == "spent" {
+	if c, _ := lan.routeCheck("c/gpt", "gpt-a", "", r7.Add(time.Minute)); c.no() && c.Reason == "spent" {
 		t.Fatalf("after every reset = %s, want the gate gone", c)
 	}
 }

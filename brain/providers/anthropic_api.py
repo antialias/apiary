@@ -20,7 +20,7 @@ import claude_usage_exporter as core
 from providers import register
 
 PROVIDER = "anthropic-api"
-ANTHROPIC_API_CREDS_FILE = os.environ.get("ANTHROPIC_API_CREDS_FILE", "/creds/anthropic-api.json")
+ANTHROPIC_API_CREDS_FILE = "anthropic-api.json"  # in each tenant's dir
 ANTHROPIC_API_BASE = os.environ.get("ANTHROPIC_API_BASE", "https://api.anthropic.com").rstrip("/")
 ANTHROPIC_VERSION = "2023-06-01"
 POT = "balance"
@@ -30,61 +30,57 @@ POT = "balance"
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$")
 
 # The enrolled keys, mtime-cached so an out-of-band edit of the file is adopted
-# at the next read. _keys: None = not loaded or no file.
-_keys_lock = threading.Lock()
-_keys = None
-_keys_mtime = None
+# at the next read. keys: None = not loaded or no file.
+class _Store:
+    """One tenant's enrolled keys (tenant.stores["anthropic-api"], _st)."""
+
+    def __init__(self, t):
+        self.file = t.path(ANTHROPIC_API_CREDS_FILE)
+        self.keys_lock = threading.Lock()
+        self.keys = None
+        self.keys_mtime = None
 
 
-def _load():
+def _st(t):
+    return t.store_for(PROVIDER, _Store)
+
+
+def _load(t):
     """{name: key} from the creds file, in file order; {} without one. A file
     that is not a list of {name, api_key} reads as no keys, and says so."""
-    global _keys, _keys_mtime
-    with _keys_lock:
-        try:
-            mtime = os.stat(ANTHROPIC_API_CREDS_FILE).st_mtime
-        except OSError:
-            _keys, _keys_mtime = None, None
+    with _st(t).keys_lock:
+        mtime = core._store.mtime(_st(t).file)
+        if mtime is None:
+            _st(t).keys, _st(t).keys_mtime = None, None
             return {}
-        if _keys is None or mtime != _keys_mtime:
+        if _st(t).keys is None or mtime != _st(t).keys_mtime:
             keys = {}
             try:
-                with open(ANTHROPIC_API_CREDS_FILE) as f:
-                    raw = json.load(f)
+                raw = core._store.read_json(_st(t).file)
                 for e in raw if isinstance(raw, list) else []:
                     if isinstance(e, dict) and isinstance(e.get("name"), str) \
                             and isinstance(e.get("api_key"), str) and e["api_key"].strip():
                         keys[e["name"]] = e["api_key"].strip()
             except Exception as e:  # noqa: BLE001
-                core.log(f"WARN {ANTHROPIC_API_CREDS_FILE} unreadable: {type(e).__name__}")
-            _keys, _keys_mtime = keys, mtime
-        return dict(_keys)
+                core.log(f"WARN {_st(t).file} unreadable: {type(e).__name__}")
+            _st(t).keys, _st(t).keys_mtime = keys, mtime
+        return dict(_st(t).keys)
 
 
-def _persist(keys):
+def _persist(t, keys):
     """Write {name: key} atomically, readable by its owner alone. Raises
     ValueError (operator-readable) on I/O failure."""
-    global _keys, _keys_mtime
-    body = json.dumps([{"name": n, "api_key": k} for n, k in keys.items()], indent=1) + "\n"
-    with _keys_lock:
-        tmp = ANTHROPIC_API_CREDS_FILE + ".tmp"
+    doc = [{"name": n, "api_key": k} for n, k in keys.items()]
+    with _st(t).keys_lock:
         try:
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as f:
-                f.write(body)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, ANTHROPIC_API_CREDS_FILE)
+            core._store.write_json(_st(t).file, doc, indent=1)
         except Exception as e:  # noqa: BLE001
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise ValueError(f"cannot write {ANTHROPIC_API_CREDS_FILE}: {e}") from e
-        _keys, _keys_mtime = dict(keys), os.stat(ANTHROPIC_API_CREDS_FILE).st_mtime
+            raise ValueError(f"cannot write {_st(t).file}: {e}") from e
+        _st(t).keys, _st(t).keys_mtime = dict(keys), core._store.mtime(_st(t).file)
 
 
-def _names():
-    return list(_load())
+def _names(t):
+    return list(_load(t))
 
 
 def _get_models(key):
@@ -113,14 +109,14 @@ def _reading(as_of):
             "beside": [], "models": {}}
 
 
-def poll(prev=None, account=None):  # noqa: ARG001 — uniform pool dispatch (#71)
+def poll(t, prev=None, account=None):  # noqa: ARG001 — uniform pool dispatch (#71)
     """One account's poll result (never raises), shaped as every provider's."""
     out = {"name": account, "kind": "provider", "provider": PROVIDER,
            "ok": 0, "ts": time.time(), "good_ts": None, "stale": 0,
            "http": 0, "err": "", "retry_after": None, "reading": None}
-    key = _load().get(account)
+    key = _load(t).get(account)
     if not key:
-        out["err"] = f"no key for {account!r} in {ANTHROPIC_API_CREDS_FILE}"
+        out["err"] = f"no key for {account!r} in {_st(t).file}"
         return out
     try:
         _get_models(key)
@@ -137,22 +133,22 @@ def poll(prev=None, account=None):  # noqa: ARG001 — uniform pool dispatch (#7
     return out
 
 
-def _auth_status(now):
+def _auth_status(t, now):
     """One row per enrolled key: its poll health and fingerprint, never the key."""
-    keys = _load()
-    rows = core._account_health(list(keys), now)["accounts"]
+    keys = _load(t)
+    rows = core._account_health(t, list(keys), now)["accounts"]
     for r in rows:
         r["source"] = "file"
         r["key_fingerprint"] = core._key_fingerprint(keys.get(r["name"], ""))
     return rows
 
 
-def _auth_begin(account=None):
+def _auth_begin(t, account=None):
     """A bare one-shot state: there is no authorization to visit."""
-    return None, core._auth_grant_mint(PROVIDER, "reauth" if account else "add", account=account)
+    return None, core._auth_grant_mint(t, PROVIDER, "reauth" if account else "add", account=account)
 
 
-def _name_error(name, keys):
+def _name_error(t, name, keys):
     """Why `name` cannot be this provider's account, or None. A name another
     provider's target or the account loop already holds would be two accounts
     under one roster key."""
@@ -160,23 +156,23 @@ def _name_error(name, keys):
         return "name must be 1-64 letters, digits or ._@+- and start with a letter or digit"
     if name in keys:
         return None
-    if name in core.PROVIDERS or name in core._account_loop_names():
+    if name in core.PROVIDERS or name in core._account_loop_names(t):
         return f"{name!r} already names another account"
-    taken = core._provider_poll_targets().get(name)
+    taken = core._provider_poll_targets(t).get(name)
     if taken and taken[0] != PROVIDER:
         return f"{name!r} already names a {taken[0]} account"
     return None
 
 
-def _auth_complete(grant, fields):
+def _auth_complete(t, grant, fields):
     name = str(fields.get("name") or grant.get("account") or "").strip()
     key = str(fields.get("api_key") or "").strip()
     if not name:
         raise ValueError("name is required")
     if not key:
         raise ValueError("api_key is required")
-    keys = _load()
-    err = _name_error(name, keys)
+    keys = _load(t)
+    err = _name_error(t, name, keys)
     if err:
         raise ValueError(err + " — nothing was saved")
     # Validate BEFORE persist. The error carries the code and the fingerprint,
@@ -190,21 +186,21 @@ def _auth_complete(grant, fields):
         raise ValueError(f"key validation {type(e).__name__} — nothing was saved") from e
     replaced = name in keys
     keys[name] = key
-    _persist(keys)
+    _persist(t, keys)
     core.log(f"{PROVIDER} key {'replaced' if replaced else 'enrolled'} for {name} "
              f"(fingerprint {core._key_fingerprint(key)})")
-    with core._poll_health_lock:
-        core._poll_fails.pop(name, None)
-        core._poll_schedule.pop(name, None)  # due at once
+    with t.poll_health_lock:
+        t.poll_fails.pop(name, None)
+        t.poll_schedule.pop(name, None)  # due at once
     core._poll_wakeup.set()
     return {"account": name, "enrolled": True, "reauthorized": replaced}
 
 
 register(PROVIDER, {
     "poll": poll,
-    "enabled": lambda: bool(_load()),
+    "enabled": lambda t: bool(_load(t)),
     "accounts": _names,
-    "api_key": lambda account: _load().get(account, ""),
+    "api_key": lambda t, account: _load(t).get(account, ""),
     "api_pot": POT,
     # Its accounts serve the lanes beside the account loop's (_routes).
     "lanes": True,

@@ -107,9 +107,9 @@ func TestQuotaCooldownClamp(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			seedSpent("gpt-a", "seven_day", 429, "usage_limit_reached", tc.resets)
-			recMu.Lock()
-			rec, ok := records[recKey{"gpt-a", "seven_day"}]
-			recMu.Unlock()
+			lan.recMu.Lock()
+			rec, ok := lan.records[recKey{"gpt-a", "seven_day"}]
+			lan.recMu.Unlock()
 			if !ok || rec.kind != recSpent {
 				t.Fatal("the account is not recorded as spent")
 			}
@@ -126,10 +126,10 @@ func TestThrottleDoesNotDowngradeASpentRecord(t *testing.T) {
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	freezeQuotaLedger(t, now)
 	seedSpent("gpt-a", "seven_day", 429, "usage_limit_reached", now.Add(3*time.Hour))
-	recordThrottle("gpt-a", 429, "slow down", nil)
-	recMu.Lock()
-	rec := records[recKey{"gpt-a", "seven_day"}]
-	recMu.Unlock()
+	lan.recordThrottle("gpt-a", 429, "slow down", nil)
+	lan.recMu.Lock()
+	rec := lan.records[recKey{"gpt-a", "seven_day"}]
+	lan.recMu.Unlock()
 	if !rec.until.Equal(now.Add(3 * time.Hour)) {
 		t.Errorf("until = %v, want the quota deadline preserved", rec.until)
 	}
@@ -160,29 +160,29 @@ func TestClassUnavailableNeedsEveryMember(t *testing.T) {
 	gpt, kimi := helpdeskWorld(t, now)
 	try := []classMemberPref{gpt, kimi}
 	reset := func() {
-		recMu.Lock()
-		records = map[recKey]refusalRecord{}
-		recMu.Unlock()
+		lan.recMu.Lock()
+		lan.records = map[recKey]refusalRecord{}
+		lan.recMu.Unlock()
 	}
 
-	if u := classUnavailable(try, classReq{}, now); u != nil {
+	if u := lan.classUnavailable(try, classReq{}, now); u != nil {
 		t.Error("no records at all must not refuse")
 	}
 
 	seedSpent("gpt-a", "seven_day", 429, "usage_limit_reached", now.Add(2*time.Hour))
-	if u := classUnavailable(try, classReq{}, now); u != nil {
+	if u := lan.classUnavailable(try, classReq{}, now); u != nil {
 		t.Error("ONE spent member must not refuse the class — the other can still serve")
 	}
 
-	recordThrottle("kimi", 429, "busy", nil)
-	if u := classUnavailable(try, classReq{}, now); u != nil {
+	lan.recordThrottle("kimi", 429, "busy", nil)
+	if u := lan.classUnavailable(try, classReq{}, now); u != nil {
 		t.Error("a merely throttled member still serves (its check is included) — must not refuse")
 	}
 
 	reset()
 	seedSpent("gpt-a", "seven_day", 429, "usage_limit_reached", now.Add(2*time.Hour))
 	seedSpent("kimi", "five_hour", 403, "You've reached your 5-hour usage limit", time.Time{})
-	u := classUnavailable(try, classReq{}, now)
+	u := lan.classUnavailable(try, classReq{}, now)
 	if u == nil {
 		t.Fatal("both members explicitly spent MUST refuse — this is the incident case")
 	}
@@ -207,7 +207,7 @@ func TestClassUnavailableNeedsEveryMember(t *testing.T) {
 	}
 
 	reset()
-	if u := classUnavailable(nil, classReq{}, now); u != nil {
+	if u := lan.classUnavailable(nil, classReq{}, now); u != nil {
 		t.Error("an empty try-list is UNROUTABLE, not unavailable")
 	}
 }
@@ -223,14 +223,14 @@ func TestClassUnavailableNeedsEveryMember(t *testing.T) {
 // withRouterView installs a brain snapshot for one test and restores it after.
 func withRouterView(t *testing.T, ok bool, fetched time.Time, classes map[string]classPref) {
 	t.Helper()
-	pref.mu.Lock()
-	oldOK, oldFetched, oldClasses := pref.ok, pref.heardAt, pref.classes
-	pref.ok, pref.heardAt, pref.classes = ok, fetched, classes
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	oldOK, oldFetched, oldClasses := lan.pref.ok, lan.pref.heardAt, lan.pref.classes
+	lan.pref.ok, lan.pref.heardAt, lan.pref.classes = ok, fetched, classes
+	lan.pref.mu.Unlock()
 	t.Cleanup(func() {
-		pref.mu.Lock()
-		pref.ok, pref.heardAt, pref.classes = oldOK, oldFetched, oldClasses
-		pref.mu.Unlock()
+		lan.pref.mu.Lock()
+		lan.pref.ok, lan.pref.heardAt, lan.pref.classes = oldOK, oldFetched, oldClasses
+		lan.pref.mu.Unlock()
 	})
 }
 
@@ -265,7 +265,7 @@ func TestRouterDryClauseStaysSilentWhenWeCannotKnow(t *testing.T) {
 		// tokens. What we remember about other classes may be arbitrarily out of
 		// date, so we do not get to describe the fleet.
 		withRouterView(t, false, now, spent(t))
-		if got := routerDryClause(); got != "" {
+		if got := lan.routerDryClause(); got != "" {
 			t.Errorf("clause = %q, want silence while the brain is unreachable", got)
 		}
 	})
@@ -275,7 +275,7 @@ func TestRouterDryClauseStaysSilentWhenWeCannotKnow(t *testing.T) {
 		// ok is still true, which is exactly the case ok cannot catch: a wedged
 		// stream goroutine sitting on an ancient snapshot that still claims good.
 		withRouterView(t, true, now.Add(-2*brainSilence), spent(t))
-		if got := routerDryClause(); got != "" {
+		if got := lan.routerDryClause(); got != "" {
 			t.Errorf("clause = %q, want silence on a stale snapshot", got)
 		}
 	})
@@ -285,7 +285,7 @@ func TestRouterDryClauseStaysSilentWhenWeCannotKnow(t *testing.T) {
 		// An old brain that omits classes says NOTHING about them (#93). Reading
 		// that absence as "the router is dry" would invent a fact from a gap.
 		withRouterView(t, true, now, nil)
-		if got := routerDryClause(); got != "" {
+		if got := lan.routerDryClause(); got != "" {
 			t.Errorf("clause = %q, want silence when the class view is absent", got)
 		}
 	})
@@ -303,14 +303,14 @@ func TestRouterDryClauseSilentWhileAnythingIsRoutable(t *testing.T) {
 		"helpdesk": {Members: []classMemberPref{gpt, kimi}},
 		"coding":   {Members: []classMemberPref{liveMember("lane:opus")}},
 	})
-	if got := routerDryClause(); got != "" {
+	if got := lan.routerDryClause(); got != "" {
 		t.Errorf("clause = %q, but lane:opus would have been routed to right now", got)
 	}
 
 	// A record is on an account, not a member id: kimi's refusal says nothing
 	// about account a, which coding's lane:opus dials.
 	seedSpent("kimi", "seven_day", 403, "weekly limit", now.Add(time.Hour))
-	if got := routerDryClause(); got != "" {
+	if got := lan.routerDryClause(); got != "" {
 		t.Errorf("clause = %q; a record on kimi must not silence account a", got)
 	}
 }
@@ -325,24 +325,24 @@ func TestRouterDryClauseFiresWhenNothingWouldBeRouted(t *testing.T) {
 	gpt, kimi := helpdeskWorld(t, now)
 	seedSpent("kimi", "five_hour", 403, "5-hour usage limit", now.Add(2*time.Hour))
 	seedSpent("gpt-a", "seven_day", 429, "usage_limit_reached", now.Add(52*time.Hour))
-	pref.mu.Lock()
-	held := pref.accounts["a"]
-	pref.accounts["a"] = acctStanding{Provider: "anthropic"} // never measured
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	held := lan.pref.accounts["a"]
+	lan.pref.accounts["a"] = acctStanding{Provider: "anthropic"} // never measured
+	lan.pref.mu.Unlock()
 	blind := liveMember("lane:opus")
 	withRouterView(t, true, now, map[string]classPref{
 		"helpdesk": {Members: []classMemberPref{gpt, kimi}},
 		"coding":   {Members: []classMemberPref{blind}},
 	})
 
-	dry, known := routerDry()
+	dry, known := lan.routerDry()
 	if !known {
 		t.Fatal("a fresh, reachable class view is exactly when we DO get an opinion")
 	}
 	if !dry {
 		t.Fatal("every member is either spent or unmeasured; the failover has nowhere to land")
 	}
-	clause := routerDryClause()
+	clause := lan.routerDryClause()
 	if !strings.Contains(clause, "no other model on this router is routable") {
 		t.Fatalf("clause = %q", clause)
 	}
@@ -359,10 +359,10 @@ func TestRouterDryClauseFiresWhenNothingWouldBeRouted(t *testing.T) {
 	}
 
 	// And the account being measured is enough to take the sentence back.
-	pref.mu.Lock()
-	pref.accounts["a"] = held
-	pref.mu.Unlock()
-	if got := routerDryClause(); got != "" {
+	lan.pref.mu.Lock()
+	lan.pref.accounts["a"] = held
+	lan.pref.mu.Unlock()
+	if got := lan.routerDryClause(); got != "" {
 		t.Errorf("clause = %q after the member became routable again", got)
 	}
 }
@@ -378,11 +378,11 @@ func TestQuotaDrillIsReadOnlyAndRendersTheRealPayload(t *testing.T) {
 	seedSpent("gpt-a", "seven_day", 429, "usage_limit_reached", now.Add(52*time.Hour))
 	withRouterView(t, true, now, map[string]classPref{"helpdesk": {Members: []classMemberPref{gpt, kimi}}})
 
-	recMu.Lock()
-	ledgerBefore := len(records)
-	recMu.Unlock()
+	lan.recMu.Lock()
+	ledgerBefore := len(lan.records)
+	lan.recMu.Unlock()
 	rec := httptest.NewRecorder()
-	quotaDrillHandler(rec, httptest.NewRequest("GET", "/_switch/quota-drill?class=helpdesk", nil))
+	quotaDrillHandler(rec, lanRequest("GET", "/_switch/quota-drill?class=helpdesk", nil))
 	if rec.Code != 200 {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -410,9 +410,9 @@ func TestQuotaDrillIsReadOnlyAndRendersTheRealPayload(t *testing.T) {
 		}
 	}
 	// And nothing moved.
-	recMu.Lock()
-	after := len(records)
-	recMu.Unlock()
+	lan.recMu.Lock()
+	after := len(lan.records)
+	lan.recMu.Unlock()
 	if after != ledgerBefore {
 		t.Errorf("drill wrote to the record store: %d -> %d", ledgerBefore, after)
 	}
@@ -441,7 +441,7 @@ func TestQuotaDrillRendersAServingClass(t *testing.T) {
 	})
 
 	rec := httptest.NewRecorder()
-	quotaDrillHandler(rec, httptest.NewRequest("GET", "/_switch/quota-drill?class=helpdesk", nil))
+	quotaDrillHandler(rec, lanRequest("GET", "/_switch/quota-drill?class=helpdesk", nil))
 	var got drillReply
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
 	if got.ClassUnavailable {
@@ -471,7 +471,7 @@ func TestQuotaDrillClassWithNoAccount(t *testing.T) {
 	withRouterView(t, true, now, map[string]classPref{"helpdesk": {Members: []classMemberPref{kimi}}})
 
 	rec := httptest.NewRecorder()
-	quotaDrillHandler(rec, httptest.NewRequest("GET", "/_switch/quota-drill?class=helpdesk", nil))
+	quotaDrillHandler(rec, lanRequest("GET", "/_switch/quota-drill?class=helpdesk", nil))
 	var got map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || rec.Code != 200 {
 		t.Fatalf("drill = %d %s", rec.Code, rec.Body.String())
@@ -492,7 +492,7 @@ func TestQuotaDrillRejectsUnknownClass(t *testing.T) {
 	})
 
 	rec := httptest.NewRecorder()
-	quotaDrillHandler(rec, httptest.NewRequest("GET", "/_switch/quota-drill?class=nope", nil))
+	quotaDrillHandler(rec, lanRequest("GET", "/_switch/quota-drill?class=nope", nil))
 	if rec.Code != 404 {
 		t.Errorf("status = %d, want 404", rec.Code)
 	}

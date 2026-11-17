@@ -32,21 +32,18 @@ Env:
                          1500); a poll with no HTTP response retries at
                          POLL_INTERVAL
     (each driver documents its own: credentials files, upstream URLs)
-    KIMI_API_KEY         Optional Kimi-for-Coding key; enables provider quota metrics
     KIMI_USAGES_URL      Override for https://api.kimi.com/coding/v1/usages
-    SWITCH_CLASSES_FILE  Model-class config (#25), default /creds/classes.json;
-                         absent = feature dormant. See classes.example.json.
-    SWITCH_CONSUMERS_FILE Consumers document (#95/#92) — which lanes and classes
-                         each consumer of the proxy draws through.
-                         Default: consumers.json beside the classes file.
-                         Absent = no consumers, zero warnings, nothing breaks.
-    SWITCH_MONEY_FILE    The money document (quota-model 50 §1.9): pay_order and
-                         each money pot's topup. Default: money.json beside the
-                         classes file. Absent = defaults (no order, topup off).
-    SWITCH_NOTICES_FILE  The prepaid notices' state (notices.py). Default:
-                         notices.json beside the money document.
-    SWITCH_RECHECK_FILE  The owner's re-check epochs, kept across a restart.
-                         Default: rechecks.json beside the money document.
+    SWITCH_CREDS_DIR     Where the brain's data lives (default /creds): the
+                         registry tenants.json, classes.json, lanes.json, the
+                         switch key, and one dir per tenant, /creds/<tenant>/,
+                         with that tenant's documents and credentials.
+    SWITCH_CREDS_KEY_FILE The sealing key (credstore.py): set, every tenant
+                         file is AES-256-GCM sealed and a plain one is refused;
+                         unset, files are plain and a sealed one is refused.
+    SWITCH_CLASSES_FILE  Model-class config (#25), default classes.json in
+                         SWITCH_CREDS_DIR; absent = feature dormant. See
+                         classes.example.json. The one operator document, with
+                         lanes.json: every other document is a tenant's.
     SWITCH_BRIDGE_URL    The alert bridge the prepaid notices post to. Unset:
                          the edition's default (none in the shared edition);
                          set but empty: the notices are off.
@@ -101,7 +98,9 @@ from urllib.parse import parse_qs, urlparse
 #   ROUTES             (method, path) -> a driver's HTTP handler
 from providers import (PROVIDERS, ROUTES, _API_POTS, _COUNTABLE_UNITS,  # noqa: E402
                        _LEDGER_RATE_TABLES, _LEDGER_RATES, _MODEL_MODALITY)
+import credstore  # noqa: E402 — the sealed store every tenant file goes through
 import notices  # noqa: E402 — the prepaid "needs payment" notices
+import tenancy  # noqa: E402 — Tenant and the registry
 
 PORT = int(os.environ.get("PORT", "9115"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "300"))
@@ -127,6 +126,7 @@ def _read_file(path):
 # The proxy (services/claude-switch-proxy) polls /preferred to learn which account
 # has headroom and pulls a fresh token from /token to route requests there. This
 # exporter is the SOLE token refresher, so there's one authority and no rotation race.
+CREDS_DIR = os.environ.get("SWITCH_CREDS_DIR", "/creds")
 SWITCH_KEY = os.environ.get("SWITCH_KEY", "") or _read_file(os.environ.get("SWITCH_KEY_FILE", ""))
 # N equal accounts balanced by utilization — no account is privileged ("home"/"native"
 # is gone). A lane stays on its incumbent account and only leaves when forced, moving to
@@ -135,7 +135,6 @@ SW_HIGH = float(os.environ.get("SWITCH_HIGH_PCT", "80"))     # weekly % at which
 SW_MARGIN = float(os.environ.get("SWITCH_MARGIN_PCT", "15")) # min headroom advantage (pts) to justify a switch
 SW_HARD = float(os.environ.get("SWITCH_HARD_PCT", "95"))     # weekly % that forces a switch to any lower account
 SW_DWELL = int(os.environ.get("SWITCH_MIN_DWELL", "900"))    # min seconds between switches (anti-flap)
-STATE_FILE = os.environ.get("SWITCH_STATE_FILE", "/creds/switch_state.json")
 STALE_MAX = int(os.environ.get("SWITCH_STALE_MAX", "1800"))  # exclude accounts whose data is older than this
 SESSION_IDLE = int(os.environ.get("SWITCH_SESSION_IDLE", "21600"))  # drop class-session bindings idle longer than this (6h > the 5h window, so drift bookkeeping outlives a window)
 
@@ -150,7 +149,7 @@ SESSION_IDLE = int(os.environ.get("SWITCH_SESSION_IDLE", "21600"))  # drop class
 # scope = max(7d, 5-hour session) = the old single-lane policy plus the session gate)
 # is always appended and cannot be redefined. Rules served to the proxy in order;
 # first match wins.
-LANES_FILE = os.environ.get("SWITCH_LANES_FILE", "/creds/lanes.json")
+LANES_FILE = os.environ.get("SWITCH_LANES_FILE") or os.path.join(CREDS_DIR, "lanes.json")
 DEFAULT_LANES = [
     {"lane": "fable",  "match": ["fable"],  "scope_model": "Fable"},
     {"lane": "opus",   "match": ["opus"],   "scope_model": "Opus"},
@@ -214,34 +213,14 @@ SCOPE_ALIASES = {
 # came from). The document may instead be {"classes": [...], "lanes": {"<lane>":
 # {"pay", "stop_at"}}} to give bare lanes the same settings; a bare array still
 # loads. Pot ranking and topup live in the money document (MONEY_FILE).
-CLASSES_FILE = os.environ.get("SWITCH_CLASSES_FILE", "/creds/classes.json")
+CLASSES_FILE = os.environ.get("SWITCH_CLASSES_FILE") or os.path.join(CREDS_DIR, "classes.json")
 DEFAULT_CLASSES = []
 
-# Consumers document (#95, ui-revamp §5): a sibling brain document, same API/
-# versioning family as classes. Groups lanes and classes into the
-# proxy's CONSUMERS (coding harness, delegation, an agent gateway) for the tanks view.
-# Absent file = no consumers configured — additive, nothing breaks.
-CONSUMERS_FILE = (os.environ.get("SWITCH_CONSUMERS_FILE")
-                  or os.path.join(os.path.dirname(CLASSES_FILE) or ".", "consumers.json"))
-
-# The money document (quota-model 50 §1.9): the pot-grain owner settings,
-# pay_order and each money pot's topup. A sibling of classes and consumers with
-# the same API, lock and history. Absent file = the defaults: no pay_order (member
-# priority alone orders the paid tier) and every pot topup "off".
-MONEY_FILE = (os.environ.get("SWITCH_MONEY_FILE")
-              or os.path.join(os.path.dirname(CLASSES_FILE) or ".", "money.json"))
-
-# The prepaid notices' state (notices.py): what each prepaid account was last
-# seen as and every notice sent. Beside the money document that declares
-# which accounts are prepaid.
-NOTICES_FILE = (os.environ.get("SWITCH_NOTICES_FILE")
-                or os.path.join(os.path.dirname(MONEY_FILE) or ".", "notices.json"))
-
-# The owner's re-check epochs ({account: epoch}, _recheck_epochs), kept so a
-# restart does not forget one: a shut report the proxy resends after it must
-# still read as older than the re-check that ended it (_report_money_floor).
-RECHECK_FILE = (os.environ.get("SWITCH_RECHECK_FILE")
-                or os.path.join(os.path.dirname(MONEY_FILE) or ".", "rechecks.json"))
+# The tenants (tenancy.py): every other document is one tenant's, in its dir
+# under CREDS_DIR, read and written through the sealed store (credstore.py).
+# The registry is filled by boot(); a Tenant is made by _tenant_fresh.
+_store = credstore.Store.from_env()
+_registry = None  # tenancy.Registry, set by boot()
 
 # Every subscription account has these two pots until api accounts arrive (C8):
 # the allowance its windows measure, then the credits the provider draws next.
@@ -267,44 +246,107 @@ DOC_BODY_MAX = 512 * 1024
 SEVERITY = {"normal": 0, "warning": 1, "critical": 2}
 UA = None  # set in main
 
-# name -> latest render-facing poll result. Guarded by _lock.
-_state = {}
-_lock = threading.Lock()
+# ---- per-tenant state ----------------------------------------------------------
+# Every piece of state that is one tenant's lives on its Tenant (tenancy.py),
+# made here. The field comments below are the lock discipline, unchanged from
+# the single-tenant brain; each tenant has its own locks, and no lock of one
+# tenant is ever held while another's is taken.
+#
+#   state          name -> latest render-facing poll result. Guarded by t.lock.
+#   refresh_lock   serializes credential-file/cache replacement and token
+#                  refresh; re-entrant because the drivers' _load_creds and
+#                  _persist_creds are also called from refresh-locked paths.
+#   preferred      the switchover decision state (which account the proxy
+#                  should route to), guarded by t.plock. "pinned" forces the
+#                  choice and disables the auto-policy until cleared. The flat
+#                  top-level keys mirror the "default" lane; per-lane state
+#                  lives in "lanes", per-class in "classes".
+#   session_journal / journal_seq
+#                  the class pass's recent session moves as (seq, move),
+#                  newest last, guarded by t.plock. A PUT of the owner settings
+#                  reports the moves made after it swapped them in (_doc_put).
+#   poll_fails / poll_schedule
+#                  per-target poll health, guarded by t.poll_health_lock. The
+#                  poller thread is the only writer; the HTTP handlers read.
+#   recheck_epochs the owner's re-checks (quota-model 50 §2.6, C7): account ->
+#                  the instant of its last /recheck, published as the account's
+#                  recheck_epoch; the proxy drops every refusal record on the
+#                  account older than it. Guarded by t.poll_health_lock; kept in
+#                  t.recheck_file (_save_rechecks_locked, _load_rechecks).
 _start_time = time.time()
-# Serializes credential-file/cache replacement and token refresh. Re-entrant because
-# _load_creds and _persist_creds are also called from refresh-locked paths.
-_refresh_lock = threading.RLock()
-
-# switchover decision state (which account the proxy should route to), guarded by _plock.
-# "pinned" (an account name) forces the choice and disables the auto-policy until cleared.
-# The flat top-level keys are a LEGACY MIRROR of the "default" lane — an old proxy (or a
-# rolled-back brain) reads only those and keeps working; per-lane state lives in "lanes".
-_plock = threading.Lock()
-_preferred = {"account": None, "since": 0.0, "reason": "init", "last_switch": 0.0, "pinned": None,
-              "lanes": {}, "classes": {}, "providers": {}}
-# The class pass's recent session moves as (seq, move), newest last, guarded by
-# _plock. A PUT of the owner settings reports the moves made after it swapped
-# them in, by whichever pass made them (_doc_put).
-_session_journal = deque(maxlen=256)
-_journal_seq = 0
-
-# Per-target poll health, guarded by _poll_health_lock. The poller thread is the only
-# writer; the HTTP handlers read. This is what turns "POLL FAILED" from a log line into
-# data — until an account's failure is queryable, the only place a dead refresh token
-# is visible is a docker log tail.
-_poll_health_lock = threading.Lock()
-_poll_fails = {}     # name -> consecutive failure count (drives the exp backoff)
-_poll_schedule = {}  # name -> unix ts the poller will next attempt
-# Re-authorization sets this after clearing one account's schedule. Event semantics
-# retain a signal raised while the poller is busy, unlike a condition notify.
+# Re-authorization sets this after clearing one account's schedule; a tenant's
+# creation or removal sets it too. One poller serves every tenant. Event
+# semantics retain a signal raised while the poller is busy.
 _poll_wakeup = threading.Event()
-# The owner's re-checks (quota-model 50 §2.6, C7): account -> the instant of its
-# last POST /recheck, published as that account's recheck_epoch. The proxy drops
-# every refusal record on the account older than it: the way out of a record
-# for a purchase no reading can see. Guarded by _poll_health_lock. Kept in
-# RECHECK_FILE (_save_rechecks_locked, _load_rechecks): it is also the floor of
-# a shut report on a pot no poll reads, which a restart must not lower.
-_recheck_epochs = {}
+
+
+def _tenant_fresh(tid, name, lan, tap, dir_):
+    """A Tenant with every state field at its start value: what the single-
+    tenant brain had at import. The documents are read from its dir
+    (consumers, money); the rest (state, rechecks, ledger, sizing, notices) is
+    read by _tenant_boot, as main() did."""
+    t = tenancy.Tenant(tid, name, lan, tap, dir_, _store)
+    t.state = {}
+    t.preferred = {"account": None, "since": 0.0, "reason": "init", "last_switch": 0.0,
+                   "pinned": None, "lanes": {}, "classes": {}, "providers": {}}
+    t.session_journal = deque(maxlen=256)
+    t.journal_seq = 0
+    t.poll_fails = {}
+    t.poll_schedule = {}
+    t.recheck_epochs = {}
+    t.consumers_doc = {"consumers": []}
+    t.consumers_warnings = []
+    t.consumers = _load_consumers(t)
+    t.money_doc = {}
+    t.money_warnings = []
+    t.money = _load_money(t)
+    t.ledger = _ledger_fresh()
+    t.reported = {}
+    t.shut_reports = {}
+    t.holds = {}
+    t.limit_holds = {}
+    t.served = _served_fresh()
+    t.sizing_gate = {"closing": False, "inflight": 0, "frozen": None, "set_aside": None}
+    t.sizing = _sizing_fresh()
+    t.events_pub = {"seq": 0, "data": None, "digest": None, "ledger_as_of": None}
+    t.events_subs = set()
+    t.reauth_pending = {}
+    t.notices = notices.Notices(t.notices_file, log=lambda m: log(f"{tid}: {m}"),
+                                bridged=lan, store=_store)
+    return t
+
+
+def _tenant_boot(t):
+    """Read a tenant's persisted state (main() did this once for the one
+    tenant): the switch state, the ledger, the re-checks, the notices and the
+    sizing, then start its notices worker."""
+    _load_state(t)
+    with t.lock:
+        m = t.money
+        pots = m["pots"]
+        pay_order = m["pay_order"]
+    log(f"{t.id}: money: {len(pay_order)} in pay_order, {len(pots)} pots configured "
+        f"({t.money_file})")
+    _load_ledger(t)
+    _load_rechecks(t)
+    n = t.notices.load()
+    log(f"{t.id}: notices: {n} prepaid accounts remembered ({t.notices_file}; bridge "
+        f"{'on' if t.notices.bridged and notices.bridge_url() else 'off'})")
+    t.notices.start()
+    _sizing_load(t)
+    log(f"{t.id}: consumers: {len(t.consumers)} configured ({t.consumers_file})")
+
+
+def _tenant_retire(t):
+    """Stop a tenant's threads and drop what it holds (DELETE /tenants/<t>):
+    its subscribers are told to close, its notices worker stopped. The
+    registry has already forgotten it, so no request or poll reaches it
+    again; its dir is removed by the registry after this."""
+    t.stopped = True
+    t.notices.stop()
+    with t.events_cond:
+        t.events_cond.notify_all()
+    _poll_wakeup.set()
 
 
 def _classify_poll_error(res):
@@ -323,7 +365,7 @@ def _classify_poll_error(res):
     return "transient"
 
 
-def _account_health(names, now):
+def _account_health(t, names, now):
     """Health rows + worst rollup for `names` (poll-target names).
 
     worst: "auth_dead" if any account's last error was an auth refusal (a human must
@@ -335,11 +377,11 @@ def _account_health(names, now):
     order = {"ok": 0, "degraded": 1, "auth_dead": 2}
     accounts = []
     worst = "ok"
-    with _lock:
-        snap = {n: _state.get(n) for n in names}
-    with _poll_health_lock:
-        fails = dict(_poll_fails)
-        schedule = dict(_poll_schedule)
+    with t.lock:
+        snap = {n: t.state.get(n) for n in names}
+    with t.poll_health_lock:
+        fails = dict(t.poll_fails)
+        schedule = dict(t.poll_schedule)
     for n in names:
         r = snap.get(n) or {}
         kind = _classify_poll_error(r)
@@ -376,7 +418,7 @@ _HEALTH_ROW_KEYS = ("name", "poll_ok", "health", "last_error_kind",
                     "next_retry_in_s", "err")
 
 
-def _unified_account_health(now):
+def _unified_account_health(t, now):
     """/preferred `account_health`: every account every provider authority
     manages, not just anthropic's. Pre-#72 this was anthropic-only ("providers
     have no re-auth flow"); now each PROVIDERS row's status() reports the same
@@ -392,7 +434,7 @@ def _unified_account_health(now):
         a = p.get("auth")
         if not a:
             continue
-        for row in a["status"](now):
+        for row in a["status"](t, now):
             slim = {k: row.get(k) for k in _HEALTH_ROW_KEYS}
             slim["provider"] = pid
             if order.get(slim.get("health"), 0) > order[worst]:
@@ -871,7 +913,22 @@ def _validate_classes_doc(doc):
     if errors:
         return errors
     classes, lane_settings = _normalize_classes_doc(doc, [])
-    return _settings_problems(classes, lane_settings)[0]
+    return _tenants_settings_problems(classes, lane_settings)[0]
+
+
+def _tenants_settings_problems(classes, lane_settings):
+    """(errors, warnings) of a classes document's settings against every
+    tenant's accounts: the classes document is the operator's, one for all,
+    so a setting is checked against each tenant's pool. Errors (structure)
+    are the same from every tenant and listed once; a warning names whose
+    accounts leave the setting dangling. With no tenant there are no accounts
+    to check against, and nothing to say."""
+    errors, warnings = [], []
+    for t in _registry.all() if _registry is not None else []:
+        e, w = _settings_problems(t, classes, lane_settings)
+        errors += [x for x in e if x not in errors]
+        warnings += [f"{t.name}: {x}" for x in w]
+    return errors, warnings
 
 
 # The live raw documents + their load warnings, mutated only under _plock (the
@@ -1124,27 +1181,21 @@ def _normalize_consumers(doc, strict):
     return errors, warnings, out
 
 
-_consumers_doc = {"consumers": []}
-_consumers_warnings = []
-
-
-def _load_consumers():
-    """Load the consumers document from CONSUMERS_FILE (import/startup + reload
-    path). Absent file = no consumers, ZERO warnings — the feature is opt-in.
+def _load_consumers(t):
+    """Load the tenant's consumers document (its creation + the reload path).
+    Absent file = no consumers, ZERO warnings — the feature is opt-in.
     Unreadable file / bad shape = WARN and no consumers, never a crash."""
-    global _consumers_doc, _consumers_warnings
     warnings = []
     raw = None
     try:
-        with open(CONSUMERS_FILE) as f:
-            raw = json.load(f)
-    except FileNotFoundError:
-        _consumers_doc, _consumers_warnings = {"consumers": []}, []
-        return []
+        raw = _store.read_json(t.consumers_file)
     except Exception as e:  # noqa: BLE001
-        log(f"WARN bad consumers file {CONSUMERS_FILE}: {e} — no consumers loaded")
-        _consumers_doc = {"consumers": []}
-        _consumers_warnings = [f"bad consumers file: {e} — no consumers loaded"]
+        log(f"WARN bad consumers file {t.consumers_file}: {e} — no consumers loaded")
+        t.consumers_doc = {"consumers": []}
+        t.consumers_warnings = [f"bad consumers file: {e} — no consumers loaded"]
+        return []
+    if raw is None:
+        t.consumers_doc, t.consumers_warnings = {"consumers": []}, []
         return []
     dropped = []
     raw = _drop_non_finite(raw, dropped)
@@ -1152,12 +1203,9 @@ def _load_consumers():
     warnings = dropped + warnings
     for w in warnings:
         log(f"WARN consumers: {w}")
-    _consumers_doc = raw if isinstance(raw, dict) else {"consumers": raw}
-    _consumers_warnings = warnings
+    t.consumers_doc = raw if isinstance(raw, dict) else {"consumers": raw}
+    t.consumers_warnings = warnings
     return out
-
-
-_consumers = _load_consumers()
 
 
 def _consumers_view(consumers, classes):
@@ -1326,27 +1374,20 @@ def _is_amount(v):
             and math.isfinite(v) and v >= 0)
 
 
-_money_doc = {}
-_money_warnings = []
-_money = {"pay_order": [], "pots": {}}
-
-
-def _load_money():
-    """Load the money document from MONEY_FILE (import/startup path). Absent
-    file = the defaults with no warnings; unreadable = warn and defaults.
-    Pots are not checked against accounts here: nothing is polled yet at
-    import, and a pot that names no account binds nothing (dangling)."""
-    global _money_doc, _money_warnings
+def _load_money(t):
+    """Load the tenant's money document (its creation + the reload path).
+    Absent file = the defaults with no warnings; unreadable = warn and
+    defaults. Pots are not checked against accounts here: nothing is polled
+    yet at creation, and a pot that names no account binds nothing (dangling)."""
     try:
-        with open(MONEY_FILE) as f:
-            raw = json.load(f)
-    except FileNotFoundError:
-        _money_doc, _money_warnings = {}, []
-        return {"pay_order": [], "pots": {}}
+        raw = _store.read_json(t.money_file)
     except Exception as e:  # noqa: BLE001
-        log(f"WARN bad money file {MONEY_FILE}: {e} — defaults (no pay_order, topup off)")
-        _money_doc = {}
-        _money_warnings = [f"bad money file: {e} — defaults (no pay_order, topup off)"]
+        log(f"WARN bad money file {t.money_file}: {e} — defaults (no pay_order, topup off)")
+        t.money_doc = {}
+        t.money_warnings = [f"bad money file: {e} — defaults (no pay_order, topup off)"]
+        return {"pay_order": [], "pots": {}}
+    if raw is None:
+        t.money_doc, t.money_warnings = {}, []
         return {"pay_order": [], "pots": {}}
     dropped = []
     raw = _drop_non_finite(raw, dropped)
@@ -1354,12 +1395,9 @@ def _load_money():
     warnings = dropped + warnings
     for w in warnings:
         log(f"WARN money: {w}")
-    _money_doc = raw if isinstance(raw, dict) else {}
-    _money_warnings = warnings
+    t.money_doc = raw if isinstance(raw, dict) else {}
+    t.money_warnings = warnings
     return out
-
-
-_money = _load_money()
 
 
 # ---- the ledger (quota-model 50 §1.7, C6) --------------------------------------
@@ -1387,8 +1425,9 @@ _money = _load_money()
 # between readings, less our ledger, is shown as "spent elsewhere or
 # uncounted" and gates nothing (reconciliation, below).
 
-LEDGER_FILE = (os.environ.get("SWITCH_LEDGER_FILE")
-               or os.path.join(os.path.dirname(MONEY_FILE) or ".", "ledger.jsonl"))
+# The file is the tenant's ledger.jsonl: an append-only log, one entry a
+# line, plain whatever the store's mode (it holds charges, never a secret, and
+# its recovery below is by line boundary).
 
 
 # API list prices, USD per 1M tokens, by the exact model id the proxy reports
@@ -1487,7 +1526,6 @@ _LEDGER_BASES = ("exact", "derived", "upper_bound", "lower_bound")
 _LEDGER_KEYS = frozenset(("id", "at", "account", "pot", "route", "model", "charge", "unit",
                           "basis", "reason", "usage", "speed"))
 
-_ledger_lock = threading.Lock()
 # seq: entries in the file (an entry's seq is its line); ids: {id: period
 # start}, kept for this period and the last, which is as far back as a resend
 # reaches; spend: {(period start, pot id, route): charge sum}; uncounted: the
@@ -1497,8 +1535,9 @@ _ledger_lock = threading.Lock()
 # newest counted entry's at}: the pot served a paid request then, which ends a
 # prepaid account's dry (notices.py) and a shut report on a pot nothing reads
 # (_report_money_floor).
-_ledger = {"seq": 0, "ids": {}, "spend": {}, "uncounted": {}, "unpriced": {}, "total": {},
-           "recon": {}, "unreadable": 0, "counted_at": {}}
+def _ledger_fresh():
+    return {"seq": 0, "ids": {}, "spend": {}, "uncounted": {}, "unpriced": {}, "total": {},
+            "recon": {}, "unreadable": 0, "counted_at": {}}
 
 
 def _ledger_entry_problem(e, roster, now):
@@ -1556,37 +1595,37 @@ def _ledger_line_problem(e, now):
     return None
 
 
-def _ledger_add(e):
+def _ledger_add(t, e):
     """Fold one entry into the aggregates. Caller holds _ledger_lock."""
     start = _budget_period(e["at"])[0]
     pid, route = f"{e['account']}/{e['pot']}", e["route"]
-    _ledger["seq"] += 1
-    _ledger["ids"][e["id"]] = start
+    t.ledger["seq"] += 1
+    t.ledger["ids"][e["id"]] = start
     key = (start, pid, route)
     if e.get("charge") is None:
-        _ledger["uncounted"][key] = _ledger["uncounted"].get(key, 0) + 1
+        t.ledger["uncounted"][key] = t.ledger["uncounted"].get(key, 0) + 1
         return
-    _ledger["spend"][key] = _ledger["spend"].get(key, 0.0) + e["charge"]
-    counted = _ledger.setdefault("counted_at", {})
+    t.ledger["spend"][key] = t.ledger["spend"].get(key, 0.0) + e["charge"]
+    counted = t.ledger.setdefault("counted_at", {})
     if e["at"] > counted.get(pid, 0):
         counted[pid] = e["at"]
     if e.get("basis") == "lower_bound":
-        _ledger["unpriced"][key] = _ledger["unpriced"].get(key, 0) + 1
-    _ledger["total"][(pid, route)] = _ledger["total"].get((pid, route), 0.0) + e["charge"]
-    rc = _ledger["recon"].get(pid)
+        t.ledger["unpriced"][key] = t.ledger["unpriced"].get(key, 0) + 1
+    t.ledger["total"][(pid, route)] = t.ledger["total"].get((pid, route), 0.0) + e["charge"]
+    rc = t.ledger["recon"].get(pid)
     if rc is not None and e["at"] >= rc["since"]:
         rc["ledger"] += e["charge"]
 
 
-def _ledger_prune(now):
+def _ledger_prune(t, now):
     """Forget dedupe ids older than last period, as far back as a POST's `at`
     may be (_ledger_entry_problem). Caller holds _ledger_lock."""
     start = _budget_period(now)[0]
     prev = _budget_period(start - 1)[0]
-    _ledger["ids"] = {i: p for i, p in _ledger["ids"].items() if p >= prev}
+    t.ledger["ids"] = {i: p for i, p in t.ledger["ids"].items() if p >= prev}
 
 
-def _load_ledger():
+def _load_ledger(t):
     """Read LEDGER_FILE back at startup. No line can stop the brain starting,
     and none is skipped quietly:
       - a final line with no newline is an append that failed (its POST got
@@ -1598,19 +1637,19 @@ def _load_ledger():
         logged with its number and counted in ledger.unreadable_lines. It may
         hide spend, so while one exists every budget reads no (unknown)."""
     try:
-        f = open(LEDGER_FILE, "rb")
+        f = open(t.ledger_file, "rb")
     except FileNotFoundError:
         return
     except OSError as e:
-        log(f"WARN ledger: cannot read {LEDGER_FILE}: {e}")
-        with _ledger_lock:
-            _ledger["unreadable"] += 1
+        log(f"WARN ledger: cannot read {t.ledger_file}: {e}")
+        with t.ledger_lock:
+            t.ledger["unreadable"] += 1
         return
     now, ids, dups = time.time(), set(), 0
-    with f, _ledger_lock:
+    with f, t.ledger_lock:
         for n, line in enumerate(f, 1):
             if not line.endswith(b"\n"):
-                log(f"WARN ledger: {LEDGER_FILE}:{n} has no newline (an append that failed); "
+                log(f"WARN ledger: {t.ledger_file}:{n} has no newline (an append that failed); "
                     "dropped, and cut before the next append")
                 break
             try:
@@ -1619,28 +1658,28 @@ def _load_ledger():
                 if why:
                     raise ValueError(why)
             except (ValueError, RecursionError) as err:
-                log(f"WARN ledger: {LEDGER_FILE}:{n} unreadable ({err}); not counted, and "
+                log(f"WARN ledger: {t.ledger_file}:{n} unreadable ({err}); not counted, and "
                     "every budget reads no (unknown) while it is there")
-                _ledger["unreadable"] += 1
-                _ledger["seq"] += 1
+                t.ledger["unreadable"] += 1
+                t.ledger["seq"] += 1
                 continue
             if e["id"] in ids:
                 dups += 1
-                _ledger["seq"] += 1
+                t.ledger["seq"] += 1
                 continue
             ids.add(e["id"])
-            _ledger_add(e)
-        _ledger_prune(now)
-        log(f"ledger: {_ledger['seq']} lines read from {LEDGER_FILE}"
+            _ledger_add(t, e)
+        _ledger_prune(t, now)
+        log(f"ledger: {t.ledger['seq']} lines read from {t.ledger_file}"
             + (f", {dups} resent after a failed append (counted once)" if dups else ""))
 
 
-def _ledger_append(lines):
+def _ledger_append(t, lines):
     """Append encoded lines to LEDGER_FILE, starting on a line boundary: a
     partial line at the end (an append that failed part-way) is cut first,
     so it cannot join the next line into one unreadable line. Raises OSError.
     Caller holds _ledger_lock."""
-    with open(LEDGER_FILE, "ab+") as f:
+    with open(t.ledger_file, "ab+") as f:
         end = f.seek(0, os.SEEK_END)
         cut = end
         while cut > 0:
@@ -1655,14 +1694,14 @@ def _ledger_append(lines):
                 break
             cut -= step
         if cut != end:
-            log(f"WARN ledger: cut {end - cut} bytes of a partial line at the end of {LEDGER_FILE}")
+            log(f"WARN ledger: cut {end - cut} bytes of a partial line at the end of {t.ledger_file}")
             f.truncate(cut)
         f.write(b"".join(lines))
         f.flush()
         os.fsync(f.fileno())
 
 
-def ledger_accept(entries, roster, now):
+def ledger_accept(t, entries, roster, now):
     """Each entry on its own (quota-model 64 §5, POST /reports' ledger kind):
     -> ([(result, why)] in order, seq). A bad entry is `refused`, with what
     is wrong with it; an id already held (this budget period or the last), or
@@ -1674,12 +1713,12 @@ def ledger_accept(entries, roster, now):
         why = _ledger_entry_problem(e, roster, now)
         if why:
             results[i] = ("refused", why)
-    with _ledger_lock:
+    with t.ledger_lock:
         seen, new, idx = set(), [], []
         for i, e in enumerate(entries):
             if results[i] is not None:
                 continue
-            if e["id"] in _ledger["ids"] or e["id"] in seen:
+            if e["id"] in t.ledger["ids"] or e["id"] in seen:
                 results[i] = ("ignored", "a ledger id the brain already has")
                 continue
             seen.add(e["id"])
@@ -1687,31 +1726,31 @@ def ledger_accept(entries, roster, now):
             idx.append(i)
         if new:
             try:
-                _ledger_append([(json.dumps(e, sort_keys=True, allow_nan=False) + "\n").encode()
+                _ledger_append(t, [(json.dumps(e, sort_keys=True, allow_nan=False) + "\n").encode()
                                 for e in new])
             except OSError as err:
                 for i in idx:
-                    results[i] = ("retry", f"cannot append {LEDGER_FILE}: {err}")
-                return results, _ledger["seq"]
+                    results[i] = ("retry", f"cannot append {t.ledger_file}: {err}")
+                return results, t.ledger["seq"]
             for e in new:
-                _ledger_add(e)
-            _ledger_prune(now)
+                _ledger_add(t, e)
+            _ledger_prune(t, now)
             for i in idx:
                 results[i] = ("applied", None)
-        return results, _ledger["seq"]
+        return results, t.ledger["seq"]
 
 
-def _ledger_note_balance(pid, balance, at):
+def _ledger_note_balance(t, pid, balance, at):
     """Reconciliation (§1.7): the falls in a countable pot's balance between
     good readings, since this process first read it. A rise is a refill and
     is never our spending; the falls less our ledger since then are "spent
     elsewhere or uncounted". A surface only: it gates nothing."""
     if balance is None:
         return
-    with _ledger_lock:
-        rc = _ledger["recon"].get(pid)
+    with t.ledger_lock:
+        rc = t.ledger["recon"].get(pid)
         if rc is None:
-            _ledger["recon"][pid] = {"since": at, "at": at, "last": balance, "falls": 0.0,
+            t.ledger["recon"][pid] = {"since": at, "at": at, "last": balance, "falls": 0.0,
                                      "ledger": 0.0}
             return
         if at <= rc["at"]:
@@ -1721,7 +1760,7 @@ def _ledger_note_balance(pid, balance, at):
         rc["last"], rc["at"] = balance, at
 
 
-def _ledger_payload(now, roster, money):
+def _ledger_payload(t, now, roster, money):
     """The /preferred `ledger` block: this budget period, when it was read,
     the file's seq (the proxy drops a posted entry once seq covers it), the
     rates the proxy charges by and the tables each unit's charges need, and
@@ -1729,12 +1768,12 @@ def _ledger_payload(now, roster, money):
     spend in total and per route, its uncounted hops, the owner's budgets, and
     the reconciliation."""
     start, end = _budget_period(now)
-    with _ledger_lock:
-        spend = {k: v for k, v in _ledger["spend"].items() if k[0] == start}
-        unc = {k: v for k, v in _ledger["uncounted"].items() if k[0] == start}
-        unpriced = {k: v for k, v in _ledger["unpriced"].items() if k[0] == start}
-        recon = {p: dict(r) for p, r in _ledger["recon"].items()}
-        seq, unreadable = _ledger["seq"], _ledger["unreadable"]
+    with t.ledger_lock:
+        spend = {k: v for k, v in t.ledger["spend"].items() if k[0] == start}
+        unc = {k: v for k, v in t.ledger["uncounted"].items() if k[0] == start}
+        unpriced = {k: v for k, v in t.ledger["unpriced"].items() if k[0] == start}
+        recon = {p: dict(r) for p, r in t.ledger["recon"].items()}
+        seq, unreadable = t.ledger["seq"], t.ledger["unreadable"]
     pots = {f"{a}/{_money_pot(pv)}": _COUNTABLE_UNITS[pv] for a, pv in roster.items()
             if pv in _COUNTABLE_UNITS}
     out = {}
@@ -1755,14 +1794,14 @@ def _ledger_payload(now, roster, money):
     return {"period": {"start": start, "end": end}, "as_of": round(now, 3), "seq": seq,
             "unreadable_lines": unreadable,
             "rates": _LEDGER_RATES,
-            "rate_tables": {u: list(t) for u, t in _LEDGER_RATE_TABLES.items()},
+            "rate_tables": {u: list(tb) for u, tb in _LEDGER_RATE_TABLES.items()},
             "pots": out}
 
 
-def _ledger_totals():
+def _ledger_totals(t):
     """{(pot id, route): all-time counted charge}, for money_spent_total."""
-    with _ledger_lock:
-        return dict(_ledger["total"])
+    with t.ledger_lock:
+        return dict(t.ledger["total"])
 
 
 # ---- document revisions + hot-swap (#92, ui-revamp §6) -------------------------
@@ -1779,15 +1818,52 @@ def _doc_revision(doc):
 # the brain is a ThreadingHTTPServer, handlers are concurrent, and an
 # unserialized check-and-write is a lost-update race (§6). Never held while
 # waiting on _plock-holders that need these (nothing does).
-_doc_locks = {"classes": threading.Lock(), "consumers": threading.Lock(),
-              "money": threading.Lock()}
+_classes_lock = threading.Lock()  # the one operator document's; the others are a tenant's
+# The live classes config's four globals are replaced together (_swap_classes)
+# and read together under this; a tenant's plock no longer guards them.
+_classes_swap = threading.RLock()
 _DOC_KINDS = ("classes", "consumers", "money")
 
 
-def _doc_path(kind):
+def _doc_lock(t, kind):
+    """The lock a document's PUT, validate and reload hold: classes is the
+    operator's (global), consumers and money are the tenant's."""
+    return _classes_lock if kind == "classes" else t.doc_locks[kind]
+
+
+def _doc_path(t, kind):
     """The file a document loads from and is written to (read at call time so
-    a test can point the brain elsewhere)."""
-    return {"classes": CLASSES_FILE, "consumers": CONSUMERS_FILE, "money": MONEY_FILE}[kind]
+    a test can point the brain elsewhere). classes is CLASSES_FILE for every
+    tenant (t is None on its routes); the others are the tenant's."""
+    if kind == "classes":
+        return CLASSES_FILE
+    return {"consumers": t.consumers_file, "money": t.money_file}[kind]
+
+
+def _doc_read(t, kind):
+    """The document's file as parsed JSON, None without one. classes is the
+    operator's plain file; a tenant's documents go through the store."""
+    path = _doc_path(t, kind)
+    if kind == "classes":
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return None
+    return _store.read_json(path)
+
+
+def _doc_write(t, kind, canon):
+    """Write the document atomically, in the form its reader expects."""
+    path = _doc_path(t, kind)
+    if kind == "classes":
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(canon, f, indent=2, allow_nan=False)
+            f.write("\n")
+        os.replace(tmp, path)
+        return
+    _store.write_bytes(path, (json.dumps(canon, indent=2, allow_nan=False) + "\n").encode("utf-8"))
 
 
 def _append_history(path, rev, actor, reason, doc):
@@ -1830,35 +1906,40 @@ def _classes_live_effect(new_classes):
     deleted/new classes, bindings and pins that would be invalidated (their
     member vanished — the proxy bind cache rebinds within ~15 s), window
     changes vs the live config, and consumers left with a dangling class ref
-    (§5: deleting a referenced class SUCCEEDS with a warning). Takes _plock."""
+    (§5: deleting a referenced class SUCCEEDS with a warning). The classes
+    document is every tenant's, so the pins, bindings and consumers are every
+    tenant's, each entry naming its tenant. Takes each tenant's plock in turn."""
     new_by = {c["class"]: c for c in new_classes}
-    with _plock:
+    with _classes_swap:
         old_names = [c["class"] for c in _classes]
         old_windows = {c["class"]: c["context_window"] for c in _classes}
-        state = {cn: {"pinned": cs.get("pinned"),
-                      "sessions": {sid: s.get("member")
-                                   for sid, s in cs.get("sessions", {}).items()}}
-                 for cn, cs in _preferred.get("classes", {}).items()}
     deleted = [n for n in old_names if n not in new_by]
     added = [c["class"] for c in new_classes if c["class"] not in old_names]
     window_changes = [{"class": n, "from": old_windows[n], "to": new_by[n]["context_window"]}
                      for n in old_names
                      if n in new_by and new_by[n]["context_window"] != old_windows[n]]
-    invalidated_pins, invalidated_bindings = [], []
-    for cname, cs in state.items():
-        member_ids = ({_member_id(m) for m in new_by[cname]["members"]}
-                      if cname in new_by else set())
-        if cs["pinned"] and cs["pinned"] not in member_ids:
-            invalidated_pins.append({"class": cname, "member": cs["pinned"]})
-        for sid, member in cs["sessions"].items():
-            if member not in member_ids:
-                invalidated_bindings.append({"class": cname, "session": sid, "member": member})
-    consumer_warnings = []
-    for n in deleted:
-        for c in _consumers:
-            if f"class:{n}" in c["members"]:
-                consumer_warnings.append(f"consumer {c['id']!r} references deleted class {n!r} "
-                                         "— its ref goes dangling until edited")
+    invalidated_pins, invalidated_bindings, consumer_warnings = [], [], []
+    for t in _registry.all():
+        with t.plock:
+            state = {cn: {"pinned": cs.get("pinned"),
+                          "sessions": {sid: s.get("member")
+                                       for sid, s in cs.get("sessions", {}).items()}}
+                     for cn, cs in t.preferred.get("classes", {}).items()}
+            consumers = t.consumers
+        for cname, cs in state.items():
+            member_ids = ({_member_id(m) for m in new_by[cname]["members"]}
+                          if cname in new_by else set())
+            if cs["pinned"] and cs["pinned"] not in member_ids:
+                invalidated_pins.append({"tenant": t.id, "class": cname, "member": cs["pinned"]})
+            for sid, member in cs["sessions"].items():
+                if member not in member_ids:
+                    invalidated_bindings.append({"tenant": t.id, "class": cname, "session": sid,
+                                                 "member": member})
+        for n in deleted:
+            for c in consumers:
+                if f"class:{n}" in c["members"]:
+                    consumer_warnings.append(f"{t.name}: consumer {c['id']!r} references deleted "
+                                             f"class {n!r} — its ref goes dangling until edited")
     return {"deleted_classes": deleted, "new_classes": added,
             "window_changes": window_changes,
             "invalidated_pins": invalidated_pins,
@@ -1868,25 +1949,29 @@ def _classes_live_effect(new_classes):
 
 def _swap_classes(new_classes, doc, warnings, lane_settings):
     """Hot-swap the live class config (§6 hot-swap notes). Caller holds
-    _doc_locks["classes"]. The swap is an ATOMIC REFERENCE REPLACE of the
-    _classes module global performed under _plock — every read site (including
-    the poller's _compute_class_sessions) reads it under _plock, so no reader
-    ever sees a half-installed config. Runtime state reconciliation, all under
-    the same _plock hold: state for deleted classes dropped, fresh state for
-    new classes, pins/bindings to members that vanished invalidated (the proxy
-    bind cache rebinds within ~15 s). Restart never required. Returns the
-    session journal's seq at the swap: the moves after it are the new
-    config's (_doc_put)."""
+    _classes_lock. The swap is an ATOMIC REFERENCE REPLACE of the _classes
+    module global, under _classes_swap; every tenant's read of it is one
+    reference read, so no reader ever sees a half-installed config. Then each
+    tenant's runtime state is reconciled under that tenant's plock: state for
+    deleted classes dropped, fresh state for new classes, pins/bindings to
+    members that vanished invalidated (the proxy bind cache rebinds within
+    ~15 s). Restart never required. Returns {tenant id: that tenant's session
+    journal seq at the swap}: the moves after it are the new config's
+    (_doc_put)."""
     global _classes, _classes_doc, _classes_warnings, _lane_settings
-    with _plock:
+    with _classes_swap:
         _classes = new_classes
         _classes_doc = doc
         _classes_warnings = warnings
         _lane_settings = lane_settings
-        _reconcile_class_state(_preferred.setdefault("classes", {}), new_classes,
-                               lambda text: log(f"classes swap: {text}"))
-        _save_state()
-        return _journal_seq
+    seen = {}
+    for t in _registry.all():
+        with t.plock:
+            _reconcile_class_state(t.preferred.setdefault("classes", {}), new_classes,
+                                   lambda text: log(f"{t.id}: classes swap: {text}"))
+            _save_state(t)
+            seen[t.id] = t.journal_seq
+    return seen
 
 
 def _reconcile_class_state(cls_state, classes, note):
@@ -1912,46 +1997,50 @@ def _reconcile_class_state(cls_state, classes, note):
             del cs["sessions"][sid]
 
 
-def _swap_consumers(new_consumers, doc, warnings):
-    """Hot-swap the live consumers config. Caller holds _doc_locks["consumers"].
+def _swap_consumers(t, new_consumers, doc, warnings):
+    """Hot-swap the live consumers config. Caller holds t.doc_locks["consumers"].
     Consumers carry NO runtime state (no sessions, no pins), so the swap is
     just the atomic reference replace under _plock for reader consistency."""
-    global _consumers, _consumers_doc, _consumers_warnings
-    with _plock:
-        _consumers = new_consumers
-        _consumers_doc = doc
-        _consumers_warnings = warnings
+    with t.plock:
+        t.consumers = new_consumers
+        t.consumers_doc = doc
+        t.consumers_warnings = warnings
 
 
-def _swap_money(new_money, doc, warnings):
-    """Hot-swap the live money settings. Caller holds _doc_locks["money"].
+def _swap_money(t, new_money, doc, warnings):
+    """Hot-swap the live money settings. Caller holds t.doc_locks["money"].
     Money carries no runtime state of its own: the next check reads it.
     Returns the session journal's seq at the swap, as _swap_classes does."""
-    global _money, _money_doc, _money_warnings
-    with _plock:
-        _money = new_money
-        _money_doc = doc
-        _money_warnings = warnings
-        return _journal_seq
+    with t.plock:
+        t.money = new_money
+        t.money_doc = doc
+        t.money_warnings = warnings
+        return t.journal_seq
 
 
-def _live_doc(kind):
-    """The live raw document of a kind. Caller holds _plock."""
-    return {"classes": _classes_doc, "consumers": _consumers_doc, "money": _money_doc}[kind]
+def _live_doc(t, kind):
+    """The live raw document of a kind. Caller holds t.plock (or, for the
+    classes document, _classes_swap; t is None on its routes)."""
+    if kind == "classes":
+        return _classes_doc
+    return {"consumers": t.consumers_doc, "money": t.money_doc}[kind]
 
 
-def _live_revision(kind):
+def _live_revision(t, kind):
     """The live document's content-hash revision (If-Match's comparand)."""
-    with _plock:
-        return _doc_revision(_live_doc(kind))
+    if kind == "classes":
+        with _classes_swap:
+            return _doc_revision(_classes_doc)
+    with t.plock:
+        return _doc_revision(_live_doc(t, kind))
 
 
-def _money_derived(money):
+def _money_derived(t, money):
     """The money document's derived view for the editor: every money pot the
     accounts have now, and each configured pot's status against them."""
-    with _lock:
-        snap = list(_state.values())
-    roster = _account_roster(snap)
+    with t.lock:
+        snap = list(t.state.values())
+    roster = _account_roster(t, snap)
     pots = set(_money_pots(roster)) | {f"{a}/{ALLOWANCE_POT}" for a in roster}
     return {"money_pots": _money_pots(roster),
             "pay_order": [{"pot": p, "status": "ok" if p in pots else "dangling"}
@@ -1960,24 +2049,27 @@ def _money_derived(money):
                      for p, e in money["pots"].items()}}
 
 
-def _doc_snapshot(kind):
+def _doc_snapshot(t, kind):
     """The GET /classes|/consumers body: live raw doc + content-hash revision +
     derived state + load warnings."""
-    with _plock:
-        if kind == "classes":
+    if kind == "classes":
+        with _classes_swap:
             doc, warnings = _classes_doc, list(_classes_warnings)
             derived = _classes_derived(_classes)
-        elif kind == "consumers":
-            doc, warnings = _consumers_doc, list(_consumers_warnings)
-            derived = _consumers_view(_consumers, _classes)
+        return {"doc": doc, "revision": _doc_revision(doc),
+                "derived": derived, "warnings": warnings}
+    with t.plock:
+        if kind == "consumers":
+            doc, warnings = t.consumers_doc, list(t.consumers_warnings)
+            derived = _consumers_view(t.consumers, _classes)
         else:
-            doc, warnings, money = _money_doc, list(_money_warnings), _money
+            doc, warnings, money = t.money_doc, list(t.money_warnings), t.money
     if kind == "money":
         # Against the accounts known now: an orphaned setting shows dangling.
-        derived = _money_derived(money)
-        with _lock:
-            roster = _account_roster(list(_state.values()))
-        with _plock:
+        derived = _money_derived(t, money)
+        with t.lock:
+            roster = _account_roster(t, list(t.state.values()))
+        with t.plock:
             routes = _routes(_classes, _lane_settings, roster)
         errors, live = _money_problems(money, roster, routes)
         warnings += [f"dangling: {e}" for e in errors] + live
@@ -2004,7 +2096,7 @@ def _non_finite_path(v, where="$"):
     return None
 
 
-def _doc_check(kind, doc):
+def _doc_check(t, kind, doc):
     """STRICT validation + normalization for a candidate document (PUT/validate
     path). -> (errors, warnings, normalized, canonical_doc). canonical_doc is
     what gets hashed/written: classes = the document as given (array or
@@ -2022,14 +2114,14 @@ def _doc_check(kind, doc):
             return errors, [], None, None
         warnings = []
         classes, lanes = _normalize_classes_doc(doc, warnings)
-        warnings += _settings_problems(classes, lanes)[1]
+        warnings += _tenants_settings_problems(classes, lanes)[1]
         return [], warnings, (classes, lanes), doc
     if kind == "money":
         errors, warnings, normalized = _normalize_money(doc, strict=True)
         if not errors:
-            with _lock:
-                roster = _account_roster(list(_state.values()))
-            with _plock:
+            with t.lock:
+                roster = _account_roster(t, list(t.state.values()))
+            with t.plock:
                 routes = _routes(_classes, _lane_settings, roster)
             errors, warnings = _money_problems(normalized, roster, routes)
         if errors:
@@ -2041,24 +2133,28 @@ def _doc_check(kind, doc):
     return [], warnings, normalized, (doc if isinstance(doc, dict) else {"consumers": doc})
 
 
-def _doc_live_effect(kind, normalized):
+def _doc_live_effect(t, kind, normalized):
     """The validate dry-run's live-effect block. Classes carry runtime state
     (bindings/pins/windows) — see _classes_live_effect. Both owner-settings
     kinds add the session moves a save makes (_session_preview). Consumers
     carry none; their live effect is just which refs would be dangling
     against today's config."""
     if kind == "classes":
-        return {**_classes_live_effect(normalized[0]), **_session_preview(kind, normalized)}
+        preview = {"session_moves": [], "held_by_pin": []}
+        for tt in _registry.all():
+            for k, evs in _session_preview(tt, kind, normalized).items():
+                preview[k] += [dict(ev, tenant=tt.id) for ev in evs]
+        return {**_classes_live_effect(normalized[0]), **preview}
     if kind == "money":
-        return _session_preview(kind, normalized)
-    with _plock:
+        return _session_preview(t, kind, normalized)
+    with t.plock:
         classes = _classes
     view = _consumers_view(normalized, classes)
     return {"dangling_refs": [m["ref"] for c in view for m in c["members"]
                               if m["status"] == "dangling"]}
 
 
-def _session_preview(kind, normalized):
+def _session_preview(t, kind, normalized):
     """What saving this owner-settings document would do to the bound class
     sessions now (quota-model 50 §2.3): the class pass itself, on a copy of
     the live sessions reconciled as the swap would, under the candidate
@@ -2069,19 +2165,19 @@ def _session_preview(kind, normalized):
     through a change of their class's pay settings; they move when the pin
     ends. The lane and pool incumbents are the last pass's. Takes the locks
     itself."""
-    with _lock:
-        snap = list(_state.values())
+    with t.lock:
+        snap = list(t.state.values())
     now = time.time()
     events = []
-    with _plock:
+    with t.plock:
         if kind == "classes":
-            (classes, lanes), money = normalized, _money
+            (classes, lanes), money = normalized, t.money
         else:
             classes, lanes, money = _classes, _lane_settings, normalized
-        states = copy.deepcopy(_preferred.get("classes", {}))
+        states = copy.deepcopy(t.preferred.get("classes", {}))
         _reconcile_class_state(states, classes, lambda text: None)
-        ctx = _settings_ctx(snap, now, classes, lanes, money)
-        _compute_class_sessions(snap, now, ctx, classes, states,
+        ctx = _settings_ctx(t, snap, now, classes, lanes, money)
+        _compute_class_sessions(t, snap, now, ctx, classes, states,
                                 lambda what, ev: events.append((what, ev)))
     return {"session_moves": [ev for what, ev in events if what == "move"],
             "held_by_pin": [ev for what, ev in events if what == "held"]}
@@ -2399,14 +2495,14 @@ _WINDOW_SLOT_SLACK_S = 180
 _READING_KEYS = ("name", "kind", "provider", "email", "tier", "good_ts", "reading", "source")
 
 
-def _readings_snapshot():
+def _readings_snapshot(t):
     """Every account's last good reading, for _save_state."""
-    with _lock:
+    with t.lock:
         return [{k: r[k] for k in _READING_KEYS if k in r}
-                for r in _state.values() if r.get("good_ts") and r.get("reading")]
+                for r in t.state.values() if r.get("good_ts") and r.get("reading")]
 
 
-def _restore_readings(readings):
+def _restore_readings(t, readings):
     """Seed _state from saved readings at startup: each is served with its true
     age (good_ts) and marked stale until this process polls the account, so
     the stale rule decides, not a blank as_of (quota-model 50 §1.4). Only an
@@ -2416,9 +2512,9 @@ def _restore_readings(readings):
     this process keeps its own result. A reading saved before C6 carries the
     raw `usage` it replaced and no `reading`: it is not restored, and the
     account reads never measured until its first poll."""
-    configured = set(_account_loop_names()) | set(_provider_poll_targets())
+    configured = set(_account_loop_names(t)) | set(_provider_poll_targets(t))
     n, old = 0, []
-    with _lock:
+    with t.lock:
         for r in readings if isinstance(readings, list) else ():
             if isinstance(r, dict) and "usage" in r and "reading" not in r:
                 old.append(r.get("name"))
@@ -2426,9 +2522,9 @@ def _restore_readings(readings):
             if not (isinstance(r, dict) and isinstance(r.get("name"), str)
                     and isinstance(r.get("good_ts"), (int, float)) and isinstance(r.get("reading"), dict)):
                 continue
-            if r["name"] not in configured or r["name"] in _state:
+            if r["name"] not in configured or r["name"] in t.state:
                 continue
-            _state[r["name"]] = dict(r, ok=0, ts=r["good_ts"], stale=1, http=0, retry_after=None,
+            t.state[r["name"]] = dict(r, ok=0, ts=r["good_ts"], stale=1, http=0, retry_after=None,
                                      err="restored at restart; not polled since")
             n += 1
     if old:
@@ -2437,15 +2533,12 @@ def _restore_readings(readings):
     return n
 
 
-def _save_state():
+def _save_state(t):
     """Persist the preferred-account decision so an exporter restart doesn't flap
     it, and the last good readings so a restart keeps their age (§1.4).
     Caller holds _plock (never _lock): _preferred is the policy's."""
     try:
-        tmp = STATE_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(dict(_preferred, readings=_readings_snapshot()), f)
-        os.replace(tmp, STATE_FILE)
+        _store.write_json(t.state_file, dict(t.preferred, readings=_readings_snapshot(t)))
     except Exception as e:  # noqa: BLE001
         log(f"WARN could not persist switch state: {e}")
 
@@ -2525,27 +2618,24 @@ def _migrate_state(d, lane_names, class_names=(), provider_ids=()):
     return out
 
 
-def _load_state():
+def _load_state(t):
     d = None
     try:
-        with open(STATE_FILE) as f:
-            d = json.load(f)
-    except FileNotFoundError:
-        pass
+        d = _store.read_json(t.state_file)
     except Exception as e:  # noqa: BLE001
         log(f"WARN could not load switch state: {e}")
-    with _plock:
+    with t.plock:
         if isinstance(d, dict):
-            _preferred.update(_migrate_state(d, _lane_names, [c["class"] for c in _classes],
+            t.preferred.update(_migrate_state(d, _lane_names, [c["class"] for c in _classes],
                                              _pollable_provider_ids()))
         else:
-            _preferred["lanes"] = {ln: _new_lane_state() for ln in _lane_names}
-            _preferred["classes"] = {}
-            _preferred["providers"] = {}
+            t.preferred["lanes"] = {ln: _new_lane_state() for ln in _lane_names}
+            t.preferred["classes"] = {}
+            t.preferred["providers"] = {}
     if isinstance(d, dict):
-        lanes_now = {ln: s.get("account") for ln, s in _preferred["lanes"].items()}
-        log(f"restored preferred account = {_preferred.get('account')!r} lanes={lanes_now} "
-            f"readings={_restore_readings(d.get('readings'))}")
+        lanes_now = {ln: s.get("account") for ln, s in t.preferred["lanes"].items()}
+        log(f"restored preferred account = {t.preferred.get('account')!r} lanes={lanes_now} "
+            f"readings={_restore_readings(t, d.get('readings'))}")
 
 
 def _weekly(res):
@@ -3211,7 +3301,7 @@ def _standing_pot(pot):
     return out
 
 
-def _account_standing(name, res, provider, now):
+def _account_standing(t, name, res, provider, now):
     """One account's standing (the /preferred accounts{} entry the dial check
     reads, golden shape in dialcheck_golden.json), from its latest good
     reading (§1.5): the allowance's gate and windows keyed by id, its other
@@ -3228,9 +3318,9 @@ def _account_standing(name, res, provider, now):
     reported_as_of, _reported_result and _hold_snap), so a
     report keeps its window fresh while polls fail. The standing's as_of
     stays the poll's."""
-    with _poll_health_lock:
-        sched = _poll_schedule.get(name)
-        epoch = _recheck_epochs.get(name)
+    with t.poll_health_lock:
+        sched = t.poll_schedule.get(name)
+        epoch = t.recheck_epochs.get(name)
     rd = (res or {}).get("reading")
     standing = {"provider": provider, "kind": _account_kind(provider),
                 "as_of": (res or {}).get("good_ts") if rd else None,
@@ -3257,12 +3347,12 @@ def _account_standing(name, res, provider, now):
     return standing
 
 
-def _account_roster(snap):
+def _account_roster(t, snap):
     """{account: provider} for every account the brain knows: Anthropic accounts
     in the creds cache, every enabled provider poll target, and anything with a
     reading. An account listed but not yet read is "never measured"."""
-    roster = {n: "anthropic" for n in _account_loop_names()}
-    for name, (pid, _) in _provider_poll_targets().items():
+    roster = {n: "anthropic" for n in _account_loop_names(t)}
+    for name, (pid, _) in _provider_poll_targets(t).items():
         roster[name] = pid
     for r in snap:
         roster[r["name"]] = (r.get("provider") or r["name"]) if _target_kind(r) == "provider" \
@@ -3270,72 +3360,68 @@ def _account_roster(snap):
     return roster
 
 
-def api_key(account):
+def api_key(t, account):
     """(key, "") for an api-kind account (§1.2) whose provider's reader finds
     a key; ("", "not_api") for an account that is not one here, ("", "no_key")
     for one with no key placed. An api account is named in the roster, else
     by its provider's id (a single-account provider's one account), so one
     whose key is absent (its poll not enabled) is still known as api."""
-    with _lock:
-        roster = _account_roster(list(_state.values()))
+    with t.lock:
+        roster = _account_roster(t, list(t.state.values()))
     provider = roster.get(account) or account
     reader = (PROVIDERS.get(provider) or {}).get("api_key")
     if _account_kind(provider) != "api" or reader is None:
         return "", "not_api"
-    key = (reader(account) or "").strip()
+    key = (reader(t, account) or "").strip()
     return (key, "") if key else ("", "no_key")
 
 
-def recheck(account, now):
+def recheck(t, account, now):
     """POST /recheck?account= (quota-model 50 §2.6, C7): poll the account at
     once and bump its recheck_epoch to now, so the proxy drops every refusal
     record on it older than that at its next pull. For a purchase no reading
     can see; an owner action, never triggered by anything here. Returns the
     epoch, or None for an account the brain does not know."""
-    with _lock:
-        roster = _account_roster(list(_state.values()))
+    with t.lock:
+        roster = _account_roster(t, list(t.state.values()))
     if account not in roster:
         return None
-    with _poll_health_lock:
-        epoch = max(now, _recheck_epochs.get(account) or 0)
-        _recheck_epochs[account] = epoch
-        _save_rechecks_locked()
-        _poll_schedule.pop(account, None)  # due at once
+    with t.poll_health_lock:
+        epoch = max(now, t.recheck_epochs.get(account) or 0)
+        t.recheck_epochs[account] = epoch
+        _save_rechecks_locked(t)
+        t.poll_schedule.pop(account, None)  # due at once
     _poll_wakeup.set()
     return epoch
 
 
-def _save_rechecks_locked():
+def _save_rechecks_locked(t):
     """Write _recheck_epochs to RECHECK_FILE, atomically (not fsynced, as
     _save_state). Caller holds _poll_health_lock."""
     try:
-        tmp = RECHECK_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(_recheck_epochs, f, sort_keys=True)
-        os.replace(tmp, RECHECK_FILE)
+        _store.write_json(t.recheck_file, t.recheck_epochs, sort_keys=True)
     except OSError as e:
-        log(f"WARN could not persist the re-checks to {RECHECK_FILE}: {e}")
+        log(f"WARN could not persist the re-checks to {t.recheck_file}: {e}")
 
 
-def _load_rechecks():
+def _load_rechecks(t):
     """Read RECHECK_FILE into _recheck_epochs (main()): each account's newer
     epoch wins. -> how many were read."""
     try:
-        with open(RECHECK_FILE) as f:
-            doc = json.load(f)
-    except FileNotFoundError:
+        doc = _store.read_json(t.recheck_file)
+    except (OSError, ValueError, credstore.CredStoreError) as e:
+        log(f"WARN cannot read {t.recheck_file} ({e}); no re-check carried over")
         return 0
-    except (OSError, ValueError) as e:
-        log(f"WARN cannot read {RECHECK_FILE} ({e}); no re-check carried over")
+    if doc is None:
         return 0
     if not isinstance(doc, dict):
-        log(f"WARN {RECHECK_FILE} is not a re-check file; no re-check carried over")
+        log(f"WARN {t.recheck_file} is not a re-check file; no re-check carried over")
         return 0
     n = 0
-    with _poll_health_lock:
+    with t.poll_health_lock:
         for acct, epoch in doc.items():
             if isinstance(epoch, (int, float)) and not isinstance(epoch, bool) and math.isfinite(epoch):
-                _recheck_epochs[acct] = max(epoch, _recheck_epochs.get(acct) or 0)
+                t.recheck_epochs[acct] = max(epoch, t.recheck_epochs.get(acct) or 0)
                 n += 1
     return n
 
@@ -3432,15 +3518,15 @@ def _route_setting_issues(route, roster, standings):
     return out
 
 
-def _settings_problems(classes, lane_settings):
+def _settings_problems(t, classes, lane_settings):
     """(errors, warnings) of a candidate classes document's settings against
     the accounts the brain knows now (the PUT-time check, §1.9). Only
     structure is an error; a setting the accounts leave dangling is a
     warning, so an unrelated save never fails on a reading."""
-    with _lock:
-        snap = list(_state.values())
+    with t.lock:
+        snap = list(t.state.values())
     now = time.time()
-    roster, _, _, standings = _decision_view(snap, now)  # what the document's warnings read
+    roster, _, _, standings = _decision_view(t, snap, now)  # what the document's warnings read
     errors, warnings = [], []
     routes = _routes(classes, lane_settings, roster)
     for rid, route in routes.items():
@@ -3451,8 +3537,8 @@ def _settings_problems(classes, lane_settings):
                 warnings.append(f"{rid}: {'dangling: ' if sev == 'dangling' else ''}{msg}")
     # A route budget this document orphans (its route gone, or the pot out of
     # its pay) is accepted and binds nothing, said as dangling (§1.9).
-    with _plock:
-        money = _money
+    with t.plock:
+        money = t.money
     warnings += [f"money: dangling: {e}" for e in _money_problems(money, roster, routes)[0]
                  if ".route_budgets[" in e]
     return errors, warnings
@@ -3510,7 +3596,7 @@ def _money_problems(money, roster, routes):
 
 # ---- the class policy (#26): pointer + session-sticky + reset-boundary drift-up
 
-def _member_backing(member, snap):
+def _member_backing(t, member, snap):
     """The single poll result that carries a member's numbers right now, or None.
     anthropic member -> the LANE'S INCUMBENT account (the nested account-switchover
     layer keeps deciding which account that is); provider member -> its provider
@@ -3518,17 +3604,17 @@ def _member_backing(member, snap):
     to the coolest polled target before the pool has bootstrapped. Caller must
     hold _plock (reads lane + pool state)."""
     if member.get("kind") == "anthropic":
-        ls = _preferred["lanes"].get(member["lane"])
+        ls = t.preferred["lanes"].get(member["lane"])
         cur = ls.get("account") if ls else None
         if not cur:
             return None
         return next((r for r in snap if r["name"] == cur), None)
-    ps = _preferred.get("providers", {}).get(member.get("provider"))
+    ps = t.preferred.get("providers", {}).get(member.get("provider"))
     return _pool_pick(_class_member_targets(member, snap),
                       ps.get("account") if ps else None)
 
 
-def _member_incumbent(member, ctx, rid):
+def _member_incumbent(t, member, ctx, rid):
     """The account this member sits on now. It wins a tie among equal checks,
     so the verdict's account is the one the proxy will dial. A provider member
     takes its pool's incumbent. An anthropic member takes its lane's incumbent
@@ -3542,8 +3628,8 @@ def _member_incumbent(member, ctx, rid):
     by name): an unknown use is never 0, but it is no reason to name nobody.
     Caller holds _plock."""
     if member.get("kind") != "anthropic":
-        return (_preferred.get("providers", {}).get(member.get("provider")) or {}).get("account")
-    cur = (_preferred["lanes"].get(member["lane"]) or {}).get("account")
+        return (t.preferred.get("providers", {}).get(member.get("provider")) or {}).get("account")
+    cur = (t.preferred["lanes"].get(member["lane"]) or {}).get("account")
     lc = _lane_cfg(member["lane"])
     checks = ctx["checks"][rid]
     usable = _usable_by_check(checks,
@@ -3577,13 +3663,13 @@ def _account_effective(res, lane_cfg, model):
     return _lane_effective(res, lane_cfg) if lane_cfg else None
 
 
-def _policy_ctx(snap, now):
+def _policy_ctx(t, snap, now):
     """_settings_ctx under the live settings. Caller holds _plock (reads
     _classes, _lane_settings, _money)."""
-    return _settings_ctx(snap, now, _classes, _lane_settings, _money)
+    return _settings_ctx(t, snap, now, _classes, _lane_settings, t.money)
 
 
-def _settings_ctx(snap, now, classes, lane_settings, money):
+def _settings_ctx(t, snap, now, classes, lane_settings, money):
     """Everything the dial check reads this cycle, computed once: the roster,
     each account's standing, the route registry and every (route, account)
     check, under the given owner settings: the live ones, or a candidate
@@ -3597,18 +3683,18 @@ def _settings_ctx(snap, now, classes, lane_settings, money):
     make it in its own standing. _state,
     and everything rendered from it alone (the window gauges,
     account_health), stays the poll's."""
-    roster, snap, by_name, standings = _decision_view(snap, now)
+    roster, snap, by_name, standings = _decision_view(t, snap, now)
     routes = _routes(classes, lane_settings, roster)
-    ledger = _ledger_payload(now, roster, money)
+    ledger = _ledger_payload(t, now, roster, money)
     checks = {rid: {a: dial_check(rt, a, standings[a], money["pots"], now, ledger=ledger)
                     for a in rt["accounts"]}
               for rid, rt in routes.items()}
     return {"now": now, "roster": roster, "snap": snap, "by_name": by_name,
             "standings": standings, "routes": routes, "checks": checks, "money": money,
-            "ledger": ledger, "classes": classes, "limits": _limit_snap(standings, now)}
+            "ledger": ledger, "classes": classes, "limits": _limit_snap(t, standings, now)}
 
 
-def _class_verdicts(cls, ctx):
+def _class_verdicts(t, cls, ctx):
     """{member id: {route, checks, account, check, effective}} for one class.
     `check` is the member's verdict (§1.6), `account` the one it came from, and
     `effective` that account's #24 number: the included tiers rank on it, and
@@ -3618,7 +3704,7 @@ def _class_verdicts(cls, ctx):
         mid = _member_id(m)
         rid = f"{cls['class']}/{mid}"
         route, checks = ctx["routes"][rid], ctx["checks"][rid]
-        inc = _member_incumbent(m, ctx, rid)
+        inc = _member_incumbent(t, m, ctx, rid)
         acct, verdict = _verdict(route, checks, inc)
         prov = m.get("kind") == "provider"
         lc = None if prov else _lane_cfg(m["lane"])
@@ -3733,19 +3819,19 @@ def _class_pointer(cls, verdicts, pay_order):
     return min(paid)[1] if paid else None
 
 
-def _member_window_resets(member, snap):
+def _member_window_resets(t, member, snap):
     """{'<backing-name>:<window>': resets_at} for a member's current backing
     target. Keys carry the backing target's name so an anthropic member changing
     incumbent produces NEW keys (unknown-comparable -> re-baseline) rather than
     changed values (a fake reset boundary). Caller holds _plock."""
-    res = _member_backing(member, snap)
+    res = _member_backing(t, member, snap)
     if not res:
         return {}
     return {f"{res['name']}:{w}": v.get("resets_at")
             for w, v in _reading_windows(res.get("reading")).items()}
 
 
-def _class_marks(cls, member_id, snap):
+def _class_marks(t, cls, member_id, snap):
     """Reset-boundary marks for every member STRICTLY higher priority than
     member_id (members are priority-sorted at load). A marked resets_at value
     changing later IS the quota-window reset the #26 drift-up fires on — the
@@ -3755,11 +3841,11 @@ def _class_marks(cls, member_id, snap):
         mid = _member_id(m)
         if mid == member_id:
             break
-        marks[mid] = _member_window_resets(m, snap)
+        marks[mid] = _member_window_resets(t, m, snap)
     return marks
 
 
-def _eval_drift_up(cls, sess, effs, snap):
+def _eval_drift_up(t, cls, sess, effs, snap):
     """The single sanctioned mid-session up-move (#26). Walks members higher
     priority than the session's binding in priority order; a changed resets_at
     value on the SAME key = a crossed window boundary. Every crossed boundary is
@@ -3777,7 +3863,7 @@ def _eval_drift_up(cls, sess, effs, snap):
         mid = _member_id(m)
         if mid == sess["member"]:
             break
-        cur = _member_window_resets(m, snap)
+        cur = _member_window_resets(t, m, snap)
         prev = marks.get(mid) or {}
         crossed = any(k in prev and prev[k] is not None and cur[k] is not None
                       and cur[k] != prev[k] for k in cur)
@@ -3836,7 +3922,7 @@ def _class_pay_settings(cls, ctx):
     return hashlib.sha256(json.dumps([routes, order], sort_keys=True).encode()).hexdigest()[:16]
 
 
-def _set_session(cls, sid, sess, member_id, reason, now, snap, switch, check, record):
+def _set_session(t, cls, sid, sess, member_id, reason, now, snap, switch, check, record):
     """Move one session's binding and re-baseline its drift marks, and hand
     the move, with the destination's dial check, to `record`. Caller holds
     _plock. Returns True (dirty)."""
@@ -3847,21 +3933,20 @@ def _set_session(cls, sid, sess, member_id, reason, now, snap, switch, check, re
     sess["since"] = now
     if switch:
         sess["last_switch"] = now
-    sess["marks"] = _class_marks(cls, member_id, snap)
+    sess["marks"] = _class_marks(t, cls, member_id, snap)
     return True
 
 
-def _live_session_event(what, ev):
+def _live_session_event(t, what, ev):
     """The live pass's record of a class-session event: its log line, whose
     check shows whether a move went to allowance or to money, and a move
     joins _session_journal. A hold is the preview's alone: the pass finds it
     again every cycle. Caller holds _plock."""
-    global _journal_seq
     if what == "move":
         log(f"class[{ev['class']}] session {ev['session'][:16]} -> {ev['to']} ({ev['reason']}) "
             f"check={_check_text(ev['check'])}")
-        _journal_seq += 1
-        _session_journal.append((_journal_seq, ev))
+        t.journal_seq += 1
+        t.session_journal.append((t.journal_seq, ev))
     elif what == "expired":
         log(f"class[{ev['class']}] session {ev['session'][:16]} expired (idle > {SESSION_IDLE}s)")
 
@@ -3878,7 +3963,7 @@ def _repays(check, seated, pay_now):
     return (check or {}).get("check") == "paid" and seated not in (None, pay_now)
 
 
-def _compute_class_sessions(snap, now, ctx, classes, states, record):
+def _compute_class_sessions(t, snap, now, ctx, classes, states, record):
     """#26 movement policy for bound class sessions, on the dial check
     (quota-model 50 §2.3). Caller must hold _plock and must have computed this
     cycle's LANE and pool decisions first (a verdict prefers the incumbent's
@@ -3924,7 +4009,7 @@ def _compute_class_sessions(snap, now, ctx, classes, states, record):
             dirty = True
         if not cs["sessions"]:
             continue
-        verdicts = _class_verdicts(cls, ctx)
+        verdicts = _class_verdicts(t, cls, ctx)
         pointer = _class_pointer(cls, verdicts, ctx["money"]["pay_order"])
         pay_now = _class_pay_settings(cls, ctx)
         # The forced-down and drift-up rules see included members only: a
@@ -3938,7 +4023,7 @@ def _compute_class_sessions(snap, now, ctx, classes, states, record):
             cur = sess.get("member")
             if pin_ok:
                 if cur != pin:
-                    dirty |= _set_session(cls, sid, sess, pin, f"pinned to {pin}",
+                    dirty |= _set_session(t, cls, sid, sess, pin, f"pinned to {pin}",
                                           now, snap, switch=True, check=_check_of(verdicts, pin),
                                           record=record)
                 elif (_repays(_check_of(verdicts, cur), sess.get("pay_settings"), pay_now)
@@ -3957,13 +4042,13 @@ def _compute_class_sessions(snap, now, ctx, classes, states, record):
             if cur_check is None or cur_check["check"] == "no":
                 if pointer and pointer != cur:
                     why = "gone" if cur not in member_ids else _check_text(cur_check)
-                    dirty |= _set_session(cls, sid, sess, pointer, f"rebind: {cur} {why}",
+                    dirty |= _set_session(t, cls, sid, sess, pointer, f"rebind: {cur} {why}",
                                           now, snap, switch=False,
                                           check=_check_of(verdicts, pointer), record=record)
                 continue
             if _repays(cur_check, seated, pay_now):
                 if pointer and pointer != cur:
-                    dirty |= _set_session(cls, sid, sess, pointer,
+                    dirty |= _set_session(t, cls, sid, sess, pointer,
                                           f"repay: pay settings changed, leaving paid {cur}",
                                           now, snap, switch=False,
                                           check=_check_of(verdicts, pointer), record=record)
@@ -3972,7 +4057,7 @@ def _compute_class_sessions(snap, now, ctx, classes, states, record):
                 continue
             if cur_check["check"] == "paid":
                 if pointer and pointer != cur and pointer in effs:
-                    dirty |= _set_session(cls, sid, sess, pointer,
+                    dirty |= _set_session(t, cls, sid, sess, pointer,
                                           f"allowance back: {pointer} included, leaving paid {cur}",
                                           now, snap, switch=True,
                                           check=_check_of(verdicts, pointer), record=record)
@@ -4020,13 +4105,13 @@ def _compute_class_sessions(snap, now, ctx, classes, states, record):
                 # No acceptable target => the session stays put. Never evict to
                 # nowhere; holding a reserve is not worth dropping a session.
             if target:
-                dirty |= _set_session(cls, sid, sess, target, reason, now, snap, switch=True,
+                dirty |= _set_session(t, cls, sid, sess, target, reason, now, snap, switch=True,
                                       check=_check_of(verdicts, target), record=record)
                 continue
-            up, marks_changed = _eval_drift_up(cls, sess, effs, snap)
+            up, marks_changed = _eval_drift_up(t, cls, sess, effs, snap)
             dirty |= marks_changed
             if up:
-                dirty |= _set_session(cls, sid, sess, up,
+                dirty |= _set_session(t, cls, sid, sess, up,
                                       f"drift-up: {up} window reset, at {effs[up]:.0f}%"
                                       f" <= {SW_HIGH - SW_MARGIN:.0f}%",
                                       now, snap, switch=True, check=_check_of(verdicts, up),
@@ -4034,7 +4119,7 @@ def _compute_class_sessions(snap, now, ctx, classes, states, record):
     return dirty
 
 
-def _bind_class_session(cname, sid, now):
+def _bind_class_session(t, cname, sid, now):
     """Create-or-touch one session binding (the /class-bind endpoint's core).
     An existing binding is returned untouched (session-sticky — only last_seen
     updates); a new session binds to the pin if its verdict is not `no`, else
@@ -4047,17 +4132,17 @@ def _bind_class_session(cname, sid, now):
     landing between an outside-the-lock lookup and the setdefault below would
     resurrect zombie state for a deleted class — invisible in the UI but
     persisted by _save_state()."""
-    with _lock:
-        snap = list(_state.values())
-    with _plock:
+    with t.lock:
+        snap = list(t.state.values())
+    with t.plock:
         cls = next((c for c in _classes if c["class"] == cname), None)
         if not cls:
             return 404, {"error": f"unknown class {cname!r}",
                          "classes": [c["class"] for c in _classes]}
-        cs = _preferred["classes"].setdefault(cname, _new_class_state())
+        cs = t.preferred["classes"].setdefault(cname, _new_class_state())
         member_ids = [_member_id(m) for m in cls["members"]]
-        ctx = _policy_ctx(snap, now)
-        verdicts = _class_verdicts(cls, ctx)
+        ctx = _policy_ctx(t, snap, now)
+        verdicts = _class_verdicts(t, cls, ctx)
         sess = cs["sessions"].get(sid)
         created = False
         if not sess or sess.get("member") not in member_ids:
@@ -4085,13 +4170,13 @@ def _bind_class_session(cname, sid, now):
                 return 409, {"error": "class_unavailable", "class": cname, **body}
             sess = {"member": target, "since": now, "last_seen": now,
                     "last_switch": 0.0, "reason": reason,
-                    "marks": _class_marks(cls, target, snap),
+                    "marks": _class_marks(t, cls, target, snap),
                     "pay_settings": _class_pay_settings(cls, ctx)}
             cs["sessions"][sid] = sess
             created = True
             log(f"class[{cname}] session {sid[:16]} bound -> {target} ({reason}) "
                 f"check={_check_text(_check_of(verdicts, target))}")
-            _save_state()
+            _save_state(t)
         sess["last_seen"] = now
         member = next(m for m in cls["members"] if _member_id(m) == sess["member"])
         entry = dict(member)
@@ -4103,7 +4188,7 @@ def _bind_class_session(cname, sid, now):
                      "created": created, "pinned": bool(cs.get("pinned") == sess["member"])}
 
 
-def _classes_payload(snap, now, ctx):
+def _classes_payload(t, snap, now, ctx):
     """The /preferred `classes` key: class config + per-member live view (#25)
     plus the #26 policy view — per class `pointer` (what a NEW session would
     bind to; null = nothing included or paid), `pinned`, and `sessions` (live
@@ -4115,10 +4200,10 @@ def _classes_payload(snap, now, ctx):
     when no classes are configured. Takes _plock itself (callers of
     _preferred_payload build outside the lock)."""
     out = {}
-    with _plock:
-        claims = _consumer_claims(_consumers)
+    with t.plock:
+        claims = _consumer_claims(t.consumers)
         for c in _classes:
-            verdicts = _class_verdicts(c, ctx)
+            verdicts = _class_verdicts(t, c, ctx)
             members = []
             for m in c["members"]:
                 mid = _member_id(m)
@@ -4144,7 +4229,7 @@ def _classes_payload(snap, now, ctx):
                 # preference must still be reachable in an emergency.
                 entry["reserved"] = ev is not None and not _under_ceiling(m, ev)
                 members.append(entry)
-            cs = _preferred["classes"].get(c["class"]) or _new_class_state()
+            cs = t.preferred["classes"].get(c["class"]) or _new_class_state()
             out[c["class"]] = {
                 "display": c["display"],
                 "guidance": c.get("guidance"),
@@ -4264,7 +4349,7 @@ def _pool_route(pid):
     return {"id": f"pool:{pid}", "pay": [], "stop_at": None, "scope": None}
 
 
-def _compute_provider_pools(ctx, now):
+def _compute_provider_pools(t, ctx, now):
     """Incumbent-wins account choice for each provider's target pool (#71).
 
     A provider with several polled accounts behaves exactly like a lane over
@@ -4292,13 +4377,13 @@ def _compute_provider_pools(ctx, now):
                   or _usable_by_check(checks, lambda a: 0))
         if not usable:
             continue
-        ps = _preferred.setdefault("providers", {}).setdefault(pid, _new_lane_state())
+        ps = t.preferred.setdefault("providers", {}).setdefault(pid, _new_lane_state())
         if _compute_lane(ps, f"provider:{pid}", usable, now):
             dirty = True
     return dirty
 
 
-def compute_preferred():
+def compute_preferred(t):
     """Run the sticky-hysteresis policy for every lane, then refresh the legacy
     mirror (flat top-level keys := the default lane) and persist if anything moved.
 
@@ -4312,13 +4397,13 @@ def compute_preferred():
     the proxy dials a passing account there, and an unknown use is never 0,
     but it is no reason to name nobody.
     """
-    with _lock:
-        snap = list(_state.values())
+    with t.lock:
+        snap = list(t.state.values())
     now = time.time()
     dirty = False
-    with _plock:
-        _prune_reports(snap, now)
-        ctx = _policy_ctx(snap, now)
+    with t.plock:
+        _prune_reports(t, snap, now)
+        ctx = _policy_ctx(t, snap, now)
         for lc in _lanes:
             # The contract filter: providers serve no Anthropic lane today, so
             # they never compete in the account switchover (see _serves) — the
@@ -4330,46 +4415,47 @@ def compute_preferred():
                       or _usable_by_check(checks, lambda a: 0))
             if not usable:
                 continue
-            ls = _preferred["lanes"].setdefault(lc["lane"], _new_lane_state())
+            ls = t.preferred["lanes"].setdefault(lc["lane"], _new_lane_state())
             if _compute_lane(ls, lc["lane"], usable, now):
                 dirty = True
-        dl = _preferred["lanes"].get("default")
+        dl = t.preferred["lanes"].get("default")
         if dl:
             for k in ("account", "since", "reason", "last_switch", "pinned"):
-                if _preferred[k] != dl[k]:
-                    _preferred[k] = dl[k]
+                if t.preferred[k] != dl[k]:
+                    t.preferred[k] = dl[k]
                     dirty = True
         # Provider pools (#71) run after the lane loop and BEFORE the class
         # policy, so provider members resolve to this cycle's pool incumbents —
         # the same ordering contract the lanes give anthropic members.
-        if _compute_provider_pools(ctx, now):
+        if _compute_provider_pools(t, ctx, now):
             dirty = True
         # Class-session policy (#26) runs AFTER the lane loop: a member's
         # verdict prefers this cycle's lane and pool incumbents. It reads the
         # reports through ctx; `snap` (the polls) only marks reset boundaries
         # for drift-up, since a response's reset differs from the poll's by
         # seconds and would read as a crossed boundary twice.
-        if _compute_class_sessions(snap, now, ctx, _classes, _preferred["classes"],
-                                   _live_session_event):
+        if _compute_class_sessions(t, snap, now, ctx, _classes, t.preferred["classes"],
+                                   lambda what, ev: _live_session_event(t, what, ev)):
             dirty = True
         if dirty:
-            _save_state()
+            _save_state(t)
     # The prepaid notices (notices.py) read this pass's decisions; the tick
     # only decides, and the worker delivers after the mark below.
     try:
-        _notices.tick(_notices_views(ctx, now), now)
+        t.notices.tick(_notices_views(t, ctx, now), now)
     except Exception as e:  # noqa: BLE001 — a notice never stops the policy
         log(f"WARN notices: tick failed: {type(e).__name__}: {e}")
         traceback.print_exc()
     # Every pass of the poll loop ends here, as do the handlers that recompute:
     # a moment the document may have changed (quota-model 64 §2).
-    _events_mark()
-    _notices.kick()
+    _events_mark(t)
+    t.notices.kick()
 
 
 # ---- the prepaid notices (notices.py) -------------------------------------------
 
-_notices = notices.Notices(NOTICES_FILE, log=lambda m: log(m))
+# A tenant's notices are its own (t.notices, _tenant_fresh): the bridge
+# delivers the LAN tenant's to the owner; every tenant's are in its /preferred.
 
 
 def _prepaid_accounts(ctx):
@@ -4418,7 +4504,7 @@ def _notices_coverage(acct, ctx):
     return out
 
 
-def _notices_views(ctx, now):
+def _notices_views(t, ctx, now):
     """{account: view} of every prepaid account for notices.tick and
     payload: its driver's name, serves and billing, whether its pot's own
     check reads no (balance, until_paid) (dry), its polled balance and when
@@ -4429,14 +4515,14 @@ def _notices_views(ctx, now):
     dry_at, the held report's time when the check reads no by it, so a
     resent report older than the last dry's end starts nothing."""
     views = {}
-    with _ledger_lock:
-        counted = dict(_ledger.get("counted_at") or {})
-    with _poll_health_lock:
-        rechecks = dict(_recheck_epochs)
-    with _reports_lock:
-        shuts = dict(_shut_reports)
+    with t.ledger_lock:
+        counted = dict(t.ledger.get("counted_at") or {})
+    with t.poll_health_lock:
+        rechecks = dict(t.recheck_epochs)
+    with t.reports_lock:
+        shuts = dict(t.shut_reports)
         held = {a: ((rep.get("money") or {}).get("open") or {}).get("at")
-                for a, rep in _reported.items()}
+                for a, rep in t.reported.items()}
     for acct, pid in _prepaid_accounts(ctx).items():
         pv = ctx["roster"][acct]
         row = PROVIDERS.get(pv) or {}
@@ -4511,7 +4597,7 @@ def _pots_payload(ctx):
     return out, [f"money: dangling: {e}" for e in errors] + [f"money: {w}" for w in warnings]
 
 
-def _preferred_payload():
+def _preferred_payload(t):
     """The /preferred response. CONTRACT: the flat legacy keys (account/reason/weekly/
     since/last_switch/pinned/thresholds) keep their exact v1 types — the proxy decodes
     {account: string, reason: string, weekly: map[string]float64} and fails the WHOLE
@@ -4563,36 +4649,36 @@ def _preferred_payload():
     The proxy joins a scoped window to a lane only through lane_rules[].scope, and
     a header token to a window only through the window's aliases: by meaning,
     never by a name substring."""
-    with _lock:
-        snap = list(_state.values())
-    view = _sizing_fleet_view()  # under _sizing_lock, never inside _plock (67 §8)
+    with t.lock:
+        snap = list(t.state.values())
+    view = _sizing_fleet_view(t)  # under _sizing_lock, never inside _plock (67 §8)
     now = time.time()
     # account_health takes _lock, so it is read before _plock too; the fleet's
     # asks read it (68 §3.2).
-    account_health = _unified_account_health(now)
-    with _plock:
+    account_health = _unified_account_health(t, now)
+    with t.plock:
         # Every number below reads the polls with the reports merged in
         # (ctx["snap"], quota-model 64 §5); account_health reads _state alone.
-        ctx = _policy_ctx(snap, now)
+        ctx = _policy_ctx(t, snap, now)
         fleet = _fleet_payload(ctx, view, _fleet_health(account_health))
         snap = ctx["snap"]
         accounts = [r for r in snap if _target_kind(r) == "anthropic_account"]
         weekly = {r["name"]: _weekly(r) for r in accounts}
         effective = {lc["lane"]: {r["name"]: _lane_effective(r, lc) for r in accounts}
                      for lc in _lanes}
-        p = {k: _preferred[k] for k in ("account", "since", "reason", "last_switch", "pinned")}
-        claims = _consumer_claims(_consumers)
-        consumers_snap = _consumers
+        p = {k: t.preferred[k] for k in ("account", "since", "reason", "last_switch", "pinned")}
+        claims = _consumer_claims(t.consumers)
+        consumers_snap = t.consumers
         classes_snap = _classes
         lanes_out = {}
         for lc in _lanes:
-            ls = _preferred["lanes"].get(lc["lane"])
+            ls = t.preferred["lanes"].get(lc["lane"])
             if not ls:
                 continue
             lanes_out[lc["lane"]] = dict(ls, effective=effective.get(lc["lane"]) or {},
                                          consumer=claims.get(("lane", lc["lane"])))
-        prov_states = {pid: dict(ps) for pid, ps in _preferred.get("providers", {}).items()}
-        incumbents = {lc["lane"]: (_preferred["lanes"].get(lc["lane"]) or {}).get("account")
+        prov_states = {pid: dict(ps) for pid, ps in t.preferred.get("providers", {}).items()}
+        incumbents = {lc["lane"]: (t.preferred["lanes"].get(lc["lane"]) or {}).get("account")
                       for lc in _lanes}
         incumbents.update({f"provider:{pid}": ps.get("account") for pid, ps in prov_states.items()})
         # stale_max: the age past which a limit's reading is stale; the proxy
@@ -4600,15 +4686,15 @@ def _preferred_payload():
         # Each settings document's revision (the GET body's `revision`), so a subscriber re-reads
         # a document only when its own revision moves (quota-model plan 64 §4).
         settings = {"classes": _doc_revision(_classes_doc),
-                    "consumers": _doc_revision(_consumers_doc),
-                    "money": _doc_revision(_money_doc), "stale_max": STALE_MAX}
-        money_warnings = list(_money_warnings)
+                    "consumers": _doc_revision(t.consumers_doc),
+                    "money": _doc_revision(t.money_doc), "stale_max": STALE_MAX}
+        money_warnings = list(t.money_warnings)
     p["weekly"] = weekly
     p["thresholds"] = {"high": SW_HIGH, "margin": SW_MARGIN, "hard": SW_HARD, "dwell_s": SW_DWELL}
     p["lane_rules"] = [{"lane": lc["lane"], "match": lc["match"], "scope": lc["scope_model"]}
                        for lc in _lanes]
     p["lanes"] = lanes_out
-    p["classes"] = _classes_payload(snap, now, ctx)
+    p["classes"] = _classes_payload(t, snap, now, ctx)
     p["accounts"] = ctx["standings"]
     p["routes"], route_warnings = _routes_payload(ctx, incumbents)
     p["pay_order"] = list(ctx["money"]["pay_order"])
@@ -4634,7 +4720,7 @@ def _preferred_payload():
     p["prices"] = _prices_payload()
     # The prepaid notices (notices.py): every prepaid account's state, what it
     # serves, where it is paid, and each notice sent.
-    p["notices"] = _notices.payload(_notices_views(ctx, now))
+    p["notices"] = t.notices.payload(_notices_views(t, ctx, now))
     return p
 
 
@@ -4665,30 +4751,32 @@ _REPORT_REFUSAL_CLASSES = ("spent", "not_entitled")
 # named it>, or pool:<name> (67 §9).
 _REPORT_LIMIT_RE = re.compile(r"(model|pool):(.+)")  # fullmatch
 
-_reports_lock = threading.Lock()  # taken inside _plock and _lock, never around them
+# The reports stores, a tenant's each (t.reported, t.shut_reports, t.holds,
+# t.limit_holds), guarded by t.reports_lock: taken inside plock and lock,
+# never around them.
 # {account: {"windows": {window id: {field: {"v", "at"}}}, "money": {field: {"v", "at"}}}}:
 # per window (and the account's money pot: a subscription's credits, an api
 # account's own pot) and per field, the newest reported value and the read_at
 # it was read at. A field leaves once a poll that started after it lands; on a
 # pot no poll reads (_pot_unread), once a counted ledger entry on it or the
 # owner's re-check is newer (_prune_reports).
-_reported = {}
+#   reported
 # {account: read_at}: the newest accepted report of an api account's money pot
 # shut, which starts a prepaid account's dry (notices.py) and outlives the
 # report itself: on a pot the poll reads, the next poll replaces the report,
 # and only money showing ends the dry.
-_shut_reports = {}
+#   shut_reports
 # {(account, window id): {refused_at, until, resets, by_reading, seen {used_pct, resets_at}}}:
 # the windows a refusal holds at 100. until is the record's end (learned from a
 # reading when it came null), resets the reset the refusal itself named (null
 # for none): the proxy record's until and resets.
-_holds = {}
+#   holds
 # {(account, limit): {refused_at, until, class}}: the refusals of limits the
 # brain has no window for (67 §9), a model:<m> or a pool:<name>. They feed the
 # fleet figure only, never the standings or the dial check (§13 Q6), and are
 # no head for sizing. Each ends at its until, at the owner's re-check, or by
 # an `ended` newer than it (_limit_ended, _prune_reports).
-_limit_holds = {}
+#   limit_holds
 
 
 def _report_window(wid):
@@ -4739,9 +4827,9 @@ def _reports_keep(store, path, field, value, at, floor):
     return True
 
 
-def _reports_tidy(acct):
+def _reports_tidy(t, acct):
     """Drop what is left empty under acct. Caller holds _reports_lock."""
-    rep = _reported.get(acct)
+    rep = t.reported.get(acct)
     if rep is None:
         return
     wins = rep.get("windows") or {}
@@ -4752,10 +4840,10 @@ def _reports_tidy(acct):
     if not rep.get("money"):
         rep.pop("money", None)
     if not rep:
-        del _reported[acct]
+        del t.reported[acct]
 
 
-def _report_event(ev, roster, by_name, now, reporter=None):
+def _report_event(t, ev, roster, by_name, now, reporter=None):
     """Apply one reading or refusal event -> (result, why); ("ledger", None)
     for a ledger entry, which reports_post appends with the batch's others."""
     if not isinstance(ev, dict):
@@ -4772,19 +4860,19 @@ def _report_event(ev, roster, by_name, now, reporter=None):
     acct = ev.get("account")
     if not isinstance(acct, str) or acct not in roster:
         return "refused", f"unknown account {acct!r}"
-    t = _report_time(ev.get("read_at"))
-    if t is None:
+    at = _report_time(ev.get("read_at"))
+    if at is None:
         return "refused", "read_at must be epoch seconds"
-    if t > now + REPORT_AHEAD_S:
-        return "refused", (f"read_at is {t - now:.0f}s ahead of the brain's clock "
+    if at > now + REPORT_AHEAD_S:
+        return "refused", (f"read_at is {at - now:.0f}s ahead of the brain's clock "
                            f"(more than {REPORT_AHEAD_S}s)")
     if kind == "served":
-        return _report_served(ev, acct, roster[acct], reporter)
+        return _report_served(t, ev, acct, roster[acct], reporter)
     res = by_name.get(acct) or {}
     rd, good = res.get("reading"), res.get("good_ts")
     measured = rd is not None and good is not None
     if kind == "reading" and "pot" in ev:
-        return _report_credits(ev, acct, roster[acct], rd, measured, good, t)
+        return _report_credits(t, ev, acct, roster[acct], rd, measured, good, at)
     keys = _REPORT_WINDOW_KEYS if kind == "reading" else _REPORT_REFUSAL_KEYS
     bad = sorted(set(ev) - keys)
     if bad:
@@ -4794,24 +4882,24 @@ def _report_event(ev, roster, by_name, now, reporter=None):
         if why:
             return "refused", why
         if ev.get("limit") is not None:
-            return _report_limit(ev, acct, roster[acct], measured, t, now)
+            return _report_limit(t, ev, acct, roster[acct], measured, at, now)
     wid = ev.get("window")
     why = _report_window_problem(acct, roster[acct], rd, wid)
     if why:
         return "refused", why
     if kind == "reading":
-        return _report_reading(ev, acct, wid, rd, measured, good, t)
+        return _report_reading(t, ev, acct, wid, rd, measured, good, at)
     # A refusal is a head (66 §2): once the brain is shutting down it is
     # answered retry before anything of it is kept, as a served event is.
-    if not _sizing_enter():
+    if not _sizing_enter(t):
         return "retry", "the brain is shutting down"
     try:
-        out = _report_refusal(ev, acct, wid, measured, t, now)
+        out = _report_refusal(t, ev, acct, wid, measured, at, now)
         if out[0] == "applied" and not ev.get("ended"):
-            _sizing_refusal(acct, roster[acct], wid, t, ev.get("seen"))
+            _sizing_refusal(t, acct, roster[acct], wid, at, ev.get("seen"))
         return out
     finally:
-        _sizing_leave()
+        _sizing_leave(t)
 
 
 def _use_agrees(held_used, held_reset, used, reset):
@@ -4828,7 +4916,7 @@ def _use_agrees(held_used, held_reset, used, reset):
     return 0 < held_used - used <= 1
 
 
-def _report_reading(ev, acct, wid, rd, measured, good, t):
+def _report_reading(t, ev, acct, wid, rd, measured, good, at):
     used, resets = ev.get("used_pct"), ev.get("resets_at")
     if used is not None and (_num(used) is None or used < 0):
         return "refused", "used_pct must be a percent >= 0, or null"
@@ -4837,8 +4925,8 @@ def _report_reading(ev, acct, wid, rd, measured, good, t):
     if not measured:
         return "ignored", "an account the brain has never measured"
     took = False
-    with _reports_lock:
-        held = ((_reported.get(acct) or {}).get("windows") or {}).get(wid) or {}
+    with t.reports_lock:
+        held = ((t.reported.get(acct) or {}).get("windows") or {}).get(wid) or {}
         if used is None and wid not in _reading_windows(rd) and "used_pct" not in held:
             return "ignored", "a reading that carries no use never adds a window"
         polled = _reading_windows(rd).get(wid) or {}
@@ -4853,8 +4941,8 @@ def _report_reading(ev, acct, wid, rd, measured, good, t):
             used = holding("used_pct")
         for field, v in (("used_pct", used), ("resets_at", resets)):
             if v is not None:
-                took |= _reports_keep(_reported, (acct, "windows", wid), field, float(v), t, good)
-        _reports_tidy(acct)
+                took |= _reports_keep(t.reported, (acct, "windows", wid), field, float(v), at, good)
+        _reports_tidy(t, acct)
     return ("applied", None) if took else ("ignored", "no newer than what the brain holds")
 
 
@@ -4870,21 +4958,21 @@ def _pot_unread(rd, pot):
     return p.get("open") is None and (_reading_limit(p, "balance") or {}).get("amount") is None
 
 
-def _report_money_floor(acct, provider, good, unread):
+def _report_money_floor(t, acct, provider, good, unread):
     """What a report on the account's money pot must be newer than: the poll's
     start, or, on a pot no poll reads, the newest counted ledger entry on it
     and the owner's last re-check, the two things that end a shut there."""
     if not unread:
         return good
     pid = f"{acct}/{_money_pot(provider)}"
-    with _ledger_lock:
-        counted = (_ledger.get("counted_at") or {}).get(pid) or 0
-    with _poll_health_lock:
-        epoch = _recheck_epochs.get(acct) or 0
+    with t.ledger_lock:
+        counted = (t.ledger.get("counted_at") or {}).get(pid) or 0
+    with t.poll_health_lock:
+        epoch = t.recheck_epochs.get(acct) or 0
     return max(counted, epoch)
 
 
-def _report_credits(ev, acct, provider, rd, measured, good, t):
+def _report_credits(t, ev, acct, provider, rd, measured, good, at):
     """A reading of the account's money pot: a subscription's credits (a
     codex response's credits header), or an api account's own pot shut (the
     proxy's door refused for money, e.g. a 402). Any other pot is
@@ -4903,17 +4991,17 @@ def _report_credits(ev, acct, provider, rd, measured, good, t):
         return "refused", "balance must be a number, or null"
     if not measured:
         return "ignored", "an account the brain has never measured"
-    floor = _report_money_floor(acct, provider, good, _pot_unread(rd, pot))
+    floor = _report_money_floor(t, acct, provider, good, _pot_unread(rd, pot))
     took = False
-    with _reports_lock:
+    with t.reports_lock:
         if open_ is False:
-            shut = _reports_keep(_reported, (acct, "money"), "open", False, t, floor)
+            shut = _reports_keep(t.reported, (acct, "money"), "open", False, at, floor)
             if shut and provider in _API_POTS:
-                _shut_reports[acct] = max(t, _shut_reports.get(acct) or 0)
+                t.shut_reports[acct] = max(at, t.shut_reports.get(acct) or 0)
             took |= shut
         if bal is not None:
-            took |= _reports_keep(_reported, (acct, "money"), "balance", float(bal), t, floor)
-        _reports_tidy(acct)
+            took |= _reports_keep(t.reported, (acct, "money"), "balance", float(bal), at, floor)
+        _reports_tidy(t, acct)
     return ("applied", None) if took else ("ignored", "no newer than what the brain holds")
 
 
@@ -4936,7 +5024,7 @@ def _report_refusal_problem(ev):
     return None
 
 
-def _report_limit(ev, acct, provider, measured, t, now):
+def _report_limit(t, ev, acct, provider, measured, at, now):
     """A refusal of a limit the brain has no window for (67 §9): held in
     _limit_holds until its until, the owner's re-check or a newer `ended`.
     Not a head for sizing, and nothing of the standings moves."""
@@ -4948,10 +5036,10 @@ def _report_limit(ev, acct, provider, measured, t, now):
         return "refused", f"{acct} is an api account: it has no allowance limit"
     key = (acct, lim)
     if ended:
-        with _reports_lock:
-            h = _limit_holds.get(key)
-            if h is not None and h["refused_at"] < t:
-                del _limit_holds[key]
+        with t.reports_lock:
+            h = t.limit_holds.get(key)
+            if h is not None and h["refused_at"] < at:
+                del t.limit_holds[key]
                 return "applied", None
         return "ignored", "no hold on the limit older than the end"
     until, named = ev.get("until"), ev.get("resets_at")
@@ -4969,15 +5057,15 @@ def _report_limit(ev, acct, provider, measured, t, now):
         return "ignored", "an account the brain has never measured"
     if until <= now:
         return "ignored", "its until has passed"
-    with _poll_health_lock:
-        epoch = _recheck_epochs.get(acct)
-    if epoch is not None and t < epoch:
+    with t.poll_health_lock:
+        epoch = t.recheck_epochs.get(acct)
+    if epoch is not None and at < epoch:
         return "ignored", "older than the owner's re-check"
-    with _reports_lock:
-        h = _limit_holds.get(key)
-        if h is not None and h["refused_at"] >= t:
+    with t.reports_lock:
+        h = t.limit_holds.get(key)
+        if h is not None and h["refused_at"] >= at:
             return "ignored", "no newer than the hold the brain holds"
-        _limit_holds[key] = {"refused_at": t, "until": float(until), "class": ev["class"]}
+        t.limit_holds[key] = {"refused_at": at, "until": float(until), "class": ev["class"]}
     return "applied", None
 
 
@@ -4993,11 +5081,11 @@ def _limit_ended(h, st, now):
     return None
 
 
-def _limit_snap(standings, now):
+def _limit_snap(t, standings, now):
     """{account: [{limit, class, until}]}: the live limit holds of each
     measured account, by limit."""
-    with _reports_lock:
-        holds = [(k, dict(h)) for k, h in _limit_holds.items()]
+    with t.reports_lock:
+        holds = [(k, dict(h)) for k, h in t.limit_holds.items()]
     out = {}
     for (acct, lim), h in sorted(holds, key=lambda kh: kh[0]):
         st = standings.get(acct)
@@ -5007,7 +5095,7 @@ def _limit_snap(standings, now):
     return out
 
 
-def _report_refusal(ev, acct, wid, measured, t, now):
+def _report_refusal(t, ev, acct, wid, measured, at, now):
     ended = ev.get("ended", False)
     if not isinstance(ended, bool):
         return "refused", "ended must be true or false"
@@ -5016,10 +5104,10 @@ def _report_refusal(ev, acct, wid, measured, t, now):
         return "refused", "resets_at must be epoch seconds, or null"
     key = (acct, wid)
     if ended:
-        with _reports_lock:
-            h = _holds.get(key)
-            if h is not None and h["refused_at"] < t:
-                del _holds[key]
+        with t.reports_lock:
+            h = t.holds.get(key)
+            if h is not None and h["refused_at"] < at:
+                del t.holds[key]
                 return "applied", None
         return "ignored", "no hold on the window older than the end"
     until, by_reading, seen = ev.get("until"), ev.get("by_reading"), ev.get("seen")
@@ -5038,15 +5126,15 @@ def _report_refusal(ev, acct, wid, measured, t, now):
         return "ignored", "an account the brain has never measured"
     if until is not None and until <= now:
         return "ignored", "its until has passed"
-    with _poll_health_lock:
-        epoch = _recheck_epochs.get(acct)
-    if epoch is not None and t < epoch:
+    with t.poll_health_lock:
+        epoch = t.recheck_epochs.get(acct)
+    if epoch is not None and at < epoch:
         return "ignored", "older than the owner's re-check"
-    with _reports_lock:
-        h = _holds.get(key)
-        if h is not None and h["refused_at"] >= t:
+    with t.reports_lock:
+        h = t.holds.get(key)
+        if h is not None and h["refused_at"] >= at:
             return "ignored", "no newer than the hold the brain holds"
-        _holds[key] = {"refused_at": t, "until": None if until is None else float(until),
+        t.holds[key] = {"refused_at": at, "until": None if until is None else float(until),
                        "resets": None if named is None else float(named),
                        "by_reading": by_reading,
                        "seen": {k: _num(seen.get(k)) for k in ("used_pct", "resets_at")}}
@@ -5079,7 +5167,6 @@ SERVED_IDS_MAX = 10000
 # The highest seq taken per proxy boot, for the SERVED_BOOTS_MAX boots heard
 # from most recently: an older boot's process is long gone.
 SERVED_BOOTS_MAX = 8
-_served_lock = threading.Lock()
 
 
 def _served_fresh():
@@ -5091,7 +5178,6 @@ def _served_fresh():
             "head_at": {}}
 
 
-_served = _served_fresh()
 
 
 def _served_price(model, speed, tokens, complete):
@@ -5240,7 +5326,7 @@ def _served_readings_problem(ev):
     return None
 
 
-def _report_served(ev, acct, provider=None, reporter=None):
+def _report_served(t, ev, acct, provider=None, reporter=None):
     """Take one served event (65 §7): an id taken before is ignored; else its
     boot's seq gap is counted, it is priced and counted, and it goes to
     sizing (quota-model 66, _sizing_take). Once the brain is shutting down
@@ -5254,43 +5340,43 @@ def _report_served(ev, acct, provider=None, reporter=None):
     bound = None
     if not ev["complete"] and ev["output_max"] is not None:
         bound = _served_bound(ev["model"], ev["speed"], ev["tokens"], ev["output_max"])
-    if not _sizing_enter():
+    if not _sizing_enter(t):
         return "retry", "the brain is shutting down"
     try:
-        return _report_served_counted(ev, acct, provider, reporter, usd, unpriced, speed, tier,
+        return _report_served_counted(t, ev, acct, provider, reporter, usd, unpriced, speed, tier,
                                       bound)
     finally:
-        _sizing_leave()
+        _sizing_leave(t)
 
 
-def _report_served_counted(ev, acct, provider, reporter, usd, unpriced, speed, tier, bound):
-    with _served_lock:
-        ids = _served["ids"]
+def _report_served_counted(t, ev, acct, provider, reporter, usd, unpriced, speed, tier, bound):
+    with t.served_lock:
+        ids = t.served["ids"]
         if ev["id"] in ids:
-            _served["duplicates"] += 1
+            t.served["duplicates"] += 1
             return "ignored", "an id the brain has taken"
         ids[ev["id"]] = None
         while len(ids) > SERVED_IDS_MAX:
             ids.popitem(last=False)
         # A boot first heard from counts no gap: what it sent before is
         # indistinguishable from what it sent before this brain started.
-        boots, boot, seq = _served["boots"], ev["boot"], ev["seq"]
+        boots, boot, seq = t.served["boots"], ev["boot"], ev["seq"]
         last = boots.pop(boot, None)
         if last is not None and seq > last + 1:
-            _served["seq_missing"] += seq - last - 1
+            t.served["seq_missing"] += seq - last - 1
         boots[boot] = seq if last is None else max(last, seq)
         while len(boots) > SERVED_BOOTS_MAX:
             boots.popitem(last=False)
-        _served["events"][acct] = _served["events"].get(acct, 0) + 1
-        _served["head_at"][acct] = max(_served["head_at"].get(acct, 0.0), float(ev["head_at"]))
+        t.served["events"][acct] = t.served["events"].get(acct, 0) + 1
+        t.served["head_at"][acct] = max(t.served["head_at"].get(acct, 0.0), float(ev["head_at"]))
         if usd is not None:
-            _served["usd"][acct] = _served["usd"].get(acct, 0.0) + usd
+            t.served["usd"][acct] = t.served["usd"].get(acct, 0.0) + usd
         else:
             key = (acct, ev["model"], unpriced)
-            _served["unpriced"][key] = _served["unpriced"].get(key, 0) + 1
+            t.served["unpriced"][key] = t.served["unpriced"].get(key, 0) + 1
         if not ev["complete"]:
-            _served["incomplete"][acct] = _served["incomplete"].get(acct, 0) + 1
-    _sizing_take(acct, provider, ev, usd, unpriced, speed, tier, reporter, bound)
+            t.served["incomplete"][acct] = t.served["incomplete"].get(acct, 0) + 1
+    _sizing_take(t, acct, provider, ev, usd, unpriced, speed, tier, reporter, bound)
     return "applied", None
 
 
@@ -5325,8 +5411,7 @@ SIZING_WEIGHT_ITERS = 200    # Gauss-Newton steps per fit, at most
 SIZING_WEIGHT_Z = 2.0        # a window's own weight is apart past this many of its standard errors too
 SIZING_EVENTS_MAX = 5000     # events held per account (66 §8)
 SIZING_GAPS_MAX = 100        # seq-gap intervals held (66 §8)
-SIZING_FILE = (os.environ.get("SWITCH_SIZING_FILE")
-               or os.path.join(os.path.dirname(LEDGER_FILE) or ".", "sizing.json"))
+# The file is the tenant's sizing.json (t.sizing_file), through the store.
 SIZING_FILE_VERSION = 1
 SIZING_SHUTDOWN_WAIT_S = 5   # the shutdown save waits this long for reports in flight
 SIZING_RANGE_STEPS_MAX = 200  # a range's newest steps kept whole; older ones are final in it
@@ -5343,30 +5428,30 @@ SIZING_RETRACTED = ("late", "proxy_restart")
 # The outcomes whose work is known, so the step counts in the outside sum (66 §6).
 _SIZING_MEASURED = ("sample", "silent", "fuzz")
 
-_sizing_lock = threading.Lock()  # never held around _lock, _plock or _served_lock
-_sizing_cv = threading.Condition(_sizing_lock)
+# t.sizing_lock is never held around t.lock, t.plock or t.served_lock;
+# t.sizing_cv is a condition on it.
 # closing: set by the shutdown save, after which no save writes the file and
 # no served event is taken (it is answered retry); inflight: served events
 # past that gate, which the shutdown save waits for; frozen: why nothing may
 # write the file (it could not be read, or an unusable one could not be set
 # aside), or None; set_aside: where an unusable file was moved, or None.
-_sizing_gate = {"closing": False, "inflight": 0, "frozen": None, "set_aside": None}
+#   sizing_gate = {"closing": False, "inflight": 0, "frozen": None, "set_aside": None}
 
 
-def _sizing_enter():
+def _sizing_enter(t):
     """Let a served or refusal report in, or False once the brain is
     shutting down."""
-    with _sizing_lock:
-        if _sizing_gate["closing"]:
+    with t.sizing_lock:
+        if t.sizing_gate["closing"]:
             return False
-        _sizing_gate["inflight"] += 1
+        t.sizing_gate["inflight"] += 1
         return True
 
 
-def _sizing_leave():
-    with _sizing_lock:
-        _sizing_gate["inflight"] -= 1
-        _sizing_cv.notify_all()
+def _sizing_leave(t):
+    with t.sizing_lock:
+        t.sizing_gate["inflight"] -= 1
+        t.sizing_cv.notify_all()
 
 
 def _sizing_fresh():
@@ -5389,7 +5474,6 @@ def _sizing_fresh():
             "stale": set()}
 
 
-_sizing = _sizing_fresh()
 
 
 def _api_prices_hash():
@@ -5431,29 +5515,29 @@ def _sizing_lane_scope(model):
     return (_sizing_lane_cfg(model) or {}).get("scope_model")
 
 
-def _sizing_acct(acct, provider):
+def _sizing_acct(t, acct, provider):
     """The account's record. When it learns its provider (a start without
     the open state keeps samples but no provider), the provider's weights
     are fitted again with its samples in them (67 §3). Caller holds
     _sizing_lock."""
-    a = _sizing["accounts"].get(acct)
+    a = t.sizing["accounts"].get(acct)
     if a is None:
-        a = _sizing["accounts"][acct] = {"provider": provider, "data_t": 0.0, "buf": [],
+        a = t.sizing["accounts"][acct] = {"provider": provider, "data_t": 0.0, "buf": [],
                                          "keys": set(), "dropped": 0, "late": 0}
     elif provider and not a.get("provider"):
         a["provider"] = provider
     else:
         return a
-    if provider and any(w["samples"] for (x, _), w in _sizing["windows"].items() if x == acct):
-        _sizing_refit(provider)
-        _sizing["resized"] = True
+    if provider and any(w["samples"] for (x, _), w in t.sizing["windows"].items() if x == acct):
+        _sizing_refit(t, provider)
+        t.sizing["resized"] = True
     return a
 
 
-def _sizing_win(acct, wid, mode):
-    w = _sizing["windows"].get((acct, wid))
+def _sizing_win(t, acct, wid, mode):
+    w = t.sizing["windows"].get((acct, wid))
     if w is None:
-        w = _sizing["windows"][(acct, wid)] = {
+        w = t.sizing["windows"][(acct, wid)] = {
             "mode": mode, "scope": _sizing_window_scope(wid), "anchor": None, "pending": [],
             "overflow_to": None, "last_head": None, "samples": [], "range": None,
             "counts": {}, "retracted": {}, "basis": "none"}
@@ -5477,15 +5561,15 @@ def _sizing_hold_from(w):
     return a["t"]
 
 
-def _sizing_acct_windows(acct):
-    return [(wid, w) for (a, wid), w in _sizing["windows"].items() if a == acct]
+def _sizing_acct_windows(t, acct):
+    return [(wid, w) for (a, wid), w in t.sizing["windows"].items() if a == acct]
 
 
-def _sizing_needs(acct, e):
+def _sizing_needs(t, acct, e):
     """(needed, anchored): does a window of the account that the event draws
     still need it, and does the event draw any window holding events."""
     anchored = False
-    for _, w in _sizing_acct_windows(acct):
+    for _, w in _sizing_acct_windows(t, acct):
         if not _scope_binds(w["scope"], e["scope"]):
             continue
         hold = _sizing_hold_from(w)
@@ -5497,16 +5581,16 @@ def _sizing_needs(acct, e):
     return False, anchored
 
 
-def _sizing_prune(acct):
+def _sizing_prune(t, acct):
     """Keep only the events a window still needs; one that draws no window
     holding events stays for SIZING_SETTLE_S of data time, so a first head
     that arrives late still finds the events after it (66 §8)."""
-    a = _sizing["accounts"].get(acct)
+    a = t.sizing["accounts"].get(acct)
     if a is None:
         return
     keep = []
     for e in a["buf"]:
-        needed, anchored = _sizing_needs(acct, e)
+        needed, anchored = _sizing_needs(t, acct, e)
         if needed or (not anchored and e["r"] >= a["data_t"] - SIZING_SETTLE_S):
             keep.append(e)
         else:
@@ -5514,17 +5598,17 @@ def _sizing_prune(acct):
     a["buf"] = keep
 
 
-def _sizing_prune_gaps():
+def _sizing_prune_gaps(t):
     """A gap or restart interval leaves once every sized window's anchor is
     past it."""
-    holds = [h for w in _sizing["windows"].values() for h in (_sizing_hold_from(w),) if h is not None]
+    holds = [h for w in t.sizing["windows"].values() for h in (_sizing_hold_from(w),) if h is not None]
     if holds:
         floor = min(holds)
-        _sizing["gaps"] = [g for g in _sizing["gaps"] if g[1] > floor]
-        _sizing["restarts"] = [g for g in _sizing["restarts"] if max(g) > floor]
+        t.sizing["gaps"] = [g for g in t.sizing["gaps"] if g[1] > floor]
+        t.sizing["restarts"] = [g for g in t.sizing["restarts"] if max(g) > floor]
 
 
-def _sizing_boot(boot, seq, t, reporter=""):
+def _sizing_boot(t, boot, seq, at, reporter=""):
     """Note a served event's boot and seq: boots by first heard, each with its
     first and last read_at; a seq jump within a boot leaves a gap interval
     (the last seq's read_at, this one's), where the missing events ended. A
@@ -5532,38 +5616,38 @@ def _sizing_boot(boot, seq, t, reporter=""):
     reporter's, its POSTs' `reporter`, "" when they name none); its first
     boot ever heard is not. -> (new, restart): is the event past every seq
     its boot sent before (not a resend), and the restart interval it found."""
-    boots = _sizing["boots"]
+    boots = t.sizing["boots"]
     b = boots.get(boot)
     restart = None
     if b is None:
-        rep = _sizing["reporters"].get(reporter)
+        rep = t.sizing["reporters"].get(reporter)
         if rep is not None and rep["boot"] != boot:
-            restart = [rep["last"], t]
-            _sizing["restarts"].append(restart)
-            del _sizing["restarts"][:-SIZING_GAPS_MAX]
-        _sizing["reporters"][reporter] = {"boot": boot, "last": t}
-        boots[boot] = {"first": t, "last": t, "seq": seq, "seq_at": t, "reporter": reporter}
+            restart = [rep["last"], at]
+            t.sizing["restarts"].append(restart)
+            del t.sizing["restarts"][:-SIZING_GAPS_MAX]
+        t.sizing["reporters"][reporter] = {"boot": boot, "last": at}
+        boots[boot] = {"first": at, "last": at, "seq": seq, "seq_at": at, "reporter": reporter}
         while len(boots) > SERVED_BOOTS_MAX:
             boots.popitem(last=False)
         return True, restart
     new = seq > b["seq"]
     if seq > b["seq"] + 1:
-        _sizing["gaps"].append([b["seq_at"], t])
-        del _sizing["gaps"][:-SIZING_GAPS_MAX]
+        t.sizing["gaps"].append([b["seq_at"], at])
+        del t.sizing["gaps"][:-SIZING_GAPS_MAX]
     if new:
-        b["seq"], b["seq_at"] = seq, t
-    b["first"], b["last"] = min(b["first"], t), max(b["last"], t)
-    rep = _sizing["reporters"].get(b.get("reporter", reporter))
+        b["seq"], b["seq_at"] = seq, at
+    b["first"], b["last"] = min(b["first"], at), max(b["last"], at)
+    rep = t.sizing["reporters"].get(b.get("reporter", reporter))
     if rep is not None and rep["boot"] == boot:
-        rep["last"] = max(rep["last"], t)
+        rep["last"] = max(rep["last"], at)
     return new, None
 
 
-def _sizing_restart_in(lo, hi):
+def _sizing_restart_in(t, lo, hi):
     """Did a proxy restart fall in (lo, hi]: a reporter's old boot's last
     event, or its new boot's first, inside the step (66 §4). Two reporters
     serving at once are not a restart of either."""
-    return any(lo < old <= hi or lo < new <= hi for old, new in _sizing["restarts"])
+    return any(lo < old <= hi or lo < new <= hi for old, new in t.sizing["restarts"])
 
 
 def _sizing_anchor(w, q, t, reset, fresh, lo=None):
@@ -5586,14 +5670,14 @@ def _sizing_range_for(w, reset, q, new=False):
     return w["range"]
 
 
-def _sizing_head(acct, wid, w, h, q, reset, at):
+def _sizing_head(t, acct, wid, w, h, q, reset, at):
     """Apply one head (h, q, reset) to a window (66 §2). at is the data time
     it arrived with (its event's read_at, or the poll's time). -> True when
     the anchor moved. Caller holds _sizing_lock."""
     prev = w["last_head"]
     w["last_head"] = h if prev is None else max(prev, h)
     # A poll-sized window's settle is one poll: the next poll closes the step.
-    moved = _sizing_close(acct, wid, w, at) if w["mode"] == "poll" else False
+    moved = _sizing_close(t, acct, wid, w, at) if w["mode"] == "poll" else False
     a = w["anchor"]
     if a is None:
         _sizing_range_for(w, reset, q)
@@ -5609,7 +5693,7 @@ def _sizing_head(acct, wid, w, h, q, reset, at):
          and abs(reset - a["reset"]) > REPORT_RESET_SLACK_S) or q < level - 1):
         # A new period: the open step closes if this head is late enough,
         # else it is lost; then the window anchors afresh.
-        _sizing_close(acct, wid, w, at)
+        _sizing_close(t, acct, wid, w, at)
         _sizing_lose_pending(acct, wid, w)
         _sizing_range_for(w, reset, q, new=True)
         _sizing_anchor(w, q, h, reset, True, lo=prev)
@@ -5650,7 +5734,7 @@ def _sizing_lose_pending(acct, wid, w):
     w["pending"] = []
 
 
-def _sizing_expire(acct, wid, w, t_data):
+def _sizing_expire(t, acct, wid, w, t_data):
     """A window whose heads stopped (a header that is no longer sent):
     once data time is SIZING_SETTLE_S past its period's reset with no head
     of the next period, the steps due by then close as usual, the rest are
@@ -5660,10 +5744,10 @@ def _sizing_expire(acct, wid, w, t_data):
     a = w["anchor"]
     if a is None or a["reset"] is None or t_data < a["reset"] + SIZING_SETTLE_S:
         return False
-    _sizing_close(acct, wid, w, t_data)
+    _sizing_close(t, acct, wid, w, t_data)
     _sizing_lose_pending(acct, wid, w)
     w["anchor"] = None
-    _sizing["restarted"].discard((acct, wid))
+    t.sizing["restarted"].discard((acct, wid))
     log(f"sizing: {acct} {wid} no head of a new period {SIZING_SETTLE_S}s past its reset: "
         "the window lets go of its open step")
     return True
@@ -5701,7 +5785,7 @@ def _sizing_range_step(w, t):
     return None
 
 
-def _sizing_unmeasure(w, st):
+def _sizing_unmeasure(t, w, st):
     """A step whose work became unknown leaves the measured range (66 §6):
     its points, its work and its silent points."""
     rg = w["range"]
@@ -5711,37 +5795,37 @@ def _sizing_unmeasure(w, st):
     _sizing_sub_by(rg["by"], st["by"])
     if st["silent"]:
         rg["silent"] -= st["points"]
-    _sizing["dirty"] = True
+    t.sizing["dirty"] = True
 
 
-def _sizing_retract(acct, wid, w, t, outcome):
+def _sizing_retract(t, acct, wid, w, at, outcome):
     """A kept sample whose step holds t, found unclean after it closed, is
     taken back and counted on sizing_samples_retracted_total. -> True when
     one was."""
     for i, smp in enumerate(w["samples"]):
-        if smp["from"] < t <= smp["to"]:
+        if smp["from"] < at <= smp["to"]:
             del w["samples"][i]
             w["retracted"][outcome] = w["retracted"].get(outcome, 0) + 1
             _sizing_log_step(acct, wid, smp["p"], smp["q"], smp["to"], smp["usd"], smp["events"],
                              f"{outcome} (sample retracted)")
-            _sizing_rejudge(acct, wid, w)
-            _sizing["dirty"] = True
+            _sizing_rejudge(t, acct, wid, w)
+            t.sizing["dirty"] = True
             return True
     return False
 
 
-def _sizing_unknown(acct, wid, w, t, outcome):
+def _sizing_unknown(t, acct, wid, w, at, outcome):
     """The step holding t, already closed, has work the brain can't know (a
     restart in it, or a late event without priced work): its sample is taken
     back and it leaves the measured range. -> True when either was so."""
-    done = _sizing_retract(acct, wid, w, t, outcome)
-    st = _sizing_range_step(w, t)
+    done = _sizing_retract(t, acct, wid, w, at, outcome)
+    st = _sizing_range_step(w, at)
     if st is not None:
-        _sizing_unmeasure(w, st)
+        _sizing_unmeasure(t, w, st)
     return done or st is not None
 
 
-def _sizing_late(acct, e):
+def _sizing_late(t, acct, e):
     """A served event whose read_at is in a step already closed (66 §8: a
     reporter behind another by more than SIZING_SETTLE_S): the step's
     sample, if kept, is taken back (`late`). With priced work, the work
@@ -5752,13 +5836,13 @@ def _sizing_late(acct, e):
     -> True when it was of use."""
     used = False
     known = e["complete"] and e["usd"] is not None and not e["paid"]
-    for wid, w in _sizing_acct_windows(acct):
+    for wid, w in _sizing_acct_windows(t, acct):
         if not _scope_binds(w["scope"], e["scope"]):
             continue
         if not known:
-            used |= _sizing_unknown(acct, wid, w, e["r"], "late")
+            used |= _sizing_unknown(t, acct, wid, w, e["r"], "late")
             continue
-        used |= _sizing_retract(acct, wid, w, e["r"], "late")
+        used |= _sizing_retract(t, acct, wid, w, e["r"], "late")
         st = _sizing_range_step(w, e["r"])
         if st is not None:
             rg = w["range"]
@@ -5769,11 +5853,11 @@ def _sizing_late(acct, e):
             if st["silent"]:  # a silent step had work after all
                 st["silent"] = False
                 rg["silent"] -= st["points"]
-            _sizing["dirty"] = used = True
+            t.sizing["dirty"] = used = True
     return used
 
 
-def _sizing_close(acct, wid, w, t_data):
+def _sizing_close(t, acct, wid, w, t_data):
     """Close every step of the window that is final at data time t_data:
     header-sized, SIZING_SETTLE_S after its boundary; poll-sized, at the
     next poll. -> True when any closed. Caller holds _sizing_lock."""
@@ -5783,20 +5867,20 @@ def _sizing_close(acct, wid, w, t_data):
         due = (b["t"] + SIZING_SETTLE_S <= t_data) if w["mode"] == "header" else (b["t"] < t_data)
         if not due:
             break
-        _sizing_step(acct, wid, w, b)
+        _sizing_step(t, acct, wid, w, b)
         closed = True
     return closed
 
 
-def _sizing_events_in(acct, lo, hi):
+def _sizing_events_in(t, acct, lo, hi):
     """The account's buffered events with read_at in (lo, hi]."""
-    buf = (_sizing["accounts"].get(acct) or {}).get("buf") or []
+    buf = (t.sizing["accounts"].get(acct) or {}).get("buf") or []
     i = bisect.bisect_right(buf, lo, key=lambda e: e["r"])
     j = bisect.bisect_right(buf, hi, key=lambda e: e["r"])
     return buf[i:j]
 
 
-def _sizing_straddle(acct, w, lo, hi, b):
+def _sizing_straddle(t, acct, w, lo, hi, b):
     """The work of the events whose side of a boundary depends on when the
     provider counts them (66 §4): header-sized, those with head_at <= T <
     read_at at either boundary; poll-sized, those that ended in the poll
@@ -5807,9 +5891,9 @@ def _sizing_straddle(acct, w, lo, hi, b):
         for edge_lo, edge in ((a.get("lo"), lo), (b.get("lo"), hi)):
             if edge_lo is None:
                 edge_lo = edge - POLL_INTERVAL
-            evs += _sizing_events_in(acct, edge_lo, edge)
+            evs += _sizing_events_in(t, acct, edge_lo, edge)
     else:
-        buf = (_sizing["accounts"].get(acct) or {}).get("buf") or []
+        buf = (t.sizing["accounts"].get(acct) or {}).get("buf") or []
         i = bisect.bisect_right(buf, lo, key=lambda e: e["r"])
         evs = [e for e in buf[i:] if e["h"] is not None
                and any(e["h"] <= edge < e["r"] for edge in (lo, hi))]
@@ -5859,10 +5943,10 @@ def _sizing_learned(w, now, rho=None):
     return med if basis == "learned" else None
 
 
-def _sizing_now(acct, w):
+def _sizing_now(t, acct, w):
     """The data time a window's kept samples are taken at: its account's, or
     its newest sample's end before the account has any."""
-    return ((_sizing["accounts"].get(acct) or {}).get("data_t")
+    return ((t.sizing["accounts"].get(acct) or {}).get("data_t")
             or max([s["to"] for s in w["samples"]] or [0]))
 
 
@@ -5899,15 +5983,15 @@ def _sizing_weighted(usd, by, rho):
     return sum(v * rho.get(m, 1.0) for m, v in _sizing_model_usd(by).items())
 
 
-def _sizing_weights_of(acct):
+def _sizing_weights_of(t, acct):
     """The account's provider's fit, or None."""
-    prov = (_sizing["accounts"].get(acct) or {}).get("provider")
-    return _sizing["weights"].get(prov) if prov else None
+    prov = (t.sizing["accounts"].get(acct) or {}).get("provider")
+    return t.sizing["weights"].get(prov) if prov else None
 
 
-def _sizing_rho(acct):
+def _sizing_rho(t, acct):
     """{model: weight} of the account's provider's weighed models."""
-    return (_sizing_weights_of(acct) or {}).get("ratios") or {}
+    return (_sizing_weights_of(t, acct) or {}).get("ratios") or {}
 
 
 def _sizing_unweighed_share(mu, wt):
@@ -6153,20 +6237,20 @@ def _sizing_fit(rows, ref=None, whole=None):
                                                 for i in idx], default=None)}}
 
 
-def _sizing_refit(provider):
+def _sizing_refit(t, provider):
     """Fit the provider's weights over its windows' kept samples (67 §3) with
     the per-window check beside it, then judge each of its windows again at
     them. Logged: a change of reference or of which models are weighed, and
     a window's disagreement as it starts or ends; a weight that only moves
     is not (/sizing and sizing_weight show it). Caller holds _sizing_lock."""
-    keys = sorted(k for k in _sizing["windows"]
-                  if (_sizing["accounts"].get(k[0]) or {}).get("provider") == provider)
+    keys = sorted(k for k in t.sizing["windows"]
+                  if (t.sizing["accounts"].get(k[0]) or {}).get("provider") == provider)
     rows = []
     for k in keys:
-        w = _sizing["windows"][k]
+        w = t.sizing["windows"][k]
         rows += [(k, s["points"], _sizing_model_usd(s.get("by")))
-                 for s in _sizing_kept(w["samples"], _sizing_now(k[0], w))]
-    fit = _sizing_fit(rows, whole={k for k in keys if _sizing["windows"][k]["scope"] is None})
+                 for s in _sizing_kept(w["samples"], _sizing_now(t, k[0], w))]
+    fit = _sizing_fit(rows, whole={k for k in keys if t.sizing["windows"][k]["scope"] is None})
     own, off = {}, {}
     for k in keys:
         mine = [r for r in rows if r[0] == k]
@@ -6184,8 +6268,8 @@ def _sizing_refit(provider):
             if apart:
                 off[k] = apart
     fit.update(own=own, disagree=off)
-    old = _sizing["weights"].get(provider)
-    _sizing["weights"][provider] = fit
+    old = t.sizing["weights"].get(provider)
+    t.sizing["weights"][provider] = fit
 
     def shape(f):
         return (f["reference"], sorted(f["ratios"])) if f else (None, [])
@@ -6202,8 +6286,8 @@ def _sizing_refit(provider):
                                            f"{fit['models'][m]['ratio']:.3f} shared" for m in off[k])
                    if k in off else "agree again"))
     for k in keys:
-        w = _sizing["windows"][k]
-        _sizing_basis(k[0], k[1], w, _sizing_now(k[0], w), fit["ratios"])
+        w = t.sizing["windows"][k]
+        _sizing_basis(t, k[0], k[1], w, _sizing_now(t, k[0], w), fit["ratios"])
 
 
 def _sizing_apart(own, shared):
@@ -6219,17 +6303,17 @@ def _sizing_apart(own, shared):
             and gap > SIZING_WEIGHT_Z * own["rel_error"] * own["ratio"])
 
 
-def _sizing_rejudge(acct, wid, w):
+def _sizing_rejudge(t, acct, wid, w):
     """The window's samples changed: its provider's weights are fitted again
     as the batch ends (_sizing_after), which judges every window of the
     provider; before its account knows its provider, judge this window
     alone, now."""
-    _sizing["resized"] = True
-    prov = (_sizing["accounts"].get(acct) or {}).get("provider")
+    t.sizing["resized"] = True
+    prov = (t.sizing["accounts"].get(acct) or {}).get("provider")
     if prov:
-        _sizing["stale"].add(prov)
+        t.sizing["stale"].add(prov)
     else:
-        _sizing_basis(acct, wid, w, _sizing_now(acct, w))
+        _sizing_basis(t, acct, wid, w, _sizing_now(t, acct, w))
 
 
 def _sizing_log_step(acct, wid, p, q, t, usd, n, outcome, weighted=None):
@@ -6247,7 +6331,7 @@ def _pct_text(v):
     return f"{v:g}"
 
 
-def _sizing_step(acct, wid, w, b):
+def _sizing_step(t, acct, wid, w, b):
     """Close the step (T_p, T_q] from the anchor to its first pending
     boundary: cut its work (66 §3), judge it (§4), sample it (§5), add it
     to the measured range (§6), and anchor at (q, T_q). Caller holds
@@ -6256,7 +6340,7 @@ def _sizing_step(acct, wid, w, b):
     p, q, lo, hi = a["q"], b["q"], a["t"], b["t"]
     w["pending"].pop(0)
     key = (acct, wid)
-    evs = [e for e in _sizing_events_in(acct, lo, hi) if _scope_binds(w["scope"], e["scope"])]
+    evs = [e for e in _sizing_events_in(t, acct, lo, hi) if _scope_binds(w["scope"], e["scope"])]
     usd = sum(e["usd"] or 0.0 for e in evs if not e["paid"])
     # Hung-up requests counted at the middle of their range, and how far
     # either way their unseen output could take the step's work (66 §4).
@@ -6265,10 +6349,10 @@ def _sizing_step(acct, wid, w, b):
     if a["fresh"]:
         # The first transition after a fresh anchor: nothing said when the
         # meter reached p, so the span is no step; the window anchors here.
-        if key in _sizing["restarted"]:
+        if key in t.sizing["restarted"]:
             _sizing_count(w, "brain_restart")
             _sizing_log_step(acct, wid, p, q, hi, usd, len(evs), "brain_restart")
-        _sizing["restarted"].discard(key)
+        t.sizing["restarted"].discard(key)
         _sizing_anchor(w, q, hi, a["reset"], False, lo=b.get("lo"))
         return
     if q > 100 or p >= 100:
@@ -6279,20 +6363,20 @@ def _sizing_step(acct, wid, w, b):
         outcome = "incomplete"
     elif any(e["paid"] for e in evs):
         outcome = "paid"
-    elif any(g[0] < hi and g[1] > lo for g in _sizing["gaps"]):
+    elif any(g[0] < hi and g[1] > lo for g in t.sizing["gaps"]):
         outcome = "seq_gap"
-    elif _sizing_restart_in(lo, hi):
+    elif _sizing_restart_in(t, lo, hi):
         outcome = "proxy_restart"
     elif w["overflow_to"] is not None and lo < w["overflow_to"]:
         outcome = "overflow"
     elif not evs:
         outcome = "silent"
-    elif _sizing_straddle(acct, w, lo, hi, b) > SIZING_FUZZ * usd:
+    elif _sizing_straddle(t, acct, w, lo, hi, b) > SIZING_FUZZ * usd:
         outcome = "fuzz"
     else:
         outcome = "sample"
     points = q - p
-    data_t = (_sizing["accounts"].get(acct) or {}).get("data_t") or hi
+    data_t = (t.sizing["accounts"].get(acct) or {}).get("data_t") or hi
     if outcome in _SIZING_MEASURED:
         rg = _sizing_range_for(w, a["reset"], p)
         if rg["first"] is None:
@@ -6311,12 +6395,12 @@ def _sizing_step(acct, wid, w, b):
                 _sizing_add_by(st["by"], e)
         rg["steps"].append(st)
         del rg["steps"][:-SIZING_RANGE_STEPS_MAX]  # older steps are final in the range
-        _sizing["dirty"] = True
+        t.sizing["dirty"] = True
     _sizing_count(w, outcome)
     cheap = False
     # The step's dollars weighted at its provider's weights as they stand
     # before it joins them (67 §3, §4): what `cheap` judges, and the line says.
-    rho = _sizing_rho(acct)
+    rho = _sizing_rho(t, acct)
     mu = {}
     for e in evs:
         if e["usd"] is not None and not e["paid"]:
@@ -6339,21 +6423,21 @@ def _sizing_step(acct, wid, w, b):
         # The growth retire judges at the weights as they stand, as `cheap`
         # does; the weights take the sample in as the batch ends, and that
         # judges the provider's windows again (67 §3).
-        _sizing_shift(acct, wid, w)
-        _sizing_rejudge(acct, wid, w)
-        _sizing["dirty"] = True
+        _sizing_shift(t, acct, wid, w)
+        _sizing_rejudge(t, acct, wid, w)
+        t.sizing["dirty"] = True
     note = "sample (cheap)" if cheap else outcome
     if hung:
         note += (f"; {len(hung)} hung-up, spans ${spans:.4f} against "
                  f"{SIZING_UNSEEN:.0%} of the work, ${SIZING_UNSEEN * usd:.4f}")
     _sizing_log_step(acct, wid, p, q, hi, usd, len(evs), note,
-                     (wusd, _sizing_unweighed_share(mu, _sizing_weights_of(acct))) if rho else None)
+                     (wusd, _sizing_unweighed_share(mu, _sizing_weights_of(t, acct))) if rho else None)
     _sizing_anchor(w, q, hi, a["reset"], False, lo=b.get("lo"))
     if w["overflow_to"] is not None and w["overflow_to"] <= hi:
         w["overflow_to"] = None
 
 
-def _sizing_shift(acct, wid, w):
+def _sizing_shift(t, acct, wid, w):
     """A provider's limit grew (66 §5): the newest SIZING_SHIFT_N samples
     each more than SIZING_SHIFT above the median of those before them
     retire the older ones. Never downward: a shrink flows through the
@@ -6362,7 +6446,7 @@ def _sizing_shift(acct, wid, w):
     s = w["samples"]
     if len(s) <= SIZING_SHIFT_N:
         return False
-    rho = _sizing_rho(acct)
+    rho = _sizing_rho(t, acct)
     pp = [_sizing_weighted(x["usd"], x.get("by"), rho) / x["points"] for x in s]
     older = _median(pp[:-SIZING_SHIFT_N])
     if older > 0 and all(v > (1 + SIZING_SHIFT) * older for v in pp[-SIZING_SHIFT_N:]):
@@ -6372,11 +6456,11 @@ def _sizing_shift(acct, wid, w):
     return False
 
 
-def _sizing_basis(acct, wid, w, now, rho=None):
+def _sizing_basis(t, acct, wid, w, now, rho=None):
     """The window's basis at its provider's weights (or rho), logged as it
     turns to disagree."""
     _, basis, spread, _ = _sizing_estimate(_sizing_kept(w["samples"], now),
-                                           _sizing_rho(acct) if rho is None else rho)
+                                           _sizing_rho(t, acct) if rho is None else rho)
     if basis == "disagree" and w["basis"] != "disagree":
         log(f"sizing: {acct} {wid} samples disagree: spread "
             f"{'unknown' if spread is None else f'{spread:.2f}'} over "
@@ -6384,38 +6468,38 @@ def _sizing_basis(acct, wid, w, now, rho=None):
     w["basis"] = basis
 
 
-def _sizing_settle_account(acct):
+def _sizing_settle_account(t, acct):
     """Close the account's header-sized steps its data time has settled, then
     let go of what no window needs. Caller holds _sizing_lock."""
-    a = _sizing["accounts"].get(acct)
+    a = t.sizing["accounts"].get(acct)
     if a is None:
         return
     moved = False
-    for wid, w in _sizing_acct_windows(acct):
+    for wid, w in _sizing_acct_windows(t, acct):
         if w["mode"] == "header":
-            moved |= _sizing_close(acct, wid, w, a["data_t"])
-            moved |= _sizing_expire(acct, wid, w, a["data_t"])
+            moved |= _sizing_close(t, acct, wid, w, a["data_t"])
+            moved |= _sizing_expire(t, acct, wid, w, a["data_t"])
     return moved
 
 
-def _sizing_after(acct, moved):
+def _sizing_after(t, acct, moved):
     """End a batch (one served event, refusal or poll, under _sizing_lock):
     fit the weights again of each provider whose samples changed in it (67
     §3), once, so a proxy restart that takes back a sample of every window
     fits once; then tidy after anchors moved, and save what changed (66
     §8); then, when sizes may have moved, mark the document (67 §8)."""
-    for prov in sorted(_sizing["stale"]):
-        _sizing_refit(prov)
-    _sizing["stale"].clear()
+    for prov in sorted(t.sizing["stale"]):
+        _sizing_refit(t, prov)
+    t.sizing["stale"].clear()
     if moved:
-        _sizing_prune(acct)
-        _sizing_prune_gaps()
-    if _sizing.pop("dirty", False):
-        _sizing_save()
-    if _sizing.pop("resized", False):
+        _sizing_prune(t, acct)
+        _sizing_prune_gaps(t)
+    if t.sizing.pop("dirty", False):
+        _sizing_save(t)
+    if t.sizing.pop("resized", False):
         # A sample closed, retired or was taken back, or the weights moved:
         # the document's fleet reads the sizes (67 §8), so it may have changed.
-        _events_mark()
+        _events_mark(t)
 
 
 def _sizing_bounded(e):
@@ -6424,19 +6508,19 @@ def _sizing_bounded(e):
     return not e["complete"] and e["usd"] is not None
 
 
-def _sizing_take(acct, provider, ev, usd, why, speed, tier, reporter="", bound=None):
+def _sizing_take(t, acct, provider, ev, usd, why, speed, tier, reporter="", bound=None):
     """A served event, applied (66 §10): note its boot (a reporter's restart
     takes back the samples it falls in), take back a closed step it is late
     for, buffer it, apply its readings as heads, then close the steps its
     read_at settles. Only served events move data time. A hung-up request
     with a bound (_served_bound) is buffered at its middle, its token totals
     carrying the half-limit output, with its span beside it (66 §4)."""
-    t = ev["read_at"]
+    rt = ev["read_at"]
     model_speed = speed if speed is not None else ev["speed"]
     tokens, span = ev["tokens"], None
     if bound is not None:
         usd, span, model_speed, tier, tokens = bound
-    e = {"r": float(t), "h": float(ev["head_at"]),
+    e = {"r": float(rt), "h": float(ev["head_at"]),
          "usd": usd, "why": why, "complete": ev["complete"], "paid": ev["paid"] is True,
          "model": ev["model"], "scope": _sizing_lane_scope(ev["model"]),
          "key": f"{ev['model']}|{model_speed}|{tier}" if usd is not None else None,
@@ -6444,27 +6528,27 @@ def _sizing_take(acct, provider, ev, usd, why, speed, tier, reporter="", bound=N
          "boot": ev["boot"], "seq": ev["seq"]}
     if span is not None:
         e["span"] = span
-    with _sizing_lock:
-        a = _sizing_acct(acct, provider)
+    with t.sizing_lock:
+        a = _sizing_acct(t, acct, provider)
         if (e["boot"], e["seq"]) in a["keys"]:
             return  # a resend of an event the loaded buffer holds
-        new, restart = _sizing_boot(e["boot"], e["seq"], e["r"], reporter or "")
+        new, restart = _sizing_boot(t, e["boot"], e["seq"], e["r"], reporter or "")
         if restart is not None:
-            for (racct, wid), w in list(_sizing["windows"].items()):
-                for t in restart:
-                    _sizing_unknown(racct, wid, w, t, "proxy_restart")
-        used = new and _sizing_late(acct, e)
+            for (racct, wid), w in list(t.sizing["windows"].items()):
+                for rt in restart:
+                    _sizing_unknown(t, racct, wid, w, rt, "proxy_restart")
+        used = new and _sizing_late(t, acct, e)
         a["data_t"] = max(a["data_t"], e["r"])
         moved = False
         for wid, rd in sorted(ev["readings"].items()):
             mode = _sizing_mode(provider, wid)
             if mode != "header" or rd.get("used_pct") is None:
                 continue
-            w = _sizing_win(acct, wid, mode)
-            moved |= _sizing_head(acct, wid, w, e["h"], float(rd["used_pct"]),
+            w = _sizing_win(t, acct, wid, mode)
+            moved |= _sizing_head(t, acct, wid, w, e["h"], float(rd["used_pct"]),
                                   None if rd.get("resets_at") is None else float(rd["resets_at"]),
                                   e["r"])
-        needed, anchored = _sizing_needs(acct, e)
+        needed, anchored = _sizing_needs(t, acct, e)
         if needed or not anchored:
             bisect.insort(a["buf"], e, key=lambda x: x["r"])
             a["keys"].add((e["boot"], e["seq"]))
@@ -6474,37 +6558,37 @@ def _sizing_take(acct, provider, ev, usd, why, speed, tier, reporter="", bound=N
             gone = a["buf"].pop(0)
             a["keys"].discard((gone["boot"], gone["seq"]))
             a["dropped"] += 1
-            for _, w in _sizing_acct_windows(acct):
+            for _, w in _sizing_acct_windows(t, acct):
                 hold = _sizing_hold_from(w)
                 if hold is not None and gone["r"] > hold and _scope_binds(w["scope"], gone["scope"]):
                     w["overflow_to"] = max(w["overflow_to"] or gone["r"], gone["r"])
-        moved |= bool(_sizing_settle_account(acct))
+        moved |= bool(_sizing_settle_account(t, acct))
         if not moved:
             # An event no window needs leaves once its grace has passed.
-            while a["buf"] and not _sizing_needs(acct, a["buf"][0])[1] \
+            while a["buf"] and not _sizing_needs(t, acct, a["buf"][0])[1] \
                     and a["buf"][0]["r"] < a["data_t"] - SIZING_SETTLE_S:
                 gone = a["buf"].pop(0)
                 a["keys"].discard((gone["boot"], gone["seq"]))
-        _sizing_after(acct, moved)
+        _sizing_after(t, acct, moved)
 
 
-def _sizing_refusal(acct, provider, wid, t, seen):
+def _sizing_refusal(t, acct, provider, wid, at, seen):
     """An applied refusal's seen use is a head at its read_at (66 §2): on
     Anthropic the 429 is the only response that reads 100."""
     used = (seen or {}).get("used_pct")
     if used is None or _sizing_mode(provider, wid) != "header":
         return
     reset = (seen or {}).get("resets_at")
-    with _sizing_lock:
-        _sizing_acct(acct, provider)  # data time is the served events' alone
-        w = _sizing_win(acct, wid, "header")
-        moved = _sizing_head(acct, wid, w, float(t), float(used),
-                             None if reset is None else float(reset), float(t))
-        moved |= bool(_sizing_settle_account(acct))
-        _sizing_after(acct, moved)
+    with t.sizing_lock:
+        _sizing_acct(t, acct, provider)  # data time is the served events' alone
+        w = _sizing_win(t, acct, wid, "header")
+        moved = _sizing_head(t, acct, wid, w, float(at), float(used),
+                             None if reset is None else float(reset), float(at))
+        moved |= bool(_sizing_settle_account(t, acct))
+        _sizing_after(t, acct, moved)
 
 
-def _sizing_poll(acct, res):
+def _sizing_poll(t, acct, res):
     """A landed poll's heads for the account's poll-sized limits (66 §7):
     any allowance limit with a used_pct, a window or a cycle pool."""
     rd = res.get("reading")
@@ -6524,22 +6608,22 @@ def _sizing_poll(acct, res):
         heads.append((lim["id"], h, float(lim["used_pct"]), _num(lim.get("resets_at"))))
     if at is None and heads:
         at = max(h for _, h, _, _ in heads)
-    with _sizing_lock:
-        if _sizing_gate["closing"] or (not heads and acct not in _sizing["accounts"]):
+    with t.sizing_lock:
+        if t.sizing_gate["closing"] or (not heads and acct not in t.sizing["accounts"]):
             return
-        _sizing_acct(acct, provider)
+        _sizing_acct(t, acct, provider)
         moved = False
         for wid, h, q, reset in heads:
-            w = _sizing_win(acct, wid, "poll")
+            w = _sizing_win(t, acct, wid, "poll")
             if w["last_head"] is not None and h <= w["last_head"]:
                 continue  # the same poll again
-            moved |= _sizing_head(acct, wid, w, h, q, reset, h)
+            moved |= _sizing_head(t, acct, wid, w, h, q, reset, h)
         if at is not None:
             polled = {wid for wid, _, _, _ in heads}
-            for wid, w in _sizing_acct_windows(acct):
+            for wid, w in _sizing_acct_windows(t, acct):
                 if w["mode"] == "poll" and wid not in polled:
-                    moved |= _sizing_expire(acct, wid, w, at)
-        _sizing_after(acct, moved)
+                    moved |= _sizing_expire(t, acct, wid, w, at)
+        _sizing_after(t, acct, moved)
 
 
 # ---- sizing: persistence (66 §8) ----
@@ -6548,66 +6632,63 @@ def _sizing_window_doc(w):
     return {"mode": w["mode"], "samples": w["samples"], "range": w["range"]}
 
 
-def _sizing_open_doc():
+def _sizing_open_doc(t):
     """The open state: anchors, pending boundaries, the event buffers, the
     boots and the gap intervals."""
     accts = {}
-    for acct, a in _sizing["accounts"].items():
+    for acct, a in t.sizing["accounts"].items():
         accts[acct] = {"provider": a["provider"], "data_t": a["data_t"], "buf": a["buf"]}
     wins = {}
-    for (acct, wid), w in _sizing["windows"].items():
+    for (acct, wid), w in t.sizing["windows"].items():
         wins.setdefault(acct, {})[wid] = {k: w.get(k) for k in
                                           ("anchor", "pending", "overflow_to", "last_head")}
     return {"accounts": accts, "windows": wins,
-            "boots": [[b, v] for b, v in _sizing["boots"].items()], "gaps": _sizing["gaps"],
-            "reporters": _sizing["reporters"], "restarts": _sizing["restarts"]}
+            "boots": [[b, v] for b, v in t.sizing["boots"].items()], "gaps": t.sizing["gaps"],
+            "reporters": t.sizing["reporters"], "restarts": t.sizing["restarts"]}
 
 
-def _sizing_save(open_state=False, final=False):
+def _sizing_save(t, open_state=False, final=False):
     """Write SWITCH_SIZING_FILE atomically: the samples and the measured
     ranges always; the open state at a graceful shutdown only (final), after
     which nothing writes it again. Caller holds _sizing_lock. -> True when
     written."""
-    if (_sizing_gate["closing"] and not final) or _sizing_gate["frozen"]:
+    if (t.sizing_gate["closing"] and not final) or t.sizing_gate["frozen"]:
         return False
     wins = {}
-    for (acct, wid), w in _sizing["windows"].items():
+    for (acct, wid), w in t.sizing["windows"].items():
         wins.setdefault(acct, {})[wid] = _sizing_window_doc(w)
     doc = {"v": SIZING_FILE_VERSION, "prices": _api_prices_hash(), "windows": wins}
     if open_state:
-        doc["open"] = _sizing_open_doc()
+        doc["open"] = _sizing_open_doc(t)
     try:
-        tmp = SIZING_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(doc, f)
-        os.replace(tmp, SIZING_FILE)
+        _store.write_json(t.sizing_file, doc)
         return True
     except Exception as e:  # noqa: BLE001
-        log(f"WARN sizing: could not write {SIZING_FILE}: {e}")
+        log(f"WARN sizing: could not write {t.sizing_file}: {e}")
         return False
 
 
-def _sizing_shutdown():
+def _sizing_shutdown(t):
     """The graceful shutdown's save: the open state goes too, so a deploy
     keeps the open step (66 §8, §15.4). From here no served event is taken
     (answered retry, so the proxy resends it to the next brain), no refusal
     or poll changes sizing, and no other save writes the file; served
     events already past the gate are waited for, so the saved state holds
     them."""
-    with _sizing_lock:
-        _sizing_gate["closing"] = True
-        if not _sizing_cv.wait_for(lambda: _sizing_gate["inflight"] == 0,
+    with t.sizing_lock:
+        t.sizing_gate["closing"] = True
+        if not t.sizing_cv.wait_for(lambda: t.sizing_gate["inflight"] == 0,
                                    timeout=SIZING_SHUTDOWN_WAIT_S):
-            log(f"WARN sizing: {_sizing_gate['inflight']} report(s) still in flight "
+            log(f"WARN sizing: {t.sizing_gate['inflight']} report(s) still in flight "
                 f"after {SIZING_SHUTDOWN_WAIT_S}s; saving without them")
-        saved = _sizing_save(open_state=True, final=True)
-        frozen = _sizing_gate["frozen"]
+        saved = _sizing_save(t, open_state=True, final=True)
+        frozen = t.sizing_gate["frozen"]
     if saved:
-        log(f"sizing: open state saved to {SIZING_FILE}")
+        log(f"sizing: open state saved to {t.sizing_file}")
     elif frozen:
         log(f"sizing: open state not saved: sizing is frozen ({frozen})")
     else:
-        log(f"WARN sizing: open state not saved: {SIZING_FILE} could not be written")
+        log(f"WARN sizing: open state not saved: {t.sizing_file} could not be written")
 
 
 def _price_row(model, speed, tier):
@@ -6752,31 +6833,31 @@ def _sizing_doc_problem(doc):
     return None
 
 
-def _sizing_freeze(why):
+def _sizing_freeze(t, why):
     """Sizing starts empty and writes nothing over SWITCH_SIZING_FILE; /sizing
     says why."""
-    _sizing_gate["frozen"] = why
-    log(f"WARN sizing: {why}; sizing starts empty and writes nothing over {SIZING_FILE}")
+    t.sizing_gate["frozen"] = why
+    log(f"WARN sizing: {why}; sizing starts empty and writes nothing over {t.sizing_file}")
 
 
-def _sizing_set_aside(why):
+def _sizing_set_aside(t, why):
     """Move an unusable SWITCH_SIZING_FILE (it does not parse or does not
     check) to <file>.bad-<UTC time>, never over an earlier one, before
     anything can write over it; sizing starts empty."""
-    base = f"{SIZING_FILE}.bad-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    base = f"{t.sizing_file}.bad-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     bad, n = base, 1
     while os.path.exists(bad):
         bad, n = f"{base}-{n}", n + 1
     try:
-        os.replace(SIZING_FILE, bad)
+        os.replace(t.sizing_file, bad)
     except OSError as e:
-        _sizing_freeze(f"{SIZING_FILE} unusable ({why}) and not set aside ({e})")
+        _sizing_freeze(t, f"{t.sizing_file} unusable ({why}) and not set aside ({e})")
         return
-    _sizing_gate["set_aside"] = bad
-    log(f"WARN sizing: {SIZING_FILE} unusable ({why}); set aside as {bad}, sizing starts empty")
+    t.sizing_gate["set_aside"] = bad
+    log(f"WARN sizing: {t.sizing_file} unusable ({why}); set aside as {bad}, sizing starts empty")
 
 
-def _sizing_load():
+def _sizing_load(t):
     """Read SWITCH_SIZING_FILE before /reports is served (66 §8): the samples
     and the measured ranges, re-priced at the current table; the open state
     when a graceful shutdown left one, which is then taken off the file so a
@@ -6787,19 +6868,20 @@ def _sizing_load():
     written; one that can't be read is left where it is and nothing writes
     over it. Either way sizing starts empty: a sizing file never keeps the
     brain from serving."""
-    global _sizing
     try:
-        with open(SIZING_FILE, "rb") as f:
-            raw = f.read()
-    except FileNotFoundError:
+        raw = _store.read_bytes(t.sizing_file)
+    except credstore.CredStoreError as e:  # the wrong form for the store's mode
+        _sizing_set_aside(t, str(e))
         return
     except OSError as e:  # the file may be good: leave it, and write nothing over it
-        _sizing_freeze(f"cannot read {SIZING_FILE}: {e}")
+        _sizing_freeze(t, f"cannot read {t.sizing_file}: {e}")
+        return
+    if raw is None:
         return
     try:
         doc = json.loads(raw)
     except (ValueError, RecursionError) as e:
-        _sizing_set_aside(f"not JSON: {e}")
+        _sizing_set_aside(t, f"not JSON: {e}")
         return
     why = _sizing_doc_problem(doc)
     if why is None:
@@ -6808,20 +6890,20 @@ def _sizing_load():
         except Exception as e:  # noqa: BLE001
             why = f"{type(e).__name__}: {e}"
     if why is not None:
-        _sizing_set_aside(why)
+        _sizing_set_aside(t, why)
         return
     opened = isinstance(doc.get("open"), dict)
-    with _sizing_lock:
-        _sizing = st
+    with t.sizing_lock:
+        t.sizing = st
         # The weights from the re-priced samples (67 §3); an account the open
         # state didn't name joins its provider's fit at its first event.
         for prov in sorted({a["provider"] for a in st["accounts"].values() if a.get("provider")}):
-            _sizing_refit(prov)
+            _sizing_refit(t, prov)
         if opened or dropped or ranges_dropped:
-            _sizing_save()  # the open state is good for this start only
-    _events_mark()  # the fleet reads the sizes just read (67 §8)
+            _sizing_save(t)  # the open state is good for this start only
+    _events_mark(t)  # the fleet reads the sizes just read (67 §8)
     n = sum(len(w["samples"]) for w in st["windows"].values())
-    log(f"sizing: {n} samples of {len(st['windows'])} windows read from {SIZING_FILE}"
+    log(f"sizing: {n} samples of {len(st['windows'])} windows read from {t.sizing_file}"
         + (f", {dropped} dropped: the price table no longer prices them" if dropped else "")
         + (f", {ranges_dropped} measured range(s) started again: the price table no longer "
            "prices them" if ranges_dropped else "")
@@ -6877,11 +6959,11 @@ def _sizing_state_from(doc):
 
 # ---- sizing: publication (66 §9) ----
 
-def _sizing_sized_windows():
+def _sizing_sized_windows(t):
     """{acct: {wid: mode}} for every measured account's sized windows, from
     its reading: what /sizing and the gauges list, sized or not yet."""
-    with _lock:
-        snap = list(_state.values())
+    with t.lock:
+        snap = list(t.state.values())
     out = {}
     for r in snap:
         rd = r.get("reading")
@@ -6895,14 +6977,14 @@ def _sizing_sized_windows():
     return out
 
 
-def _sizing_window_view(acct, wid, w, now, full):
+def _sizing_window_view(t, acct, wid, w, now, full):
     """A window's sizes (67 §2): `size` the mix size, list dollars per point
     of what has run on it lately (× 100), at its provider's weights;
     size_ref the same in reference-model dollars; `sizes` per model for the
     reference and the weighed models its scope binds. The per-point values,
     the spread and the outside sum are in weighted dollars; with no weighed
     model all of it reads as 66 §9 did."""
-    wt = _sizing_weights_of(acct) or {}
+    wt = _sizing_weights_of(t, acct) or {}
     rho = wt.get("ratios") or {}
     kept = _sizing_kept(w["samples"], now) if w else []
     size_ref, basis, spread, med = _sizing_estimate(kept, rho)
@@ -6953,49 +7035,49 @@ def _sizing_window_view(acct, wid, w, now, full):
     out["retracted"] = dict(sorted((w or {}).get("retracted", {}).items()))
     a = (w or {}).get("anchor")
     out["open"] = {"anchor": a, "pending": (w or {}).get("pending") or [],
-                   "events_held": sum(1 for e in ((_sizing["accounts"].get(acct) or {}).get("buf") or [])
+                   "events_held": sum(1 for e in ((t.sizing["accounts"].get(acct) or {}).get("buf") or [])
                                       if w and _scope_binds(w["scope"], e["scope"])
                                       and _sizing_hold_from(w) is not None
                                       and e["r"] > _sizing_hold_from(w))}
     return out
 
 
-def _sizing_snapshot(full):
+def _sizing_snapshot(t, full):
     """{acct: {"windows": {wid: view}, ...}}: every measured account's sized
     windows and every window the engine holds. Pure: marks nothing."""
-    listed = _sizing_sized_windows()
-    with _sizing_lock:
+    listed = _sizing_sized_windows(t)
+    with t.sizing_lock:
         accts = {}
-        keys = {(a, wid) for a, ws in listed.items() for wid in ws} | set(_sizing["windows"])
+        keys = {(a, wid) for a, ws in listed.items() for wid in ws} | set(t.sizing["windows"])
         for acct, wid in sorted(keys):
-            w = _sizing["windows"].get((acct, wid))
-            a = _sizing["accounts"].get(acct) or {}
+            w = t.sizing["windows"].get((acct, wid))
+            a = t.sizing["accounts"].get(acct) or {}
             now = a.get("data_t") or max([s["to"] for s in (w or {}).get("samples") or []] or [0])
-            view = copy.deepcopy(_sizing_window_view(acct, wid, w, now, full))
+            view = copy.deepcopy(_sizing_window_view(t, acct, wid, w, now, full))
             if view["size_mode"] is None:
                 view["size_mode"] = listed.get(acct, {}).get(wid)
             ad = accts.setdefault(acct, {"windows": {}})
             ad["windows"][wid] = view
         for acct, ad in accts.items():
-            a = _sizing["accounts"].get(acct) or {}
+            a = t.sizing["accounts"].get(acct) or {}
             ad.update({"events_held": len(a.get("buf") or []), "data_t": a.get("data_t") or None,
                        "events_dropped": a.get("dropped", 0), "events_late": a.get("late", 0)})
         # Per provider (67 §3): its reference, each model's weight, error,
         # basis, dollars and steps, and the fit's counts.
         extra = {"weights": copy.deepcopy({p: {k: f[k] for k in ("reference", "models", "fit")}
-                                           for p, f in sorted(_sizing["weights"].items())})}
+                                           for p, f in sorted(t.sizing["weights"].items())})}
         if full:
-            extra.update({"boots": [dict(v, boot=b) for b, v in _sizing["boots"].items()],
-                          "gaps": [list(g) for g in _sizing["gaps"]]})
+            extra.update({"boots": [dict(v, boot=b) for b, v in t.sizing["boots"].items()],
+                          "gaps": [list(g) for g in t.sizing["gaps"]]})
     return accts, extra
 
 
-def sizing_payload():
+def sizing_payload(t):
     """GET /sizing (66 §9): the live check's instrument, never the document."""
-    accts, extra = _sizing_snapshot(full=True)
-    with _sizing_lock:
-        fd = {"path": SIZING_FILE, "frozen": _sizing_gate["frozen"] is not None,
-              "frozen_why": _sizing_gate["frozen"], "set_aside": _sizing_gate["set_aside"]}
+    accts, extra = _sizing_snapshot(t, full=True)
+    with t.sizing_lock:
+        fd = {"path": t.sizing_file, "frozen": t.sizing_gate["frozen"] is not None,
+              "frozen_why": t.sizing_gate["frozen"], "set_aside": t.sizing_gate["set_aside"]}
     return dict({"as_of": time.time(), "unit": "api_usd", "prices": _api_prices_hash(),
                  "file": fd,
                  "constants": {"settle_s": SIZING_SETTLE_S, "fuzz": SIZING_FUZZ,
@@ -7013,11 +7095,12 @@ def sizing_payload():
                  "accounts": accts}, **extra)
 
 
-def _sizing_metric_lines():
-    accts, extra = _sizing_snapshot(full=False)
-    with _sizing_lock:
-        counts = {k: dict(w["counts"]) for k, w in _sizing["windows"].items()}
-        retracted = {k: dict(w.get("retracted") or {}) for k, w in _sizing["windows"].items()}
+def _sizing_metric_lines(t):
+    _line = _tenant_line(t.id)
+    accts, extra = _sizing_snapshot(t, full=False)
+    with t.sizing_lock:
+        counts = {k: dict(w["counts"]) for k, w in t.sizing["windows"].items()}
+        retracted = {k: dict(w.get("retracted") or {}) for k, w in t.sizing["windows"].items()}
     lines = []
     for acct, ad in sorted(accts.items()):
         for wid, v in sorted(ad["windows"].items()):
@@ -7070,7 +7153,7 @@ def _sizing_metric_lines():
 _FLEET_PERIOD_UNITS = {"mo": 30 * 86400, "d": 86400, "h": 3600, "m": 60, "s": 1}
 
 
-def _sizing_fleet_view():
+def _sizing_fleet_view(t):
     """The sizing view the figure reads (67 §8), from _sizing_snapshot's
     numbers: {"windows": {acct: {wid: {basis, mix, sizes, samples}}},
     "providers": {provider: {reference, models: {model:
@@ -7080,7 +7163,7 @@ def _sizing_fleet_view():
     without closing a sample (the outside sum) is in it, so such an event
     publishes no document (64 §2, 67 §8). Takes _lock, then _sizing_lock;
     never call it under _plock."""
-    accts, extra = _sizing_snapshot(full=False)
+    accts, extra = _sizing_snapshot(t, full=False)
     windows = {acct: {wid: {"basis": v["size_basis"], "mix": v["size"], "sizes": dict(v["sizes"]),
                             "samples": v["samples_n"]}
                       for wid, v in ad["windows"].items()}
@@ -7650,10 +7733,11 @@ def _fleet_payload(ctx, view, health):
                          STALE_MAX, health)
 
 
-def _fleet_metric_lines(fleet):
+def _fleet_metric_lines(fleet, tid):
     """fleet_capacity_api_usd, fleet_room_api_usd and fleet_left_pct, by
     {level, name}: the proxy, each selection and each account at the proxy
     level; a listed account's own left_pct only (67 §8, §13 Q7)."""
+    _line = _tenant_line(tid)
     rows = [("proxy", "proxy", fleet["proxy"])]
     rows += [("selection", k, s) for k, s in sorted(fleet["selections"].items())]
     rows += [("account", k, a) for k, a in sorted(fleet["accounts"].items())]
@@ -7681,31 +7765,31 @@ def reports_body_problem(body):
     return None
 
 
-def reports_post(events, reporter, now):
+def reports_post(t, events, reporter, now):
     """POST /reports (quota-model 64 §5): each event on its own, in order.
     -> ({results: [{id, result, why}], seq}, decisive count): the events
     applied that a decision reads, so served events (65 §7, counted only)
     leave it 0. Ledger entries go to the ledger in one append
     (ledger_accept); seq is the ledger's."""
-    with _lock:
-        snap = list(_state.values())
-    roster = _account_roster(snap)
+    with t.lock:
+        snap = list(t.state.values())
+    roster = _account_roster(t, snap)
     by_name = {r["name"]: r for r in snap}
     outcomes, ledger_at = [], []
     for i, ev in enumerate(events):
-        res, why = _report_event(ev, roster, by_name, now, reporter or "")
+        res, why = _report_event(t, ev, roster, by_name, now, reporter or "")
         if res == "ledger":
             ledger_at.append(i)
         outcomes.append((res, why))
     if ledger_at:
         entries = [{k: v for k, v in events[i].items() if k not in ("kind", "read_at")}
                    for i in ledger_at]
-        accepted, seq = ledger_accept(entries, roster, now)
+        accepted, seq = ledger_accept(t, entries, roster, now)
         for i, out in zip(ledger_at, accepted):
             outcomes[i] = out
     else:
-        with _ledger_lock:
-            seq = _ledger["seq"]
+        with t.ledger_lock:
+            seq = t.ledger["seq"]
     results = [{"id": ev.get("id") if isinstance(ev, dict) else None, "result": res, "why": why}
                for ev, (res, why) in zip(events, outcomes)]
     counts = {k: sum(1 for r in results if r["result"] == k)
@@ -7789,13 +7873,13 @@ def _reported_result(res, rep):
     return dict(res, reading=rd, reported_as_of=reported_as_of)
 
 
-def _reported_snap(snap):
+def _reported_snap(t, snap):
     """The poll results with the reported readings merged in (a new list;
     _state is never touched)."""
-    with _reports_lock:
-        if not _reported:
+    with t.reports_lock:
+        if not t.reported:
             return list(snap)
-        rep = copy.deepcopy(_reported)
+        rep = copy.deepcopy(t.reported)
     return [_reported_result(r, rep[r["name"]]) if r.get("name") in rep else r for r in snap]
 
 
@@ -7870,7 +7954,7 @@ def _hold_window(h, until, w, now):
     return w
 
 
-def _hold_snap(snap, standings, now):
+def _hold_snap(t, snap, standings, now):
     """-> (snap, held accounts): the results with each live hold applied to
     a copy of its reading as the proxy's records close its standing
     (standingFor): the held window at 100 (_hold_window), added where the
@@ -7878,8 +7962,8 @@ def _hold_snap(snap, standings, now):
     account never measured is left as it is. Holds go into the readings, so
     every number derived from them (the standings, weekly, the lanes'
     effective, the class targets) reads the window at 100."""
-    with _reports_lock:
-        holds = [(k, dict(h)) for k, h in _holds.items()]
+    with t.reports_lock:
+        holds = [(k, dict(h)) for k, h in t.holds.items()]
     live = {}
     for (acct, wid), h in holds:
         st = standings.get(acct)
@@ -7919,23 +8003,23 @@ def _hold_snap(snap, standings, now):
     return out, set(live)
 
 
-def _decision_view(snap, now):
+def _decision_view(t, snap, now):
     """-> (roster, snap, by_name, standings): what every decision reads. The
     poll results with the reported readings merged in (_reported_snap) and
     the holds applied (_hold_snap), and the standings from them."""
-    roster = _account_roster(snap)
-    snap = _reported_snap(snap)
+    roster = _account_roster(t, snap)
+    snap = _reported_snap(t, snap)
     by_name = {r["name"]: r for r in snap}
-    standings = {a: _account_standing(a, by_name.get(a), pv, now) for a, pv in roster.items()}
-    snap, held = _hold_snap(snap, standings, now)
+    standings = {a: _account_standing(t, a, by_name.get(a), pv, now) for a, pv in roster.items()}
+    snap, held = _hold_snap(t, snap, standings, now)
     if held:
         by_name = {r["name"]: r for r in snap}
         for a in held:
-            standings[a] = _account_standing(a, by_name.get(a), roster[a], now)
+            standings[a] = _account_standing(t, a, by_name.get(a), roster[a], now)
     return roster, snap, by_name, standings
 
 
-def _prune_reports(snap, now):
+def _prune_reports(t, snap, now):
     """At the start of every compute_preferred: forget each reported field a
     poll that started after it has replaced (also by leaving its window
     out), and every report on an account no longer polled or never
@@ -7945,8 +8029,8 @@ def _prune_reports(snap, now):
     by_name = {r["name"]: r for r in snap}
     # The floor of each money report on a pot no poll reads, taken before
     # _reports_lock: it reads the ledger and the re-checks under their locks.
-    with _reports_lock:
-        with_money = [a for a, rep in _reported.items() if rep.get("money")]
+    with t.reports_lock:
+        with_money = [a for a, rep in t.reported.items() if rep.get("money")]
     floors = {}
     for acct in with_money:
         res = by_name.get(acct) or {}
@@ -7954,13 +8038,13 @@ def _prune_reports(snap, now):
         if good is None:
             continue
         provider = res.get("provider")
-        floors[acct] = _report_money_floor(acct, provider, good,
+        floors[acct] = _report_money_floor(t, acct, provider, good,
                                            _pot_unread(res.get("reading"), _money_pot(provider)))
-    with _reports_lock:
-        for acct in list(_reported):
+    with t.reports_lock:
+        for acct in list(t.reported):
             res = by_name.get(acct) or {}
             good = res.get("good_ts") if res.get("reading") else None
-            rep = _reported[acct]
+            rep = t.reported[acct]
             for node in (rep.get("windows") or {}).values():
                 for field in [f for f, v in node.items() if good is None or v["at"] <= good]:
                     del node[field]
@@ -7971,18 +8055,18 @@ def _prune_reports(snap, now):
             floor = floors.get(acct, good) if acct in with_money else good
             for field in [f for f, v in money.items() if floor is None or v["at"] <= floor]:
                 del money[field]
-            _reports_tidy(acct)
-        if not _holds and not _limit_holds:
+            _reports_tidy(t, acct)
+        if not t.holds and not t.limit_holds:
             return
-        holds = dict(_holds)
-        limits = dict(_limit_holds)
-    roster = _account_roster(snap)
-    merged = {r["name"]: r for r in _reported_snap(snap)}
+        holds = dict(t.holds)
+        limits = dict(t.limit_holds)
+    roster = _account_roster(t, snap)
+    merged = {r["name"]: r for r in _reported_snap(t, snap)}
     standings, ended = {}, []
 
     def standing(acct):
         if acct not in standings:
-            standings[acct] = _account_standing(acct, merged.get(acct), roster[acct], now)
+            standings[acct] = _account_standing(t, acct, merged.get(acct), roster[acct], now)
         return standings[acct]
 
     # A limit's hold (67 §9) ends at its until or at the owner's re-check.
@@ -7990,10 +8074,10 @@ def _prune_reports(snap, now):
         why = "account gone" if acct not in roster else _limit_ended(h, standing(acct), now)
         if why is None:
             continue
-        with _reports_lock:
-            if _limit_holds.get((acct, lim)) is not h:
+        with t.reports_lock:
+            if t.limit_holds.get((acct, lim)) is not h:
                 continue  # a newer report replaced it meanwhile
-            del _limit_holds[(acct, lim)]
+            del t.limit_holds[(acct, lim)]
         if why != "expired":
             ended.append(f"{acct}/{lim} ({why})")
     for (acct, wid), h in holds.items():
@@ -8001,11 +8085,11 @@ def _prune_reports(snap, now):
             end, why, until = True, "account gone", None
         else:
             end, why, until = _hold_judge(h, wid, standing(acct), now)
-        with _reports_lock:
-            if _holds.get((acct, wid)) is not h:
+        with t.reports_lock:
+            if t.holds.get((acct, wid)) is not h:
                 continue  # a newer report replaced it meanwhile
             if end:
-                del _holds[(acct, wid)]
+                del t.holds[(acct, wid)]
                 if why != "expired":
                     ended.append(f"{acct}/{wid} ({why})")
             elif until != h["until"]:
@@ -8052,16 +8136,18 @@ PREFERRED_CLOCK_ONLY = (
 
 _EVENTS_BOOT = str(int(_start_time))  # the id's boot part, fixed at process start
 _events_dirty = threading.Event()
-_events_cond = threading.Condition()  # guards _events_pub and _events_subs
-_events_pub = {"seq": 0, "data": None, "digest": None, "ledger_as_of": None}
-_events_subs = set()  # one token per open /events stream
-_events_publish_lock = threading.RLock()  # one render-and-compare at a time; taken before _events_cond
+# Per tenant (tenancy.Tenant, _tenant_fresh): events_cond guards events_pub
+# and events_subs (one token per open /events stream); events_publish_lock
+# serializes one render-and-compare at a time, taken before events_cond.
 _events_thread = None
 _events_thread_lock = threading.Lock()
 
 
-def _events_mark():
-    """The document may have changed: wake the publisher. Never blocks."""
+def _events_mark(t=None):
+    """The tenant's document may have changed (every tenant's, with None: the
+    classes document is theirs all): wake the publisher. Never blocks."""
+    for tt in ([t] if t is not None else (_registry.all() if _registry is not None else ())):
+        tt.events_dirty = True
     _events_dirty.set()
 
 
@@ -8091,13 +8177,13 @@ def _preferred_digest(doc):
                           .encode("utf-8")).hexdigest()
 
 
-def _events_publish():
+def _events_publish(t):
     """Render /preferred and publish it when it differs from the last one
     published (or its ledger.as_of is STALE_MAX / 2 old). True when it
     published. Holds no state lock while subscribers are woken; never touches
     a socket."""
-    with _events_publish_lock:
-        doc = _preferred_payload()
+    with t.events_publish_lock:
+        doc = _preferred_payload(t)
         try:
             data = json.dumps(doc, allow_nan=False, separators=(",", ":"))
         except ValueError as e:
@@ -8105,22 +8191,24 @@ def _events_publish():
             return False
         digest = _preferred_digest(json.loads(data))
         as_of = (doc.get("ledger") or {}).get("as_of")
-        with _events_cond:
-            last = _events_pub["ledger_as_of"]
+        with t.events_cond:
+            last = t.events_pub["ledger_as_of"]
             ledger_aging = last is not None and as_of is not None and as_of - last >= STALE_MAX / 2
-            if digest == _events_pub["digest"] and not ledger_aging:
+            if digest == t.events_pub["digest"] and not ledger_aging:
                 return False
-            _events_pub.update(seq=_events_pub["seq"] + 1, data=data, digest=digest,
+            t.events_pub.update(seq=t.events_pub["seq"] + 1, data=data, digest=digest,
                                ledger_as_of=as_of)
-            _events_cond.notify_all()
+            t.events_cond.notify_all()
         return True
 
 
 def _events_publisher(stop=None):
-    """The publisher loop. `stop` (an Event; set it, then mark) ends it, for tests.
-    At most one document each EVENTS_MIN_INTERVAL_S (64 §2, reports raise the
-    rate): a mark inside that second waits for it to pass with the dirty flag
-    still set, so the next render carries every change and none is dropped."""
+    """The publisher loop, one for every tenant: it renders each tenant whose
+    flag is set and publishes to that tenant's subscribers. `stop` (an Event;
+    set it, then mark) ends it, for tests. At most one pass each
+    EVENTS_MIN_INTERVAL_S (64 §2, reports raise the rate): a mark inside that
+    second waits for it to pass with the dirty flag still set, so the next
+    render carries every change and none is dropped."""
     pause = stop if stop is not None else threading.Event()
     last = None
     while True:
@@ -8132,11 +8220,15 @@ def _events_publisher(stop=None):
             if left > 0 and pause.wait(left):
                 return
         _events_dirty.clear()  # before the render: a mark during it looks again
-        try:
-            if _events_publish():
-                last = time.monotonic()
-        except Exception:  # noqa: BLE001 — one bad render must not end publishing
-            log("ERROR /events publisher:\n" + traceback.format_exc())
+        for t in _registry.all():
+            if not t.events_dirty:
+                continue
+            t.events_dirty = False
+            try:
+                if _events_publish(t):
+                    last = time.monotonic()
+            except Exception:  # noqa: BLE001 — one bad render must not end publishing
+                log(f"ERROR /events publisher ({t.id}):\n" + traceback.format_exc())
 
 
 def _events_start():
@@ -8167,13 +8259,13 @@ def _account_loop():
     return None
 
 
-def _account_loop_names():
+def _account_loop_names(t):
     """The account loop's accounts as known now, [] without a loop."""
     loop = _account_loop()
-    return list(loop["names"]()) if loop else []
+    return list(loop["names"](t)) if loop else []
 
 
-def _provider_poll_targets():
+def _provider_poll_targets(t):
     """target name -> (provider id, account arg) for every enabled POLLABLE
     provider — the poll loop's sole dispatch source. A provider with an
     "accounts" enumerator (#71) contributes one target per pool account;
@@ -8183,10 +8275,10 @@ def _provider_poll_targets():
     they'd be a None(...) call inside the poller thread."""
     dispatch = {}
     for pname, p in PROVIDERS.items():
-        if not p.get("poll") or not p["enabled"]():
+        if not p.get("poll") or not p["enabled"](t):
             continue
         accounts_fn = p.get("accounts")
-        accounts = accounts_fn() if accounts_fn else None
+        accounts = accounts_fn(t) if accounts_fn else None
         if accounts is None:
             dispatch[pname] = (pname, None)
         else:
@@ -8217,169 +8309,189 @@ def _poll_backoff(res, fails):
     return res.get("retry_after") or min(POLL_INTERVAL * (2 ** fails), POLL_MAX_BACKOFF)
 
 
-def poller():
-    # Backoff bookkeeping lives in the module dicts (_poll_fails/_poll_schedule) so the
-    # HTTP handlers can report it — the poller thread is their only writer.
-    schedule = _poll_schedule
-    fails = _poll_fails
-    provider_names = set()
+def poller(once=False):
+    """The one poll thread: each pass walks every tenant (_poll_pass), then
+    waits for the interval or a wakeup. `once` runs one pass (tests)."""
     while True:
         # Clear before doing work: a signal raised during the loop remains set and
         # makes the wait below return immediately. A signal between loops is safe
         # because this loop is already about to inspect the cleared schedule.
         _poll_wakeup.clear()
-        now = time.time()
-        loop = _account_loop()
-        names = loop["load"]() if loop else []
-        # Provider poll targets are keyed separately so they never collide with account
-        # names and are not pruned by the account creds file logic. Enablement comes
-        # from the PROVIDERS registry, re-checked every loop (see
-        # _provider_poll_targets for the pool/facade dispatch rules).
-        provider_dispatch = _provider_poll_targets()
-        # Prune targets that disappeared (provider disabled, account left the file).
-        for gone in provider_names - set(provider_dispatch):
-            with _lock:
-                _state.pop(gone, None)
-            with _poll_health_lock:
+        for t in _registry.all():
+            if t.stopped:
+                continue
+            try:
+                _poll_pass(t)
+            except Exception:  # noqa: BLE001 — one tenant's fault is never the thread's
+                log(f"ERROR {t.id}: poll pass raised\n" + traceback.format_exc().rstrip())
+        if once:
+            return
+        _poll_wakeup.wait(min(30, POLL_INTERVAL))
+
+
+def _poll_pass(t):
+    """One tenant's pass: its account loop's names and its enabled provider
+    targets, each polled when due, then its decision recomputed."""
+    # Backoff bookkeeping lives on the tenant (poll_fails/poll_schedule) so the
+    # HTTP handlers can report it — the poller thread is their only writer.
+    schedule = t.poll_schedule
+    fails = t.poll_fails
+    now = time.time()
+    loop = _account_loop()
+    names = loop["load"](t) if loop else []
+    # Provider poll targets are keyed separately so they never collide with account
+    # names and are not pruned by the account creds file logic. Enablement comes
+    # from the PROVIDERS registry, re-checked every loop (see
+    # _provider_poll_targets for the pool/facade dispatch rules).
+    provider_dispatch = _provider_poll_targets(t)
+    provider_names = set(provider_dispatch)
+    # Prune provider targets that disappeared (provider disabled, account left
+    # its file): a provider result in the state no target dispatches now.
+    with t.lock:
+        gone_providers = [n for n, r in t.state.items()
+                          if _target_kind(r) == "provider" and n not in provider_names]
+        for gone in gone_providers:
+            t.state.pop(gone, None)
+    with t.poll_health_lock:
+        for gone in gone_providers:
+            schedule.pop(gone, None)
+            fails.pop(gone, None)
+
+    targets = list(names) + sorted(provider_names)
+    polled = False
+    for name in targets:
+        if t.stopped:
+            return
+        # Skip if not due yet.
+        with t.poll_health_lock:
+            retry_at = schedule.get(name, 0)
+        if retry_at > now:
+            continue
+
+        is_provider = name in provider_names
+        with t.lock:
+            prev = t.state.get(name)
+
+        # One target's fault is that target's failed poll, never the thread's:
+        # a body of the wrong types raised in an adapter once, and no account
+        # was polled again. The line and the balance note are read before the
+        # result is published, so a fault there fails the poll too.
+        tb = None
+        try:
+            if is_provider:
+                pid, acct = provider_dispatch[name]
+                res = PROVIDERS[pid]["poll"](t, prev, account=acct)
+            else:
+                # Re-authorization can finish while this network poll is in flight.
+                # Never publish/schedule a result produced by the superseded token.
+                generation = loop["generation"](t, name)
+                known_meta = {"email": prev.get("email"), "tier": prev.get("tier")} if prev else None
+                res = loop["poll"](t, name, known_meta)
+                if generation != loop["generation"](t, name):
+                    log(f"{name}: discarded poll from replaced credential")
+                    continue
+            if res["ok"]:
+                line = _reading_line(res)
+                pot = _money_pot(res.get("provider"))
+                credits = _reading_pot(res["reading"], pot)
+                if is_provider and res.get("provider") in _COUNTABLE_UNITS and credits:
+                    bal = (_reading_limit(credits, "balance") or {}).get("amount")
+                    _ledger_note_balance(t, f"{name}/{pot}", bal, res["ts"])
+        except Exception as e:  # noqa: BLE001
+            tb = traceback.format_exc().rstrip()
+            res = {"name": name, "ok": 0, "ts": time.time(), "http": 0,
+                   "err": f"raised {type(e).__name__}: {e}", "retry_after": None, "reading": None}
+            res.update({"kind": "provider", "provider": provider_dispatch[name][0]} if is_provider
+                       else {"email": name, "tier": ""})
+
+        with t.lock:
+            if not res["ok"] and prev and prev.get("reading"):
+                # transient failure: retain the last good reading so the gauges persist.
+                res["reading"] = prev["reading"]
+                if not is_provider:
+                    res["tier"] = prev.get("tier") or res["tier"]
+                    res["email"] = prev.get("email") or res["email"]
+                res["good_ts"] = prev.get("good_ts")
+                res["stale"] = 1
+            else:
+                res["good_ts"] = res["ts"] if res["ok"] else (prev or {}).get("good_ts")
+                res["stale"] = 0 if res["ok"] else 1
+            t.state[name] = res
+
+        if res["ok"]:
+            polled = True
+            with t.poll_health_lock:
+                fails[name] = 0
+                schedule[name] = now + POLL_INTERVAL
+            log(f"{t.id}: {res.get('email') or name}: {line}")
+            try:
+                _sizing_poll(t, name, res)  # poll-sized limits (quota-model 66 §7)
+            except Exception:  # noqa: BLE001 — a sizing fault is never the poll's
+                log(f"{name}: sizing raised on the poll's heads\n" + traceback.format_exc().rstrip())
+        else:
+            with t.poll_health_lock:
+                fails[name] = fails.get(name, 0) + 1
+                backoff = _poll_backoff(res, fails[name])
+                schedule[name] = now + backoff
+            stale = res.get("stale") and "(serving last-good)" or ""
+            log(f"{t.id}: {name}: POLL FAILED — {res['err']} — backing off {int(backoff)}s {stale}")
+            if tb:
+                log(tb)
+    # prune schedule/fails/state for accounts no longer configured (only when
+    # the creds file actually listed some — never wipe on a transient read miss).
+    if names:
+        with t.poll_health_lock:
+            gone_names = set(schedule) - set(names) - provider_names
+            for gone in gone_names:
                 schedule.pop(gone, None)
                 fails.pop(gone, None)
-        provider_names = set(provider_dispatch)
-
-        targets = list(names) + sorted(provider_names)
-        polled = False
-        for name in targets:
-            # Skip if not due yet.
-            with _poll_health_lock:
-                retry_at = schedule.get(name, 0)
-            if retry_at > now:
-                continue
-
-            is_provider = name in provider_names
-            with _lock:
-                prev = _state.get(name)
-
-            # One target's fault is that target's failed poll, never the thread's:
-            # a body of the wrong types raised in an adapter once, and no account
-            # was polled again. The line and the balance note are read before the
-            # result is published, so a fault there fails the poll too.
-            tb = None
-            try:
-                if is_provider:
-                    pid, acct = provider_dispatch[name]
-                    res = PROVIDERS[pid]["poll"](prev, account=acct)
-                else:
-                    # Re-authorization can finish while this network poll is in flight.
-                    # Never publish/schedule a result produced by the superseded token.
-                    generation = loop["generation"](name)
-                    known_meta = {"email": prev.get("email"), "tier": prev.get("tier")} if prev else None
-                    res = loop["poll"](name, known_meta)
-                    if generation != loop["generation"](name):
-                        log(f"{name}: discarded poll from replaced credential")
-                        continue
-                if res["ok"]:
-                    line = _reading_line(res)
-                    pot = _money_pot(res.get("provider"))
-                    credits = _reading_pot(res["reading"], pot)
-                    if is_provider and res.get("provider") in _COUNTABLE_UNITS and credits:
-                        bal = (_reading_limit(credits, "balance") or {}).get("amount")
-                        _ledger_note_balance(f"{name}/{pot}", bal, res["ts"])
-            except Exception as e:  # noqa: BLE001
-                tb = traceback.format_exc().rstrip()
-                res = {"name": name, "ok": 0, "ts": time.time(), "http": 0,
-                       "err": f"raised {type(e).__name__}: {e}", "retry_after": None, "reading": None}
-                res.update({"kind": "provider", "provider": provider_dispatch[name][0]} if is_provider
-                           else {"email": name, "tier": ""})
-
-            with _lock:
-                if not res["ok"] and prev and prev.get("reading"):
-                    # transient failure: retain the last good reading so the gauges persist.
-                    res["reading"] = prev["reading"]
-                    if not is_provider:
-                        res["tier"] = prev.get("tier") or res["tier"]
-                        res["email"] = prev.get("email") or res["email"]
-                    res["good_ts"] = prev.get("good_ts")
-                    res["stale"] = 1
-                else:
-                    res["good_ts"] = res["ts"] if res["ok"] else (prev or {}).get("good_ts")
-                    res["stale"] = 0 if res["ok"] else 1
-                _state[name] = res
-
-            if res["ok"]:
-                polled = True
-                with _poll_health_lock:
-                    fails[name] = 0
-                    schedule[name] = now + POLL_INTERVAL
-                log(f"{res.get('email') or name}: {line}")
-                try:
-                    _sizing_poll(name, res)  # poll-sized limits (quota-model 66 §7)
-                except Exception:  # noqa: BLE001 — a sizing fault is never the poll's
-                    log(f"{name}: sizing raised on the poll's heads\n" + traceback.format_exc().rstrip())
-            else:
-                with _poll_health_lock:
-                    fails[name] = fails.get(name, 0) + 1
-                    backoff = _poll_backoff(res, fails[name])
-                    schedule[name] = now + backoff
-                stale = res.get("stale") and "(serving last-good)" or ""
-                log(f"{name}: POLL FAILED — {res['err']} — backing off {int(backoff)}s {stale}")
-                if tb:
-                    log(tb)
-        # prune schedule/fails/state for accounts no longer configured (only when
-        # the creds file actually listed some — never wipe on a transient read miss).
-        if names:
-            with _poll_health_lock:
-                gone_names = set(schedule) - set(names) - provider_names
-                for gone in gone_names:
-                    schedule.pop(gone, None)
-                    fails.pop(gone, None)
-            for gone in gone_names:
-                with _lock:
-                    _state.pop(gone, None)
-        compute_preferred()
-        if polled:
-            with _plock:
-                _save_state()  # the readings, so a restart serves them with their age
-        _poll_wakeup.wait(min(30, POLL_INTERVAL))
+        for gone in gone_names:
+            with t.lock:
+                t.state.pop(gone, None)
+    compute_preferred(t)
+    if polled:
+        with t.plock:
+            _save_state(t)  # the readings, so a restart serves them with their age
 
 
 def _b64url(b):
     return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
 
 
-_reauth_lock = threading.Lock()
 # state -> {verifier, account, minted_at, provider, mode, state}; one-shot,
 # TTL-bounded. One flat store for every provider's pending grants (#72) — the
 # provider tag is checked at take time, so a grant minted for one provider can
 # never complete another's flow.
-_reauth_pending = {}
+#   t.reauth_pending
 REAUTH_TTL = 600      # seconds a minted authorize URL stays exchangeable
 
 
-def _reauth_prune(now):
-    for s, g in list(_reauth_pending.items()):
+def _reauth_prune(t, now):
+    for s, g in list(t.reauth_pending.items()):
         if now - g["minted_at"] > REAUTH_TTL:
-            del _reauth_pending[s]
+            del t.reauth_pending[s]
 
 
-def _auth_grant_mint(provider, mode, account=None, verifier=None):
+def _auth_grant_mint(t, provider, mode, account=None, verifier=None):
     """Mint a one-shot pending grant and return its state token. mode is
     "reauth" (repair a named account) or "add" (enroll a new one) — persistence
     policy at complete time keys off it."""
     state = _b64url(secrets.token_bytes(24))
-    with _reauth_lock:
-        _reauth_prune(time.time())
-        _reauth_pending[state] = {"verifier": verifier, "account": account,
+    with t.reauth_lock:
+        _reauth_prune(t, time.time())
+        t.reauth_pending[state] = {"verifier": verifier, "account": account,
                                   "minted_at": time.time(), "provider": provider,
                                   "mode": mode, "state": state}
     return state
 
 
-def _auth_grant_take(state, provider):
+def _auth_grant_take(t, state, provider):
     """Consume a pending grant (one-shot; consumed on the attempt whether or not
     the rest of the flow succeeds). Raises ValueError on unknown/expired state
     or a cross-provider state paste."""
-    with _reauth_lock:
-        _reauth_prune(time.time())
-        grant = _reauth_pending.pop(state, None)
+    with t.reauth_lock:
+        _reauth_prune(t, time.time())
+        grant = t.reauth_pending.pop(state, None)
     if not grant:
         raise ValueError("unknown or expired state — begin again")
     if grant.get("provider", "anthropic") != provider:
@@ -8388,7 +8500,7 @@ def _auth_grant_take(state, provider):
     return grant
 
 
-def _auth_providers_payload(now):
+def _auth_providers_payload(t, now):
     """GET /auth/providers: per provider the DECLARED auth data (kind, custody,
     enrollment descriptor) plus live per-account health. Secrets never enter
     this payload — status rows carry names, health, and fingerprints only."""
@@ -8399,7 +8511,7 @@ def _auth_providers_payload(now):
             continue
         out[pid] = {"kind": a["kind"], "label": a["label"],
                     "custody": a["custody"], "enroll": a["enroll"],
-                    "accounts": a["status"](now)}
+                    "accounts": a["status"](t, now)}
     return {"providers": out}
 
 
@@ -8416,9 +8528,19 @@ def _line(name, labels, value):
     return f"{name} {value}"
 
 
-def render():
+def _tenant_line(tid):
+    """A _line that stamps every series with its tenant: /metrics serves every
+    tenant's series in one exposition, told apart by the `tenant` label."""
+    def line(name, labels, value):
+        return _line(name, {"tenant": tid, **labels}, value)
+    return line
+
+
+def render(tenants):
+    """The exposition: the exporter's own series, then each tenant's, every
+    one of those with a `tenant` label. GET /metrics renders every tenant;
+    GET /t/<t>/metrics that one."""
     lines = []
-    loop = _account_loop()
 
     def helptype(metric, typ, help_):
         lines.append(f"# HELP {metric} {help_}")
@@ -8502,10 +8624,20 @@ def render():
     helptype("sizing_samples_retracted_total", "counter", "Samples taken back after their step closed: an event of the step arrived late (late), or a reporter's restart was found in it (proxy_restart).")
     helptype("sizing_events_late_total", "counter", "Served events that arrived after every window they draw had closed past them.")
 
-    with _plock:
-        pref_acct = _preferred.get("account")
-        pref_last_switch = _preferred.get("last_switch", 0)
-        lanes_pref = {ln: dict(s) for ln, s in _preferred.get("lanes", {}).items()}
+    for t in tenants:
+        lines.extend(_render_tenant(t))
+    return "\n".join(lines) + "\n"
+
+
+def _render_tenant(t):
+    """One tenant's series, each with its `tenant` label."""
+    lines = []
+    _line = _tenant_line(t.id)
+    loop = _account_loop()
+    with t.plock:
+        pref_acct = t.preferred.get("account")
+        pref_last_switch = t.preferred.get("last_switch", 0)
+        lanes_pref = {ln: dict(s) for ln, s in t.preferred.get("lanes", {}).items()}
     switch_ts = max([pref_last_switch] + [s.get("last_switch", 0) for s in lanes_pref.values()])
     lines.append(_line("claude_usage_switch_last_timestamp_seconds", {}, round(switch_ts)))
     for lc in _lanes:
@@ -8514,8 +8646,8 @@ def render():
             lines.append(_line("claude_usage_lane_switch_last_timestamp_seconds",
                                {"lane": lc["lane"]}, round(s.get("last_switch", 0))))
 
-    with _lock:
-        snapshot = list(_state.values())
+    with t.lock:
+        snapshot = list(t.state.values())
 
     for res in snapshot:
         # Label by the STABLE config name (not the API-discovered email): a profile
@@ -8544,7 +8676,7 @@ def render():
                 w = _scoped_window(res, lc["scope_model"])
                 found = w is not None and w.get("used_pct") is not None
                 lines.append(_line("claude_usage_lane_scoped_cap_found", lbase, 1 if found else 0))
-        exp = loop["expires_at"](res["name"]) if loop else None
+        exp = loop["expires_at"](t, res["name"]) if loop else None
         if exp:
             lines.append(_line("claude_usage_token_expires_at_seconds", base, round(exp)))
         rd = res.get("reading")
@@ -8596,9 +8728,9 @@ def render():
     # one series are invalid exposition and would kill the whole scrape. A pool
     # of one renders byte-identically to the pre-pool exporter. Per-account
     # detail rides the additive provider_account_* family below.
-    with _plock:
+    with t.plock:
         prov_incumbents = {pid: ps.get("account")
-                           for pid, ps in _preferred.get("providers", {}).items()}
+                           for pid, ps in t.preferred.get("providers", {}).items()}
     prov_results = {}
     for res in snapshot:
         if res.get("kind") == "provider":
@@ -8678,9 +8810,9 @@ def render():
 
     # ---- the model's own facts (quota-model 50 §2.11, C6): pots, entitlements,
     # every route's check, and our spend. New families only; no rule reads them.
-    view = _sizing_fleet_view()  # under _sizing_lock, never inside _plock (67 §8)
-    with _plock:
-        ctx = _policy_ctx(snapshot, time.time())
+    view = _sizing_fleet_view(t)  # under _sizing_lock, never inside _plock (67 §8)
+    with t.plock:
+        ctx = _policy_ctx(t, snapshot, time.time())
         # No health: the gauges read no asks, and account_health would take
         # _refresh_lock, which a token refresh holds across its network call.
         fleet = _fleet_payload(ctx, view, {})
@@ -8705,12 +8837,12 @@ def render():
             label = {"included": "included", "paid": f"paid:{c['pot']}"}.get(c["check"]) \
                 or f"no:{c['reason']}"
             lines.append(_line("route_check", {"route": rid, "account": acct, "check": label}, 1))
-    for (pid, route), total in sorted(_ledger_totals().items()):
+    for (pid, route), total in sorted(_ledger_totals(t).items()):
         acct, pot = _split_pot(pid)
         lines.append(_line("money_spent_total", {"account": acct, "pot": pot, "route": route},
                            round(total, 6)))
-    with _served_lock:
-        served = {k: (dict(v) if isinstance(v, dict) else v) for k, v in _served.items()
+    with t.served_lock:
+        served = {k: (dict(v) if isinstance(v, dict) else v) for k, v in t.served.items()
                   if k not in ("ids", "boots")}
     for acct, n in sorted(served["events"].items()):
         lines.append(_line("served_events_total", {"account": acct}, n))
@@ -8722,10 +8854,9 @@ def render():
         lines.append(_line("served_incomplete_total", {"account": acct}, n))
     lines.append(_line("served_seq_missing_total", {}, served["seq_missing"]))
     lines.append(_line("served_duplicates_total", {}, served["duplicates"]))
-    lines.extend(_sizing_metric_lines())
-    lines.extend(_fleet_metric_lines(fleet))
-
-    return "\n".join(lines) + "\n"
+    lines.extend(_sizing_metric_lines(t))
+    lines.extend(_fleet_metric_lines(fleet, t.id))
+    return lines
 
 
 # The account pages are keyed like the endpoints they drive (/auth, /reauth).
@@ -9027,46 +9158,93 @@ refresh();
 
 
 # The requests that cannot change /preferred; every other handled request marks
-# it dirty once answered (quota-model 64 §2). "" is the root, which serves /metrics.
-_PURE_READS = ("/preferred", "/metrics", "", "/events", "/sizing")
+# it dirty once answered (quota-model 64 §2). "" is a tenant's root, its /metrics.
+_PURE_READS = ("/preferred", "/metrics", "", "/events", "/sizing", "/tenants", "/tenants/events")
+_TENANT_PREFIX_RE = re.compile(r"^/t/([^/]+)(/.*)?$")
 
 
 class Handler(BaseHTTPRequestHandler):
+    """Every tenant route is /t/<tenant>/<route>: the prefix is stripped and
+    the tenant bound here, once, before any handler runs (self.tenant,
+    self.tpath); a handler reads self.tenant and passes it down. A tenant
+    route without the prefix, or naming a tenant the registry does not hold,
+    is 404: nothing here maps "no tenant" to the household. The routes
+    without a tenant are the operator's: /metrics (every tenant), the classes
+    document, and the registry (/tenants, key-guarded)."""
+
+    def _bind(self):
+        """-> (tenant or None, the path under the prefix, or the whole path)."""
+        parsed = urlparse(self.path)
+        m = _TENANT_PREFIX_RE.match(parsed.path)
+        if not m:
+            self.tenant, self.tpath = None, parsed.path.rstrip("/")
+            return parsed
+        self.tenant = _registry.get(m.group(1)) if _registry is not None else None
+        self.tpath = (m.group(2) or "").rstrip("/")
+        return parsed
+
+    def _no_tenant(self, drain=False):
+        if drain:
+            self._drain_body()
+        self._json(404, {"error": "unknown tenant"})
+
     def do_GET(self):  # noqa: N802
+        self._bind()
         try:
             self._get()
         finally:
-            if urlparse(self.path).path.rstrip("/") not in _PURE_READS:
-                _events_mark()
+            if self.tpath not in _PURE_READS and self.tenant is not None:
+                _events_mark(self.tenant)
 
     def do_POST(self):  # noqa: N802
+        self._bind()
         try:
             self._post()
         finally:
-            _events_mark()
+            _events_mark(self.tenant)
 
     def do_PUT(self):  # noqa: N802
+        self._bind()
         try:
             self._put()
         finally:
-            _events_mark()
+            _events_mark(self.tenant)
+
+    def do_DELETE(self):  # noqa: N802
+        self._bind()
+        try:
+            self._delete()
+        finally:
+            _events_mark(self.tenant)
 
     def _get(self):
-        parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/")
-        if path in ("/metrics", ""):
-            body = render().encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
+        parsed = self._bind()
+        path = self.tpath
+        t = self.tenant
+        if t is None:
+            if parsed.path.startswith("/t/"):
+                return self._no_tenant()
+            if path == "/metrics":
+                return self._metrics(_registry.all())
+            if path == "/classes":
+                return self._doc_get("classes")
+            if path == "/classes/history":
+                return self._doc_history("classes", parsed)
+            if path == "/tenants":
+                return self._tenants_get()
+            if path == "/tenants/events":
+                return self._tenants_events()
+            self.send_response(404)
             self.end_headers()
-            self.wfile.write(body)
+            return
+        if path in ("/metrics", ""):
+            self._metrics([t])
         elif path == "/preferred":
-            self._json(200, _preferred_payload())
+            self._json(200, _preferred_payload(t))
         elif path == "/events":
             self._events_stream()
         elif path == "/sizing":
-            self._json(200, sizing_payload())
+            self._json(200, sizing_payload(t))
         elif path == "/api-key":
             self._api_key(parsed)
         elif path == "/pin":
@@ -9079,23 +9257,44 @@ class Handler(BaseHTTPRequestHandler):
             self._auth_page()
         elif path == "/auth/providers":
             self._auth_providers()
-        elif path in ("/classes", "/consumers", "/money"):
+        elif path in ("/consumers", "/money"):
             self._doc_get(path[1:])
-        elif path in ("/classes/history", "/consumers/history", "/money/history"):
+        elif path in ("/consumers/history", "/money/history"):
             self._doc_history(path.split("/")[1], parsed)
         elif ("GET", path) in ROUTES:
-            ROUTES[("GET", path)](self, parsed)
+            ROUTES[("GET", path)](t, self, parsed)
         else:
             self.send_response(404)
             self.end_headers()
 
+    def _metrics(self, tenants):
+        body = render(tenants).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _post(self):
-        parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/")
+        parsed = self._bind()
+        path = self.tpath
+        t = self.tenant
+        if t is None:
+            if parsed.path.startswith("/t/"):
+                return self._no_tenant(drain=True)
+            md = re.match(r"^/classes/(validate|reload)$", path)
+            if md and md.group(1) == "validate":
+                return self._doc_validate("classes")
+            if md:
+                return self._doc_reload("classes")
+            self._drain_body()
+            self.send_response(404)
+            self.end_headers()
+            return
         m = re.match(r"^/auth/([a-z0-9-]+)/(begin|complete)$", path)
-        md = re.match(r"^/(classes|consumers|money)/(validate|reload)$", path)
+        md = re.match(r"^/(consumers|money)/(validate|reload)$", path)
         if ("POST", path) in ROUTES:
-            ROUTES[("POST", path)](self, parsed)
+            ROUTES[("POST", path)](t, self, parsed)
         elif m:
             self._auth_flow(m.group(1), m.group(2))
         elif md and md.group(2) == "validate":
@@ -9115,13 +9314,114 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def _put(self):
-        path = urlparse(self.path).path.rstrip("/")
-        if path in ("/classes", "/consumers", "/money"):
-            self._doc_put(path[1:])
-        else:
-            self._drain_body()
-            self.send_response(404)
-            self.end_headers()
+        parsed = self._bind()
+        path = self.tpath
+        t = self.tenant
+        if t is None:
+            if parsed.path.startswith("/t/"):
+                return self._no_tenant(drain=True)
+            if path == "/classes":
+                return self._doc_put("classes")
+            mt = re.match(r"^/tenants/([^/]+)$", path)
+            if mt:
+                return self._tenants_put(mt.group(1))
+        elif path in ("/consumers", "/money"):
+            return self._doc_put(path[1:])
+        self._drain_body()
+        self.send_response(404)
+        self.end_headers()
+
+    def _delete(self):
+        parsed = self._bind()
+        path = self.tpath
+        if self.tenant is None:
+            if parsed.path.startswith("/t/"):
+                return self._no_tenant(drain=True)
+            mt = re.match(r"^/tenants/([^/]+)$", path)
+            if mt:
+                return self._tenants_delete(mt.group(1))
+        self._drain_body()
+        self.send_response(404)
+        self.end_headers()
+
+    # -- the registry (operator, key-guarded) --
+
+    def _tenants_get(self):
+        """GET /tenants: every tenant's record, [{tenant, name, lan, tap}]."""
+        if not self._guard():
+            return
+        self._json(200, {"tenants": _registry.payload()})
+
+    def _tenants_put(self, tid):
+        """PUT /tenants/<t> {name, lan, tap}, the whole record: create the
+        tenant (its dir with empty documents) or update its name and tap. 200
+        {tenant, name, lan, tap, created}; 400 naming the bad id or the
+        missing or invalid field; 409 for a second lan tenant or a change to
+        lan (the household is the migration's, and its notices' bridge is
+        fixed with it)."""
+        if not self._guard():
+            return
+        body = self._read_json_body()
+        if not isinstance(body, dict):
+            return self._json(400, {"error": "body must be a JSON object {name, lan, tap}"})
+        rec = {"tenant": tid, "name": body.get("name"), "lan": body.get("lan"), "tap": body.get("tap")}
+        why = tenancy.record_problem(rec)
+        if why:
+            return self._json(400, {"error": why})
+        try:
+            t, created = _registry.put(rec)
+        except tenancy.RegistryConflict as e:
+            return self._json(409, {"error": str(e), "tenant": tid})
+        if created:
+            _tenant_boot(t)
+            _poll_wakeup.set()
+        _events_mark(t)
+        self._json(200, dict(t.record(), created=created))
+
+    def _tenants_delete(self, tid):
+        """DELETE /tenants/<t>: the tenant's polling stops, its state leaves
+        memory and its dir is removed whole, credentials included. 200 {tenant,
+        deleted: true}; 404 for one the registry does not hold; 409 for the
+        lan tenant."""
+        if not self._guard():
+            return
+        self._drain_body()
+        if _registry.get(tid) is None:
+            return self._json(404, {"error": "unknown tenant", "tenant": tid})
+        try:
+            t = _registry.delete(tid)
+        except tenancy.RegistryConflict as e:
+            return self._json(409, {"error": str(e), "tenant": tid})
+        self._json(200, {"tenant": t.id, "deleted": True})
+
+    def _tenants_events(self):
+        """GET /tenants/events: an SSE stream of the registry, `event: tenants`
+        with the list as data, at once and at every change; ": keepalive"
+        after EVENTS_KEEPALIVE_S with nothing sent. Key-guarded."""
+        if not self._guard():
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        sent = -1
+        try:
+            self.wfile.write(f"retry: {EVENTS_RETRY_MS}\n\n".encode("utf-8"))
+            while True:
+                with _registry.cond:
+                    if _registry.seq == sent:
+                        _registry.cond.wait(EVENTS_KEEPALIVE_S)
+                    seq = _registry.seq
+                if seq != sent:
+                    data = json.dumps({"tenants": _registry.payload()}, separators=(",", ":"))
+                    self.wfile.write(f"id: {_EVENTS_BOOT}-{seq}\nevent: tenants\ndata: {data}\n\n"
+                                     .encode("utf-8"))
+                    sent = seq
+                else:
+                    self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
 
     def _events_stream(self):
         """GET /events (quota-model 64 §2): `retry`, the current document at
@@ -9129,27 +9429,30 @@ class Handler(BaseHTTPRequestHandler):
         EVENTS_KEEPALIVE_S with nothing sent. Newest only: a slow reader skips
         to the latest. Last-Event-ID is ignored. Holds _events_cond only to
         read the newest document, never while writing."""
+        t = self.tenant
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         token, sent = object(), 0
-        with _events_cond:
-            _events_subs.add(token)
+        with t.events_cond:
+            t.events_subs.add(token)
         try:
             self.wfile.write(f"retry: {EVENTS_RETRY_MS}\n\n".encode())
             quiet_since = time.monotonic()
             while True:
                 data = None
-                with _events_cond:
-                    while True:
-                        if _events_pub["data"] is not None and _events_pub["seq"] != sent:
-                            sent, data = _events_pub["seq"], _events_pub["data"]
+                with t.events_cond:
+                    while not t.stopped:
+                        if t.events_pub["data"] is not None and t.events_pub["seq"] != sent:
+                            sent, data = t.events_pub["seq"], t.events_pub["data"]
                             break
                         left = quiet_since + EVENTS_KEEPALIVE_S - time.monotonic()
                         if left <= 0:
                             break
-                        _events_cond.wait(left)
+                        t.events_cond.wait(left)
+                if t.stopped:
+                    break  # the tenant was deleted: the stream ends
                 if data is not None:
                     chunk = f"id: {_EVENTS_BOOT}-{sent}\nevent: preferred\ndata: {data}\n\n"
                 else:
@@ -9159,8 +9462,8 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             pass  # the subscriber left
         finally:
-            with _events_cond:
-                _events_subs.discard(token)
+            with t.events_cond:
+                t.events_subs.discard(token)
             self.close_connection = True
 
     def _drain_body(self):
@@ -9198,15 +9501,16 @@ class Handler(BaseHTTPRequestHandler):
         {results: [{id, result, why}], seq}; 400 for any other body. One
         recompute when anything a decision reads applied (not served, which
         is only counted); the stream carries the result."""
+        t = self.tenant
         if not self._guard():
             return
         body = self._read_json_body(max_bytes=DOC_BODY_MAX)
         why = reports_body_problem(body)
         if why:
             return self._json(400, {"error": why})
-        out, decisive = reports_post(body["events"], body.get("reporter"), time.time())
+        out, decisive = reports_post(t, body["events"], body.get("reporter"), time.time())
         if decisive:
-            compute_preferred()
+            compute_preferred(t)
         self._json(200, out)
 
     def _recheck(self, parsed):
@@ -9215,13 +9519,14 @@ class Handler(BaseHTTPRequestHandler):
         recheck_epoch bumped. Key-guarded: it ends refusal records. 200
         {account, recheck_epoch}; 400 without an account; 404 for one the
         brain does not know."""
+        t = self.tenant
         if not self._guard():
             return
         self._drain_body()
         account = (parse_qs(parsed.query).get("account") or [""])[0]
         if not account:
             return self._json(400, {"error": "account query parameter is required"})
-        epoch = recheck(account, time.time())
+        epoch = recheck(t, account, time.time())
         if epoch is None:
             return self._json(404, {"error": "no such account", "account": account})
         log(f"{account}: owner re-check — polling now, recheck_epoch {epoch:.0f}")
@@ -9250,13 +9555,15 @@ class Handler(BaseHTTPRequestHandler):
     def _auth_providers(self):
         """Per-provider auth status + enrollment descriptors. Key-guarded like
         /reauth/status: account names and failure detail are not public data."""
+        t = self.tenant
         if not self._guard():
             return
-        self._json(200, _auth_providers_payload(time.time()))
+        self._json(200, _auth_providers_payload(t, time.time()))
 
     def _auth_flow(self, pid, step):
         """POST /auth/<pid>/begin|complete — the ONE enrollment surface every
         provider authority is driven through (#72)."""
+        t = self.tenant
         if not self._guard():
             return
         p = PROVIDERS.get(pid)
@@ -9269,9 +9576,9 @@ class Handler(BaseHTTPRequestHandler):
         if step == "begin":
             account = body.get("account") or None
             if account is not None and \
-                    account not in {r["name"] for r in auth["status"](time.time())}:
+                    account not in {r["name"] for r in auth["status"](t, time.time())}:
                 return self._json(404, {"error": f"unknown {pid} account {account!r}"})
-            url, state = auth["begin"](account)
+            url, state = auth["begin"](t, account)
             log(f"auth begin: {pid} account={account or '(new)'}")
             out = {"state": state, "expires_in": REAUTH_TTL,
                    "mode": "reauth" if account else "add"}
@@ -9282,8 +9589,8 @@ class Handler(BaseHTTPRequestHandler):
         if not state:
             return self._json(400, {"error": "state is required"})
         try:
-            grant = _auth_grant_take(state, pid)
-            res = auth["complete"](grant, body)
+            grant = _auth_grant_take(t, state, pid)
+            res = auth["complete"](t, grant, body)
         except ValueError as e:
             return self._json(422, {"error": str(e)})
         log(f"auth complete: {pid} account={res.get('account')} "
@@ -9324,12 +9631,13 @@ class Handler(BaseHTTPRequestHandler):
         {error, reason} when the account is not an api account here
         (reason "not_api") or the brain has no key for it ("no_key"). The key
         is read at each call, so a rotation is dispensed at once."""
+        t = self.tenant
         if not self._guard():
             return
         account = (parse_qs(parsed.query).get("account") or [""])[0]
         if not account:
             return self._json(400, {"error": "account is required"})
-        key, reason = api_key(account)
+        key, reason = api_key(t, account)
         if not key:
             msg = (f"{account!r} is not an api account here" if reason == "not_api"
                    else f"the brain has no key for api account {account!r}")
@@ -9349,6 +9657,7 @@ class Handler(BaseHTTPRequestHandler):
                                     stale "pinned to …" reason until the next real
                                     account change).
         """
+        t = self.tenant
         if not SWITCH_KEY or not hmac.compare_digest(self.headers.get("X-Switch-Key", ""), SWITCH_KEY):
             self.send_response(401)
             self.end_headers()
@@ -9360,25 +9669,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": f"unknown lane {lane!r}", "lanes": _lane_names})
         target_lanes = [lane] if lane else list(_lane_names)
         if account in ("", "auto", "none", "clear"):
-            with _plock:
+            with t.plock:
                 for ln in target_lanes:
-                    ls = _preferred["lanes"].setdefault(ln, _new_lane_state())
+                    ls = t.preferred["lanes"].setdefault(ln, _new_lane_state())
                     if ls.get("pinned"):
                         ls["pinned"] = None
                         ls["reason"] = "auto policy resumed"
-                _save_state()
+                _save_state(t)
             log(f"pin cleared for {target_lanes} (auto policy resumed)")
-        elif account in _account_loop_names():
-            with _plock:
+        elif account in _account_loop_names(t):
+            with t.plock:
                 for ln in target_lanes:
-                    ls = _preferred["lanes"].setdefault(ln, _new_lane_state())
+                    ls = t.preferred["lanes"].setdefault(ln, _new_lane_state())
                     ls["pinned"] = account
-                _save_state()
+                _save_state(t)
             log(f"pinned {target_lanes} -> {account}")
         else:
             return self._json(404, {"error": f"unknown account {account!r}"})
-        compute_preferred()  # apply immediately (also refreshes the legacy mirror)
-        self._json(200, _preferred_payload())
+        compute_preferred(t)  # apply immediately (also refreshes the legacy mirror)
+        self._json(200, _preferred_payload(t))
 
     def _class_bind(self, parsed):
         """Bind (or touch) a class session (#26): the endpoint the proxy calls on
@@ -9391,6 +9700,7 @@ class Handler(BaseHTTPRequestHandler):
 
         /class-bind?class=frontier&session=<x-claude-code-session-id>
         """
+        t = self.tenant
         if not SWITCH_KEY or not hmac.compare_digest(self.headers.get("X-Switch-Key", ""), SWITCH_KEY):
             self.send_response(401)
             self.end_headers()
@@ -9400,7 +9710,7 @@ class Handler(BaseHTTPRequestHandler):
         sid = (q.get("session") or [""])[0]
         if not cname or not sid:
             return self._json(400, {"error": "class and session are required"})
-        code, payload = _bind_class_session(cname, sid, time.time())
+        code, payload = _bind_class_session(t, cname, sid, time.time())
         headers = None
         if code == 409 and payload.get("retry_after_s") is not None:
             headers = {"Retry-After": str(payload["retry_after_s"])}
@@ -9415,6 +9725,7 @@ class Handler(BaseHTTPRequestHandler):
         /class-pin?class=frontier&member=lane:opus     pin
         /class-pin?class=frontier&member=clear         clear (auto resumes)
         """
+        t = self.tenant
         if not SWITCH_KEY or not hmac.compare_digest(self.headers.get("X-Switch-Key", ""), SWITCH_KEY):
             self.send_response(401)
             self.end_headers()
@@ -9427,7 +9738,7 @@ class Handler(BaseHTTPRequestHandler):
         # setdefault would resurrect (or freshly create) zombie state for a
         # deleted class that _save_state() then persists.
         err = msg = None
-        with _plock:
+        with t.plock:
             cls = next((c for c in _classes if c["class"] == cname), None)
             if not cls:
                 err = {"error": f"unknown class {cname!r}",
@@ -9435,23 +9746,23 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 member_ids = [_member_id(m) for m in cls["members"]]
                 if member in ("", "auto", "none", "clear"):
-                    cs = _preferred["classes"].setdefault(cname, _new_class_state())
+                    cs = t.preferred["classes"].setdefault(cname, _new_class_state())
                     if cs.get("pinned"):
                         cs["pinned"] = None
-                    _save_state()
+                    _save_state(t)
                     msg = f"class[{cname}] pin cleared (auto policy resumed)"
                 elif member in member_ids:
-                    cs = _preferred["classes"].setdefault(cname, _new_class_state())
+                    cs = t.preferred["classes"].setdefault(cname, _new_class_state())
                     cs["pinned"] = member
-                    _save_state()
+                    _save_state(t)
                     msg = f"class[{cname}] pinned -> {member}"
                 else:
                     err = {"error": f"unknown member {member!r}", "members": member_ids}
         if err:
             return self._json(404, err)
         log(msg)
-        compute_preferred()  # apply to bound sessions immediately
-        self._json(200, _preferred_payload())
+        compute_preferred(t)  # apply to bound sessions immediately
+        self._json(200, _preferred_payload(t))
 
     # ---- runtime document config (#92, ui-revamp §6): /classes + /consumers --
 
@@ -9459,9 +9770,10 @@ class Handler(BaseHTTPRequestHandler):
         """GET /classes | /consumers — live raw doc + content-hash revision +
         derived fields + load warnings. Key-guarded like every other config
         surface: the documents name accounts and models."""
+        t = self.tenant
         if not self._guard():
             return
-        snap = _doc_snapshot(kind)
+        snap = _doc_snapshot(t, kind)
         self._json(200, snap, headers={"X-Doc-Revision": snap["revision"]})
 
     def _doc_history(self, kind, parsed):
@@ -9473,6 +9785,7 @@ class Handler(BaseHTTPRequestHandler):
         drawer (#94) can say "20 of 137". A missing history file is zero
         entries, not an error — a fresh brain has no edits yet. Key-guarded:
         actors and reasons name people and accounts."""
+        t = self.tenant
         if not self._guard():
             return
         q = parse_qs(parsed.query)
@@ -9482,10 +9795,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "limit must be an integer (default 20, max 200)"})
         limit = max(1, min(200, limit))
         full = (q.get("full") or ["0"])[0] == "1"
-        path = _doc_path(kind) + ".history.jsonl"
+        path = _doc_path(t, kind) + ".history.jsonl"
         # Read under the per-document write lock so a concurrent PUT/reload
         # append can never hand us a half-written final line.
-        with _doc_locks[kind]:
+        with _doc_lock(t, kind):
             try:
                 with open(path) as f:
                     lines = f.readlines()
@@ -9512,25 +9825,26 @@ class Handler(BaseHTTPRequestHandler):
         settings the sessions a save moves, _session_preview). Mutates
         nothing; always 200 with an `ok` flag — errors are the report, not a
         refusal."""
+        t = self.tenant
         if not self._guard():
             return
         body = self._read_json_body(max_bytes=DOC_BODY_MAX)
         if not isinstance(body, dict) or "doc" not in body:
             return self._json(400, {"error": 'body must be {"doc": <document>} '
                                              f"(JSON, <= {DOC_BODY_MAX} bytes)"})
-        live_rev = _live_revision(kind)
-        errors, warnings, normalized, canon = _doc_check(kind, body["doc"])
+        live_rev = _live_revision(t, kind)
+        errors, warnings, normalized, canon = _doc_check(t, kind, body["doc"])
         if errors:
             return self._json(200, {"ok": False, "errors": errors,
                                     "warnings": warnings, "revision": live_rev})
-        eff = _doc_live_effect(kind, normalized)
+        eff = _doc_live_effect(t, kind, normalized)
         warnings = warnings + eff.get("consumer_warnings", [])
         if kind == "classes":
             derived = _classes_derived(normalized[0])
         elif kind == "money":
-            derived = _money_derived(normalized)
+            derived = _money_derived(t, normalized)
         else:
-            with _plock:
+            with t.plock:
                 classes = _classes
             derived = _consumers_view(normalized, classes)
         self._json(200, {"ok": True, "errors": [], "warnings": warnings,
@@ -9549,6 +9863,7 @@ class Handler(BaseHTTPRequestHandler):
         reply's live_effect is the dry run's at the save, but its
         session_moves are the moves made after the swap, by whichever pass
         made them: a reading that changed since the dry run shows here."""
+        t = self.tenant
         if not self._guard():
             return
         body = self._read_json_body(max_bytes=DOC_BODY_MAX)
@@ -9562,45 +9877,50 @@ class Handler(BaseHTTPRequestHandler):
         if not if_match:
             return self._json(400, {"error": "If-Match: <revision> is required (GET the document first)"})
         actor = (self.headers.get("X-Actor") or "").strip()[:200] or "unknown"
-        path = _doc_path(kind)
-        with _doc_locks[kind]:
-            live_rev = _live_revision(kind)
+        path = _doc_path(t, kind)
+        with _doc_lock(t, kind):
+            live_rev = _live_revision(t, kind)
             if if_match != live_rev:
                 return self._json(409, {"error": "stale If-Match — the document changed under you; "
                                                  "re-read and merge",
                                         "revision": live_rev, "if_match": if_match},
                                   headers={"X-Doc-Revision": live_rev})
-            errors, doc_warnings, normalized, canon = _doc_check(kind, body["doc"])
+            errors, doc_warnings, normalized, canon = _doc_check(t, kind, body["doc"])
             if errors:
                 return self._json(422, {"error": "validation failed", "errors": errors})
-            eff = _doc_live_effect(kind, normalized)
+            eff = _doc_live_effect(t, kind, normalized)
             new_rev = _doc_revision(canon)
             try:
-                tmp = path + ".tmp"
-                with open(tmp, "w") as f:
-                    json.dump(canon, f, indent=2, allow_nan=False)
-                    f.write("\n")
-                os.replace(tmp, path)
+                _doc_write(t, kind, canon)
             except OSError as e:
                 return self._json(500, {"error": f"cannot write {path}: {e}"})
             if kind == "classes":
                 _stamp_class_window_changes(normalized[0])
                 seen = _swap_classes(normalized[0], canon, doc_warnings, normalized[1])
             elif kind == "money":
-                seen = _swap_money(normalized, canon, doc_warnings)
+                seen = _swap_money(t, normalized, canon, doc_warnings)
             else:
-                _swap_consumers(normalized, canon, doc_warnings)
+                _swap_consumers(t, normalized, canon, doc_warnings)
             _append_history(path, new_rev, actor, reason, canon)
             log(f"doc[{kind}] rev {live_rev} -> {new_rev} by {actor!r}: {reason}")
             # Snapshot INSIDE the write lock so the response's revision is the
             # one this PUT installed, not a concurrent writer's.
-            snap = _doc_snapshot(kind)
+            snap = _doc_snapshot(t, kind)
             snap["warnings"] = doc_warnings + eff.get("consumer_warnings", [])
             snap["live_effect"] = eff
-        if kind in ("classes", "money"):
-            compute_preferred()  # pointer/live view reflect the new config immediately
-            with _plock:
-                snap["live_effect"]["session_moves"] = [ev for n, ev in _session_journal
+        if kind == "classes":
+            # pointer/live view reflect the new config immediately, for every tenant
+            moves = []
+            for tt in _registry.all():
+                compute_preferred(tt)
+                with tt.plock:
+                    moves += [dict(ev, tenant=tt.id) for n, ev in tt.session_journal
+                              if n > seen.get(tt.id, 0)]
+            snap["live_effect"]["session_moves"] = moves
+        elif kind == "money":
+            compute_preferred(t)  # pointer/live view reflect the new config immediately
+            with t.plock:
+                snap["live_effect"]["session_moves"] = [ev for n, ev in t.session_journal
                                                         if n > seen]
         self._json(200, snap, headers={"X-Doc-Revision": snap["revision"]})
 
@@ -9614,19 +9934,17 @@ class Handler(BaseHTTPRequestHandler):
         a hand-edit left broken JSON behind. Per-entry problems keep the
         startup loader's drop-and-warn tolerance. Absent file = empty doc
         (removing the file is a legitimate way to retire the config)."""
+        t = self.tenant
         if not self._guard():
             return
         body = self._read_json_body()
         body = body if isinstance(body, dict) else {}
         reason = str(body.get("reason") or "").strip() or "reloaded from disk"
-        path = _doc_path(kind)
-        with _doc_locks[kind]:
-            old_rev = _live_revision(kind)
+        path = _doc_path(t, kind)
+        with _doc_lock(t, kind):
+            old_rev = _live_revision(t, kind)
             try:
-                with open(path) as f:
-                    raw = json.load(f)
-            except FileNotFoundError:
-                raw = None
+                raw = _doc_read(t, kind)
             except Exception as e:  # noqa: BLE001
                 return self._json(422, {"error": f"cannot parse {path}: {e} — live config kept"})
             warnings = []
@@ -9645,7 +9963,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(422, {"error": 'document must be {"pay_order": [...], "pots": {...}} '
                                                      "— live config kept"})
                 _, warnings, normalized = _normalize_money(raw, strict=False)
-                _swap_money(normalized, raw, warnings)
+                _swap_money(t, normalized, raw, warnings)
                 canon = raw
             else:
                 raw = {"consumers": []} if raw is None else raw
@@ -9655,15 +9973,18 @@ class Handler(BaseHTTPRequestHandler):
                                                      "(or a bare array) — live config kept"})
                 _, warnings, normalized = _normalize_consumers(raw, strict=False)
                 canon = raw if isinstance(raw, dict) else {"consumers": raw}
-                _swap_consumers(normalized, canon, warnings)
+                _swap_consumers(t, normalized, canon, warnings)
             new_rev = _doc_revision(canon)
             _append_history(path, new_rev, "hand-edit (reload)", reason, canon)
             log(f"doc[{kind}] reloaded from disk: rev {old_rev} -> {new_rev}")
-            snap = _doc_snapshot(kind)
+            snap = _doc_snapshot(t, kind)
             snap["reloaded"] = True
             snap["changed"] = old_rev != new_rev
-        if kind in ("classes", "money"):
-            compute_preferred()
+        if kind == "classes":
+            for tt in _registry.all():  # the operator's document: every tenant's routing
+                compute_preferred(tt)
+        elif kind == "money":
+            compute_preferred(t)
         self._json(200, snap, headers={"X-Doc-Revision": snap["revision"]})
 
     def _json(self, code, obj, headers=None):
@@ -9691,36 +10012,43 @@ _sigterm_seen = False
 
 
 def _sigterm(signum, frame):  # noqa: ARG001
-    """The graceful shutdown: save sizing's open state, then exit. A second
-    SIGTERM, landing inside the first handler (perhaps while it holds
-    _sizing_lock, which is not reentrant), returns at once, taking no lock,
-    so the first finishes its save and exits."""
+    """The graceful shutdown: save every tenant's sizing open state, then
+    exit. A second SIGTERM, landing inside the first handler (perhaps while
+    it holds a sizing lock, which is not reentrant), returns at once, taking
+    no lock, so the first finishes its save and exits."""
     global _sigterm_seen
     if _sigterm_seen:
         return
     _sigterm_seen = True
-    _sizing_shutdown()
+    for t in _registry.all():
+        _sizing_shutdown(t)
     raise SystemExit(0)
 
 
 def boot():
     """What reads the driver registry, run once every driver has registered and
     before anything is served or restored: the class document (validated
-    against the drivers' modalities, its windows stamped). main() runs it first;
-    lanes, consumers, money, served and sizing read no registry and load at
-    import."""
-    global _classes
+    against the drivers' modalities, its windows stamped), then the registry
+    of tenants, each made with its documents read (_tenant_fresh). main()
+    runs it first; a test runs it with its own CREDS_DIR."""
+    global _classes, _registry
     _classes = _load_classes()
+    _registry = tenancy.Registry(CREDS_DIR, _tenant_fresh, retire=_tenant_retire, log=log)
+    _registry.load()
+    return _registry
 
 
 def main():
-    boot()
+    try:
+        boot()
+    except tenancy.RegistryError as e:
+        log(f"refusing to start: {e}")
+        raise SystemExit(1)
     loop = _account_loop()
-    if loop:
-        loop["start"]()  # the configured accounts, so _load_state restores only theirs
-    _load_state()
     log(f"switchover brain: incumbent-wins high={SW_HIGH} margin={SW_MARGIN} "
-        f"hard={SW_HARD} dwell={SW_DWELL}s /token={'guarded' if SWITCH_KEY else 'DISABLED (no key)'}")
+        f"hard={SW_HARD} dwell={SW_DWELL}s /token={'guarded' if SWITCH_KEY else 'DISABLED (no key)'}; "
+        f"store {_store.mode}; tenants {', '.join(t.id for t in _registry.all()) or 'none'} "
+        f"[{_registry.path}]")
     log("lanes: " + ", ".join(
         f"{lc['lane']}(match={'|'.join(lc['match']) or '-'},cap={lc['scope_model'] or '-'})"
         for lc in _lanes))
@@ -9733,32 +10061,23 @@ def main():
                    + ("" if m.get("reserve_ceiling") is None else f"<={m['reserve_ceiling']:.0f}")
                    for m in c["members"]) + ")"
         for c in _classes) or "none configured"))
-    # The money document (quota-model 50 §1.9): the pot settings in force.
-    log(f"money: pay_order={_money['pay_order']} topup_on="
-        f"{sorted(p for p, e in _money['pots'].items() if e['topup'] == 'on')} budgets="
-        f"{ {p: e['budget'] for p, e in _money['pots'].items() if 'budget' in e} } "
-        f"[file {MONEY_FILE}]")
-    _load_ledger()
-    log(f"recheck: {_load_rechecks()} epoch(s) from {RECHECK_FILE}")
-    n = _notices.load()
-    _notices.start()
+    for t in _registry.all():
+        if loop:
+            loop["start"](t)  # the configured accounts, so _load_state restores only theirs
+        _tenant_boot(t)
+        # Consumers (#95): the runtime view logs its own dangling/shape warnings.
+        for c in _consumers_view(t.consumers, _classes):
+            for w in c["warnings"]:
+                log(f"{t.id}: WARN consumers[{c['id']}]: {w}")
     url = notices.bridge_url()
-    log(f"notices: {n} account(s) in {NOTICES_FILE}; "
-        + (f"delivering to {url}" if url else f"off ({notices.NO_BRIDGE})"))
-    # Sizing (quota-model 66 §8): read before /reports is served, so nothing
-    # is applied ahead of the loaded state; a SIGTERM (a deploy's restart)
-    # saves the open step with the samples.
-    _sizing_load()
+    log("notices bridge: " + (f"{url}, for the LAN tenant(s) "
+                              f"{', '.join(t.id for t in _registry.lan()) or 'none'}"
+                              if url else f"off ({notices.NO_BRIDGE})"))
+    # Sizing (quota-model 66 §8) was read per tenant before /reports is
+    # served; a SIGTERM (a deploy's restart) saves each open step with its samples.
     signal.signal(signal.SIGTERM, _sigterm)
-    # Consumers (#95): the runtime view logs its own dangling/shape warnings.
-    log("consumers: " + (", ".join(
-        f"{c['id']}({len(c['members'])} refs, shape={c['request_shape']})"
-        for c in _consumers) or "none configured") + f" [file {CONSUMERS_FILE}]")
-    for c in _consumers_view(_consumers, _classes):
-        for w in c["warnings"]:
-            log(f"WARN consumers[{c['id']}]: {w}")
-    t = threading.Thread(target=poller, daemon=True)
-    t.start()
+    th = threading.Thread(target=poller, daemon=True)
+    th.start()
     _events_start()  # GET /events: publishes the first document now
     log(f"listening on :{PORT}/metrics, poll interval {POLL_INTERVAL}s, "
         f"providers {', '.join(PROVIDERS) or 'none'}")

@@ -97,7 +97,7 @@ func prepareResponseNote(cc *classRoute) *responseNote {
 	case "detour", "ranked", "forced", "probe":
 	default:
 		if (cc.walked == "" || cc.walked == "retry") && cc.routeReason != "health:ramp" { // a same-member resend is no walk to note
-			s := health.stateOf(served)
+			s := cc.tenant.health.stateOf(served)
 			if s == "" || s == hsHealthy || s == hsConvalescent {
 				return nil
 			}
@@ -110,6 +110,7 @@ func prepareResponseNote(cc *classRoute) *responseNote {
 	d := noteDecision{class: cc.class, bound: bound, served: served, hop: cc.hopKind,
 		reason: cc.routeReason, walked: cc.walked, pinned: cc.pinned,
 		probe: cc.leaseFor(served) != nil, quota: cc.quotaNote, failure: cc.healthNote}
+	health := cc.tenant.health
 	health.mu.Lock()
 	now := nowFn()
 	d.boundState = snapshotNoteKey(health, bound, cc.class, cc.session, now)

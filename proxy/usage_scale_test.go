@@ -546,15 +546,10 @@ func TestE2EClassHopScaledByBrainRatio(t *testing.T) {
 	}
 	boundRatio := func(sess string) any {
 		t.Helper()
-		resp, err := http.Get(h.proxy.URL + "/_switch/status")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
 		var s struct {
 			ClassBindings map[string]map[string]map[string]any `json:"class_bindings"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		if err := json.Unmarshal(statusMine(t, h.proxy.URL), &s); err != nil {
 			t.Fatal(err)
 		}
 		b := s.ClassBindings["frontier"][fpSess(sess)]

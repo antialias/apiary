@@ -16,7 +16,7 @@ import (
 
 // decide is decideRoute on the bare lane's route, in the shape these tests read.
 func decide(lane string) (tok, eff, reason string, state routeState) {
-	d := decideRoute(laneRouteID(lane), lane, "", false)
+	d := lan.decideRoute(laneRouteID(lane), lane, "", false)
 	return d.tok, d.acct, d.reason, d.state
 }
 
@@ -47,42 +47,42 @@ var laneWorldLanes = []string{"fable", "opus", "haiku", "default", "anything"}
 // withLaneState installs a brain decision + token cache and returns a restore func.
 func withLaneState(t *testing.T, account string, lanes map[string]lanePref, rules []laneRule) func() {
 	t.Helper()
-	pref.mu.Lock()
-	oldA, oldR, oldW, oldRules, oldLanes, oldOK := pref.account, pref.reason, pref.weekly, pref.laneRules, pref.lanes, pref.ok
-	pref.account, pref.reason, pref.ok = account, "test", true
-	pref.laneRules, pref.lanes = rules, lanes
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	oldA, oldR, oldW, oldRules, oldLanes, oldOK := lan.pref.account, lan.pref.reason, lan.pref.weekly, lan.pref.laneRules, lan.pref.lanes, lan.pref.ok
+	lan.pref.account, lan.pref.reason, lan.pref.ok = account, "test", true
+	lan.pref.laneRules, lan.pref.lanes = rules, lanes
+	lan.pref.mu.Unlock()
 
 	// Every account gets a cached token — the proxy always injects the chosen account's
 	// bearer (no account is passthrough anymore).
-	tokMu.Lock()
-	oldTokens := tokens
-	tokens = map[string]tokEntry{
+	lan.tokMu.Lock()
+	oldTokens := lan.tokens
+	lan.tokens = map[string]tokEntry{
 		native: {token: "tok-native", exp: time.Now().Add(time.Hour)},
 		other:  {token: "tok-other", exp: time.Now().Add(time.Hour)},
 	}
-	tokMu.Unlock()
+	lan.tokMu.Unlock()
 
 	laneWorld(t, laneWorldLanes, nil)
 
-	effMu.Lock()
-	oldEff, oldState := lastEffective, lastState
-	lastEffective = map[string]string{}
-	lastState = map[string]routeState{}
-	effMu.Unlock()
+	lan.effMu.Lock()
+	oldEff, oldState := lan.lastEffective, lan.lastState
+	lan.lastEffective = map[string]string{}
+	lan.lastState = map[string]routeState{}
+	lan.effMu.Unlock()
 
 	oldBridge := swapBridgeURL("") // alerts log-only in these tests
 
 	return func() {
-		pref.mu.Lock()
-		pref.account, pref.reason, pref.weekly, pref.laneRules, pref.lanes, pref.ok = oldA, oldR, oldW, oldRules, oldLanes, oldOK
-		pref.mu.Unlock()
-		tokMu.Lock()
-		tokens = oldTokens
-		tokMu.Unlock()
-		effMu.Lock()
-		lastEffective, lastState = oldEff, oldState
-		effMu.Unlock()
+		lan.pref.mu.Lock()
+		lan.pref.account, lan.pref.reason, lan.pref.weekly, lan.pref.laneRules, lan.pref.lanes, lan.pref.ok = oldA, oldR, oldW, oldRules, oldLanes, oldOK
+		lan.pref.mu.Unlock()
+		lan.tokMu.Lock()
+		lan.tokens = oldTokens
+		lan.tokMu.Unlock()
+		lan.effMu.Lock()
+		lan.lastEffective, lan.lastState = oldEff, oldState
+		lan.effMu.Unlock()
 		swapBridgeURL(oldBridge)
 	}
 }
@@ -142,7 +142,7 @@ func TestRecordScopes(t *testing.T) {
 	defer restore()
 	now := nowFn()
 	no := func(lane, acct string) bool {
-		c, _ := routeCheck(laneRouteID(lane), acct, "", now)
+		c, _ := lan.routeCheck(laneRouteID(lane), acct, "", now)
 		return c.no()
 	}
 
@@ -173,9 +173,9 @@ func TestDecideSteersAroundLaneCooldown(t *testing.T) {
 		"fable": {Account: other},
 	}, testRules)
 	defer restore()
-	pref.mu.Lock()
-	pref.weekly = map[string]float64{native: 50, other: 60} // failoverFor consults these
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	lan.pref.weekly = map[string]float64{native: 50, other: 60} // failoverFor consults these
+	lan.pref.mu.Unlock()
 
 	seedSpent(other, "scoped:Fable", 429, "Fable limit", time.Time{})
 	tok, eff, reason, state := decide("fable")
@@ -194,7 +194,7 @@ func TestDecideRefusesWhenEveryAccountIsNo(t *testing.T) {
 	defer restore()
 	seedSpent(native, "seven_day", 429, "weekly limit", time.Time{})
 	seedSpent(other, "seven_day", 429, "weekly limit", time.Time{})
-	d := decideRoute(laneRouteID("opus"), "opus", "", false)
+	d := lan.decideRoute(laneRouteID("opus"), "opus", "", false)
 	if !d.none || d.tok != "" || len(d.refused) != 2 {
 		t.Fatalf("decision = %+v, want a refusal naming both accounts", d)
 	}
@@ -240,17 +240,17 @@ func TestLaneStopAt(t *testing.T) {
 	laneWorld(t, laneWorldLanes, map[string]acctStanding{
 		native: standingAt("anthropic", now, map[string]checkWindow{"seven_day": week(70, now.Add(48*time.Hour))}, ""),
 	})
-	pref.mu.Lock()
-	r := pref.routes["lane:opus"]
+	lan.pref.mu.Lock()
+	r := lan.pref.routes["lane:opus"]
 	r.StopAt = &stopAt{Window: "7d", Level: 60}
-	pref.routes["lane:opus"] = r
-	pref.mu.Unlock()
+	lan.pref.routes["lane:opus"] = r
+	lan.pref.mu.Unlock()
 
-	d := decideRoute("lane:opus", "opus", "", false)
+	d := lan.decideRoute("lane:opus", "opus", "", false)
 	if d.acct != other || d.check.Check != checkIncluded {
 		t.Fatalf("opus = %+v, want %s: %s is over the lane's stop_at", d, other, native)
 	}
-	if c, _ := routeCheck("lane:opus", native, "", now); c.Reason != "stop_at" {
+	if c, _ := lan.routeCheck("lane:opus", native, "", now); c.Reason != "stop_at" {
 		t.Fatalf("native on opus = %s, want no(stop_at)", c)
 	}
 	if _, eff, _, _ := decide("haiku"); eff != native {
@@ -270,7 +270,7 @@ func TestLanePayAndTopup(t *testing.T) {
 	laneWorld(t, laneWorldLanes, map[string]acctStanding{native: spentFunded, other: spentFunded})
 
 	// pay unset ([]): both refused, until the window resets.
-	d := decideRoute("lane:opus", "opus", "", false)
+	d := lan.decideRoute("lane:opus", "opus", "", false)
 	if !d.none || len(d.refused) != 2 || d.refused[0].check.Reason != "pay" {
 		t.Fatalf("pay []: %+v, want both refused for pay", d)
 	}
@@ -279,22 +279,22 @@ func TestLanePayAndTopup(t *testing.T) {
 	}
 
 	// pay names other's pot: other is dialled, paid; native stays refused.
-	pref.mu.Lock()
-	r := pref.routes["lane:opus"]
+	lan.pref.mu.Lock()
+	r := lan.pref.routes["lane:opus"]
 	r.Pay = []string{other + "/credits"}
-	pref.routes["lane:opus"] = r
-	pref.mu.Unlock()
-	d = decideRoute("lane:opus", "opus", "", false)
+	lan.pref.routes["lane:opus"] = r
+	lan.pref.mu.Unlock()
+	d = lan.decideRoute("lane:opus", "opus", "", false)
 	if d.acct != other || d.check.Check != checkPaid || d.check.Pot != other+"/credits" {
 		t.Fatalf("pay [other]: %+v, want %s paid", d, other)
 	}
 
 	// An included account still goes first, even when it is not the pick.
-	pref.mu.Lock()
-	pref.accounts[native] = standingAt("anthropic", now, map[string]checkWindow{"seven_day": week(50, reset)}, "open")
-	pref.lanes = map[string]lanePref{"opus": {Account: other}}
-	pref.mu.Unlock()
-	if d = decideRoute("lane:opus", "opus", "", false); d.acct != native || !d.check.included() {
+	lan.pref.mu.Lock()
+	lan.pref.accounts[native] = standingAt("anthropic", now, map[string]checkWindow{"seven_day": week(50, reset)}, "open")
+	lan.pref.lanes = map[string]lanePref{"opus": {Account: other}}
+	lan.pref.mu.Unlock()
+	if d = lan.decideRoute("lane:opus", "opus", "", false); d.acct != native || !d.check.included() {
 		t.Fatalf("included before paid: %+v, want %s included", d, native)
 	}
 
@@ -302,18 +302,18 @@ func TestLanePayAndTopup(t *testing.T) {
 	// the brain's next reading.
 	empty := standingAt("anthropic", now, map[string]checkWindow{"seven_day": week(100, reset)}, "closed")
 	next := now.Add(5 * time.Minute)
-	pref.mu.Lock()
-	pref.accounts[native] = spentFunded
-	pref.accounts[other] = empty
-	pref.mu.Unlock()
-	c, _ := routeCheck("lane:opus", other, "", now)
+	lan.pref.mu.Lock()
+	lan.pref.accounts[native] = spentFunded
+	lan.pref.accounts[other] = empty
+	lan.pref.mu.Unlock()
+	c, _ := lan.routeCheck("lane:opus", other, "", now)
 	if c.Reason != "spent" || !c.Until.Time().Equal(time.Unix(0, int64(unixSeconds(reset)*1e9))) {
 		t.Fatalf("topup off: %s, want no(spent) until the window reset", c)
 	}
-	pref.mu.Lock()
-	pref.pots = map[string]potSettings{other + "/credits": {Topup: "on"}}
-	pref.mu.Unlock()
-	c, _ = routeCheck("lane:opus", other, "", now)
+	lan.pref.mu.Lock()
+	lan.pref.pots = map[string]potSettings{other + "/credits": {Topup: "on"}}
+	lan.pref.mu.Unlock()
+	c, _ = lan.routeCheck("lane:opus", other, "", now)
 	if c.Reason != "spent" || !c.Until.Time().Equal(time.Unix(0, int64(unixSeconds(next)*1e9))) {
 		t.Fatalf("topup on: %s, want no(spent) until the next reading %v", c, next)
 	}
@@ -323,14 +323,14 @@ func TestLanePayAndTopup(t *testing.T) {
 func TestLaneThrottleDeranks(t *testing.T) {
 	restore := withLaneState(t, native, nil, testRules)
 	defer restore()
-	recordThrottle(native, 429, "slow down", http.Header{"Retry-After": {"30"}})
-	d := decideRoute("lane:opus", "opus", "", false)
+	lan.recordThrottle(native, 429, "slow down", http.Header{"Retry-After": {"30"}})
+	d := lan.decideRoute("lane:opus", "opus", "", false)
 	if d.acct != other || !d.check.included() {
 		t.Fatalf("throttled pick: %+v, want %s", d, other)
 	}
 	// Throttled everywhere: still dialled — a throttle is not a `no`.
-	recordThrottle(other, 429, "slow down", http.Header{"Retry-After": {"30"}})
-	if d = decideRoute("lane:opus", "opus", "", false); d.none || d.tok == "" {
+	lan.recordThrottle(other, 429, "slow down", http.Header{"Retry-After": {"30"}})
+	if d = lan.decideRoute("lane:opus", "opus", "", false); d.none || d.tok == "" {
 		t.Fatalf("throttled everywhere: %+v, want a dial", d)
 	}
 }
@@ -354,22 +354,22 @@ func TestManualInjectPassesTheCheck(t *testing.T) {
 	defer restore()
 	injectToken(t, "tok-native")
 
-	if d := decideRoute("lane:opus", "opus", "", false); d.tok != "tok-native" || !d.check.included() {
+	if d := lan.decideRoute("lane:opus", "opus", "", false); d.tok != "tok-native" || !d.check.included() {
 		t.Fatalf("included: %+v, want the manual token", d)
 	}
 	now := nowFn()
-	pref.mu.Lock()
-	pref.accounts[native] = standingAt("anthropic", now, map[string]checkWindow{"seven_day": week(100, now.Add(time.Hour))}, "open")
-	r := pref.routes["lane:opus"]
+	lan.pref.mu.Lock()
+	lan.pref.accounts[native] = standingAt("anthropic", now, map[string]checkWindow{"seven_day": week(100, now.Add(time.Hour))}, "open")
+	r := lan.pref.routes["lane:opus"]
 	r.Pay = []string{native + "/credits"}
-	pref.routes["lane:opus"] = r
-	pref.mu.Unlock()
-	d := decideRoute("lane:opus", "opus", "", false)
+	lan.pref.routes["lane:opus"] = r
+	lan.pref.mu.Unlock()
+	d := lan.decideRoute("lane:opus", "opus", "", false)
 	if d.tok != "" || !d.none || !strings.Contains(d.reason, "paid") {
 		t.Fatalf("paid: %+v, want a refusal — manual inject never spends money", d)
 	}
 	// count_tokens is free: the manual token answers it whatever the check.
-	if d = decideRoute("lane:opus", "opus", "", true); d.tok != "tok-native" {
+	if d = lan.decideRoute("lane:opus", "opus", "", true); d.tok != "tok-native" {
 		t.Fatalf("count_tokens: %+v, want the manual token", d)
 	}
 }
@@ -381,18 +381,18 @@ func TestManualInjectChecksTheInjectedAccount(t *testing.T) {
 	restore := withLaneState(t, native, nil, testRules)
 	defer restore()
 	now := nowFn()
-	pref.mu.Lock()
-	pref.accounts[other] = standingAt("anthropic", now, map[string]checkWindow{"seven_day": week(100, now.Add(time.Hour))}, "closed")
-	pref.mu.Unlock()
-	if c, _ := routeCheck("lane:opus", native, "", now); !c.included() {
+	lan.pref.mu.Lock()
+	lan.pref.accounts[other] = standingAt("anthropic", now, map[string]checkWindow{"seven_day": week(100, now.Add(time.Hour))}, "closed")
+	lan.pref.mu.Unlock()
+	if c, _ := lan.routeCheck("lane:opus", native, "", now); !c.included() {
 		t.Fatalf("fixture: the pick is %s, want included", c)
 	}
 	injectToken(t, "tok-other")
-	if d := decideRoute("lane:opus", "opus", "", false); d.tok != "" || !d.none || !strings.Contains(d.reason, other) {
+	if d := lan.decideRoute("lane:opus", "opus", "", false); d.tok != "" || !d.none || !strings.Contains(d.reason, other) {
 		t.Fatalf("inject of a spent account: %+v, want a refusal naming %s", d, other)
 	}
 	injectToken(t, "tok-nobody")
-	if d := decideRoute("lane:opus", "opus", "", false); d.tok != "" || !d.none {
+	if d := lan.decideRoute("lane:opus", "opus", "", false); d.tok != "" || !d.none {
 		t.Fatalf("inject of an unknown token: %+v, want a refusal", d)
 	}
 }
@@ -404,7 +404,7 @@ func TestCountTokensIgnoresTheCheck(t *testing.T) {
 	defer restore()
 	seedSpent(native, "seven_day", 429, "weekly limit", time.Time{})
 	seedSpent(other, "seven_day", 429, "weekly limit", time.Time{})
-	d := decideRoute("lane:opus", "opus", "", true)
+	d := lan.decideRoute("lane:opus", "opus", "", true)
 	if d.none || d.acct != native || d.tok != "tok-native" {
 		t.Fatalf("count_tokens: %+v, want the pick, spent or not", d)
 	}
@@ -434,9 +434,9 @@ func TestBrainDownWithCachedTokenIsStale(t *testing.T) {
 		"default": {Account: native, Reason: "incumbent"},
 	}, testRules)
 	defer restore()
-	pref.mu.Lock()
-	pref.ok = false // brain went unreachable; last-good decision + cached token remain
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	lan.pref.ok = false // brain went unreachable; last-good decision + cached token remain
+	lan.pref.mu.Unlock()
 
 	tok, eff, _, state := decide("default")
 	if tok != "tok-native" || eff != native || state != stateStale {
@@ -451,12 +451,12 @@ func TestBrainDownColdIsFailed(t *testing.T) {
 		"default": {Account: native, Reason: "incumbent"},
 	}, testRules)
 	defer restore()
-	pref.mu.Lock()
-	pref.ok = false
-	pref.mu.Unlock()
-	tokMu.Lock()
-	tokens = map[string]tokEntry{} // cold cache: nothing valid to inject
-	tokMu.Unlock()
+	lan.pref.mu.Lock()
+	lan.pref.ok = false
+	lan.pref.mu.Unlock()
+	lan.tokMu.Lock()
+	lan.tokens = map[string]tokEntry{} // cold cache: nothing valid to inject
+	lan.tokMu.Unlock()
 
 	tok, _, _, state := decide("default")
 	if tok != "" || state != stateFailed {
@@ -474,12 +474,12 @@ func TestNoteEffectivePerLane(t *testing.T) {
 	before := st.switches
 	st.mu.Unlock()
 
-	noteEffective("fable", native, "first sighting")    // no alert: no previous
-	noteEffective("haiku", native, "first sighting")    // no alert: independent lane
-	noteEffective("fable", other, "flip")               // ALERT: fable changed
-	noteEffective("haiku", native, "steady")            // no alert: unchanged
-	forceEffective("haiku", other)                      // 429 path already alerted
-	noteEffective("haiku", other, "would-be duplicate") // no alert: matches forced
+	lan.noteEffective("fable", native, "first sighting")    // no alert: no previous
+	lan.noteEffective("haiku", native, "first sighting")    // no alert: independent lane
+	lan.noteEffective("fable", other, "flip")               // ALERT: fable changed
+	lan.noteEffective("haiku", native, "steady")            // no alert: unchanged
+	lan.forceEffective("haiku", other)                      // 429 path already alerted
+	lan.noteEffective("haiku", other, "would-be duplicate") // no alert: matches forced
 
 	st.mu.Lock()
 	delta := st.switches - before
@@ -496,14 +496,14 @@ func TestNoteEffectivePerLane(t *testing.T) {
 func TestAnthropicMemberDialsFromItsOwnIncumbent(t *testing.T) {
 	restore := withLaneState(t, native, map[string]lanePref{"opus": {Account: ""}}, testRules)
 	defer restore()
-	pref.mu.Lock()
-	pref.routes["frontier/lane:opus"] = memberRoute("frontier/lane:opus", "frontier", "lane:opus", "opus", "anthropic", native, other)
-	pref.mu.Unlock()
+	lan.pref.mu.Lock()
+	lan.pref.routes["frontier/lane:opus"] = memberRoute("frontier/lane:opus", "frontier", "lane:opus", "opus", "anthropic", native, other)
+	lan.pref.mu.Unlock()
 	m := classMemberPref{ID: "lane:opus", Kind: "anthropic", Lane: "opus", Route: "frontier/lane:opus", Incumbent: other}
-	if got := memberIncumbent(m); got != other {
+	if got := lan.memberIncumbent(m); got != other {
 		t.Fatalf("memberIncumbent = %q, want the member's own %q", got, other)
 	}
-	d := anthropicMemberDial(m, false, false)
+	d := lan.anthropicMemberDial(m, false, false)
 	if d.acct != other || d.check.Check != checkIncluded || d.state != stateRouted {
 		t.Fatalf("member dial = %+v, want %s (the member's incumbent), included", d, other)
 	}
@@ -519,12 +519,12 @@ func TestEmptyPickOnAKnownRouteNamesTheChecks(t *testing.T) {
 	seedSpent(native, "seven_day", 429, "weekly limit", time.Now().Add(time.Hour))
 	seedSpent(other, "seven_day", 429, "weekly limit", time.Now().Add(time.Hour))
 
-	d := decideOn(laneRouteID("opus"), "opus", "claude-opus-5", "", "", false)
+	d := lan.decideOn(laneRouteID("opus"), "opus", "claude-opus-5", "", "", false)
 	if !d.none || strings.Contains(d.reason, "no brain decision") ||
 		!strings.Contains(d.reason, native) || !strings.Contains(d.reason, other) {
 		t.Fatalf("decision = %+v, want a refusal naming both accounts' checks", d)
 	}
-	if d := decideOn("lane:unserved", "unserved", "m", "", "", false); d.state != stateFailed || d.reason != "no brain decision yet" {
+	if d := lan.decideOn("lane:unserved", "unserved", "m", "", "", false); d.state != stateFailed || d.reason != "no brain decision yet" {
 		t.Fatalf("unserved route = %+v, want no brain decision", d)
 	}
 }

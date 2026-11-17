@@ -62,13 +62,17 @@ func captureBridgeLane(t *testing.T, lane string, weekly map[string]float64,
 	// Pin the gate windows to defaults so a prior test's shrunk values can't bleed.
 	alertCritCooldown, alertRepeatWindow = 6*time.Hour, time.Hour
 
-	pref.mu.Lock()
-	oldWeekly, oldLanes := pref.weekly, pref.lanes
-	pref.weekly, pref.lanes = weekly, lanes
-	pref.mu.Unlock()
-	defer func() { pref.mu.Lock(); pref.weekly, pref.lanes = oldWeekly, oldLanes; pref.mu.Unlock() }()
+	lan.pref.mu.Lock()
+	oldWeekly, oldLanes := lan.pref.weekly, lan.pref.lanes
+	lan.pref.weekly, lan.pref.lanes = weekly, lanes
+	lan.pref.mu.Unlock()
+	defer func() {
+		lan.pref.mu.Lock()
+		lan.pref.weekly, lan.pref.lanes = oldWeekly, oldLanes
+		lan.pref.mu.Unlock()
+	}()
 
-	fireSwitchAlert(lane, from, to, "test")
+	lan.fireSwitchAlert(lane, from, to, "test")
 
 	var payload struct {
 		Alerts []bridgeAlert `json:"alerts"`
@@ -249,15 +253,19 @@ func TestMultiLaneFlipCoalescesToOnePost(t *testing.T) {
 		"haiku": {Account: other, Effective: map[string]float64{other: 41}}, // quiet
 		"opus":  {Account: other, Effective: map[string]float64{other: 41}}, // quiet
 	}
-	pref.mu.Lock()
-	oldWeekly, oldLanes := pref.weekly, pref.lanes
-	pref.weekly, pref.lanes = weekly, lanes
-	pref.mu.Unlock()
-	defer func() { pref.mu.Lock(); pref.weekly, pref.lanes = oldWeekly, oldLanes; pref.mu.Unlock() }()
+	lan.pref.mu.Lock()
+	oldWeekly, oldLanes := lan.pref.weekly, lan.pref.lanes
+	lan.pref.weekly, lan.pref.lanes = weekly, lanes
+	lan.pref.mu.Unlock()
+	defer func() {
+		lan.pref.mu.Lock()
+		lan.pref.weekly, lan.pref.lanes = oldWeekly, oldLanes
+		lan.pref.mu.Unlock()
+	}()
 
-	fireSwitchAlert("haiku", native, other, "test")
-	fireSwitchAlert("fable", native, other, "test")
-	fireSwitchAlert("opus", native, other, "test")
+	lan.fireSwitchAlert("haiku", native, other, "test")
+	lan.fireSwitchAlert("fable", native, other, "test")
+	lan.fireSwitchAlert("opus", native, other, "test")
 
 	var payload struct {
 		Alerts []bridgeAlert `json:"alerts"`

@@ -75,7 +75,7 @@ func evDisarm() { atomic.StoreInt64(&evArmedUntil, time.Now().Add(-time.Second).
 // evPublishN publishes n events and returns the seq of the last one.
 func evPublishN(n int) int64 {
 	for i := 0; i < n; i++ {
-		publish("t", map[string]any{"i": i})
+		publish("", "t", map[string]any{"i": i})
 	}
 	return atomic.LoadInt64(&evSeq)
 }
@@ -160,7 +160,7 @@ func TestEventsZeroSubscribersNoAlloc(t *testing.T) {
 	payload := map[string]any{"lane": "fable", "from": "native", "to": "other"}
 	n := testing.AllocsPerRun(1000, func() {
 		if eventsArmed() {
-			publish("switchover", payload)
+			publish("", "switchover", payload)
 		}
 	})
 	if n != 0 {
@@ -213,7 +213,7 @@ func TestEventsStaleRingAfterDisarm(t *testing.T) {
 	hub.detach(sub)
 	evDisarm()
 
-	publish("t", map[string]any{"lost": true}) // dropped: nobody is listening or coming back
+	publish("", "t", map[string]any{"lost": true}) // dropped: nobody is listening or coming back
 
 	sub2, backlog, gap := hub.attach("second", evID(last))
 	defer hub.detach(sub2)
@@ -294,7 +294,7 @@ func TestEventsLiveSubscriberSurvivesAWedgedOne(t *testing.T) {
 	first := atomic.LoadInt64(&evSeq) + 1
 	var got []int64
 	for i := 0; i < 100; i++ {
-		publish("t", map[string]any{"i": i})
+		publish("", "t", map[string]any{"i": i})
 		got = append(got, evDrain(reader)...) // drained inline, so it can never fill
 	}
 
@@ -332,7 +332,7 @@ func TestEventsAttachIsAtomicWithReplay(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 200; i++ {
-				publish("t", map[string]any{"i": i})
+				publish("", "t", map[string]any{"i": i})
 				if i == 0 {
 					close(started)
 				}
@@ -511,7 +511,7 @@ func TestEventsFrameCapTruncates(t *testing.T) {
 	evTest(t)
 	evArm()
 	evMaxEventBytes = 512
-	publish("big", map[string]any{"blob": strings.Repeat("x", 8192)})
+	publish("", "big", map[string]any{"blob": strings.Repeat("x", 8192)})
 
 	frames := evRingFrames()
 	if len(frames) != 1 {
@@ -533,7 +533,7 @@ func TestEventsFrameCapTruncates(t *testing.T) {
 func TestEventsFrameShape(t *testing.T) {
 	evTest(t)
 	evArm()
-	publish("switchover", map[string]any{"lane": "fable"})
+	publish("", "switchover", map[string]any{"lane": "fable"})
 
 	frames := evRingFrames()
 	p := evParseFrame(t, frames[0].b)
@@ -560,7 +560,7 @@ func TestEventsFrameShape(t *testing.T) {
 func TestEventsKindCannotForgeFrames(t *testing.T) {
 	evTest(t)
 	evArm()
-	publish("evil\ndata: {\"injected\":true}\n\nevent: spoof", map[string]any{"ok": true})
+	publish("", "evil\ndata: {\"injected\":true}\n\nevent: spoof", map[string]any{"ok": true})
 	p := evParseFrame(t, evRingFrames()[0].b)
 	if p.nData != 1 {
 		t.Fatalf("a newline in the event name produced %d data lines — one publisher could forge frames for another", p.nData)

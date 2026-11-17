@@ -41,10 +41,10 @@ func TestCodexLiveCache(t *testing.T) {
 
 	h, restore := newE2EClass(t)
 	defer restore()
-	fake, _ := url.Parse(brainURL)
+	fake, _ := url.Parse(brainBase)
 	fakeBrain := httputil.NewSingleHostReverseProxy(fake)
 	live := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/openai-token" {
+		if r.URL.Path != tpath("/openai-token") {
 			fakeBrain.ServeHTTP(w, r)
 			return
 		}
@@ -69,7 +69,7 @@ func TestCodexLiveCache(t *testing.T) {
 		})
 	}))
 	defer live.Close()
-	brainURL = live.URL
+	brainBase = live.URL
 	codexUpstream = "https://chatgpt.com"
 	h.brainMu.Lock()
 	h.classMembers = []map[string]any{

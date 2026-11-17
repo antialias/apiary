@@ -72,15 +72,15 @@ func heldConnection(delivered bool, lasted time.Duration) bool {
 }
 
 // runBrainStream holds the subscription until ctx ends.
-func runBrainStream(ctx context.Context) {
+func (tn *tenant) runBrainStream(ctx context.Context) {
 	var wait time.Duration
 	for {
 		start := time.Now()
-		good, err := brainStreamOnce(ctx)
+		good, err := tn.brainStreamOnce(ctx)
 		if ctx.Err() != nil {
 			return
 		}
-		brainFail("stream", err)
+		tn.brainFail("stream", err)
 		wait = nextBackoff(wait, heldConnection(good, time.Since(start)))
 		if wait == 0 {
 			continue
@@ -99,7 +99,7 @@ func runBrainStream(ctx context.Context) {
 // closes or falls silent; it always returns a non-nil error saying which. good
 // is whether it delivered at least one `preferred` event. Its first event
 // queues the reports' resync (reportResync).
-func brainStreamOnce(parent context.Context) (good bool, err error) {
+func (tn *tenant) brainStreamOnce(parent context.Context) (good bool, err error) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	var silent atomic.Bool
@@ -111,7 +111,7 @@ func brainStreamOnce(parent context.Context) (good bool, err error) {
 		}
 	}()
 
-	req, _ := http.NewRequestWithContext(ctx, "GET", brainURL+"/events", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", tn.brainURL()+"/events", nil)
 	req.Header.Set("Accept", "text/event-stream")
 	resp, err := brainStreamClient.Do(req)
 	if err != nil {
@@ -123,9 +123,9 @@ func brainStreamOnce(parent context.Context) (good bool, err error) {
 	}
 	body := &heardReader{r: resp.Body, heard: func() {
 		watch.Reset(brainSilence)
-		pref.mu.Lock()
-		pref.heardAt = time.Now()
-		pref.mu.Unlock()
+		tn.pref.mu.Lock()
+		tn.pref.heardAt = time.Now()
+		tn.pref.mu.Unlock()
 	}}
 	err = readSSE(body, func(event, data string) {
 		if event != "preferred" {
@@ -133,13 +133,13 @@ func brainStreamOnce(parent context.Context) (good bool, err error) {
 		}
 		first := !good
 		good = true
-		applyPreferred(strings.NewReader(data))
+		tn.applyPreferred(strings.NewReader(data))
 		if first {
 			// A brain that restarted, or missed a post, catches up: the
 			// connection's first event queues every live record the brain
 			// takes and the latest reading of each window (64 §5, 67 §9). Queued, not sent:
 			// nothing slow runs on the reader.
-			reportResync()
+			tn.reportResync()
 		}
 	})
 	if err == nil {

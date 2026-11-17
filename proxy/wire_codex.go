@@ -36,7 +36,16 @@ func (codexWire) prepare(info *reqInfo, body []byte, inPath string) string {
 	// "" (incumbent-follow — the brain resolves its pool's current pick). The
 	// brain's resolved name is written back so the served hop is labelled with
 	// the account that ACTUALLY answered, not the one merely asked for.
-	tok, acct, name, ok := getCodexToken(info.poolAccount)
+	// The bearer is the tenant's: its codex pool, through its actuator gate.
+	// "" is the incumbent-follow slot, which the brain resolves within the
+	// tenant's own pool; a named pool account must be one the tenant's
+	// document lists.
+	if info.poolAccount != "" {
+		if _, _, err := info.tenant.actuatorFor(info.poolAccount); err != nil {
+			return err.Error()
+		}
+	}
+	tok, acct, name, ok := info.tenant.getCodexToken(info.poolAccount)
 	if !ok {
 		return "no codex bearer (brain /openai-token unreachable and no cached bearer)"
 	}
@@ -86,7 +95,7 @@ func (w codexWire) translate(resp *http.Response, info reqInfo) *http.Response {
 	// health on. key = the SERVED member's endpoint key (snapshot, not eff —
 	// eff is overloaded on anthropic hops).
 	var hs *hopScore
-	if health != nil && info.classCtx != nil {
+	if info.classCtx != nil && info.classCtx.tenant.health != nil {
 		cc := info.classCtx
 		skey := cc.served.snapshot().member
 		hs = &hopScore{ctx: resp.Request.Context(), key: skey, cc: cc, lease: cc.leaseFor(skey)}
@@ -107,7 +116,7 @@ func (w codexWire) translate(resp *http.Response, info reqInfo) *http.Response {
 		if info.classCtx != nil {
 			model = info.classCtx.served.snapshot().model
 		}
-		led = armLedger(resp.Request.Context(), servedCheck(resp.Request, info), model)
+		led = info.tenant.armLedger(resp.Request.Context(), servedCheck(resp.Request, info), model)
 	}
 	// The served event's tokens (served.go): the upstream's own usage, which
 	// the translator reads before it scales the input and drops reasoning.
@@ -139,17 +148,24 @@ func (codexWire) clientStream(info reqInfo) bool {
 // gpt-b must never be "fixed" by silently swapping to the incumbent's bearer.
 func (codexWire) reauth(out *http.Request) bool {
 	account := ""
+	tn := tenantFrom(out.Context())
 	if info, ok := out.Context().Value(infoKey).(reqInfo); ok {
 		account = info.poolAccount
+		if info.tenant != nil {
+			tn = info.tenant
+		}
 	}
-	dropCodexToken(account)
+	if tn == nil {
+		return false
+	}
+	tn.dropCodexToken(account)
 	if account != "" {
 		// The incumbent-follow slot ("") may alias this same chain (the direct
 		// path fetches under "" and only then learns the name) — drop it too, or
 		// it keeps serving the revoked bearer for up to codexTokenFresh.
-		dropCodexToken("")
+		tn.dropCodexToken("")
 	}
-	tok, acct, _, ok := getCodexToken(account)
+	tok, acct, _, ok := tn.getCodexToken(account)
 	if !ok {
 		return false
 	}

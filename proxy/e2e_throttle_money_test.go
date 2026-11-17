@@ -29,7 +29,7 @@ func throttleWorld(env *e2eEnv, routeID string) {
 	env.nearlySpent(other, "anthropic", 50, false)
 	env.nearlySpent(native, "anthropic", 100, true)
 	env.payFrom(routeID, native+"/credits")
-	env.deny429.Store(getToken(other)) // no unified headers: a throttle
+	env.deny429.Store(lan.getToken(other)) // no unified headers: a throttle
 	env.body429.Store(`{"type":"error","error":{"type":"rate_limit_error","message":"busy"}}`)
 }
 
@@ -39,7 +39,7 @@ func TestE2ELaneThrottleDoesNotSwapToPaid(t *testing.T) {
 	defer restore()
 	throttleWorld(env, laneRouteID("fable"))
 	fetchPreferredSync()
-	if c, _ := routeCheck(laneRouteID("fable"), native, "", nowFn()); !c.paid() {
+	if c, _ := lan.routeCheck(laneRouteID("fable"), native, "", nowFn()); !c.paid() {
 		t.Fatalf("fixture: native on lane:fable = %s, want paid", c)
 	}
 	resp := env.post(t, "claude-fable-5", "CLIENT")
@@ -49,7 +49,7 @@ func TestE2ELaneThrottleDoesNotSwapToPaid(t *testing.T) {
 		t.Fatalf("status %d, want the throttle surfaced", resp.StatusCode)
 	}
 	for _, h := range anthHits(env) {
-		if h.auth == "Bearer "+getToken(native) {
+		if h.auth == "Bearer "+lan.getToken(native) {
 			t.Fatal("the lane swapped to the paid account to dodge a throttle")
 		}
 	}
@@ -70,7 +70,7 @@ func TestE2ELaneUnpaidSwapsAccount(t *testing.T) {
 			defer restore()
 			env.nearlySpent(other, "anthropic", 50, false)
 			env.nearlySpent(native, "anthropic", 30, false)
-			env.deny429.Store(getToken(other))
+			env.deny429.Store(lan.getToken(other))
 			env.denyStatus.Store(int64(c.status))
 			env.body429.Store(c.body)
 			fetchPreferredSync()
@@ -81,7 +81,7 @@ func TestE2ELaneUnpaidSwapsAccount(t *testing.T) {
 				t.Fatalf("status %d, want the other account's 200", resp.StatusCode)
 			}
 			hits := anthHits(env)
-			if len(hits) != 2 || hits[1].auth != "Bearer "+getToken(native) {
+			if len(hits) != 2 || hits[1].auth != "Bearer "+lan.getToken(native) {
 				t.Fatalf("hits = %+v, want the refusing account then %s", hits, native)
 			}
 			if got := recordsOn(other); len(got) != 1 || got[0] != "unpaid:credits" {
@@ -93,7 +93,7 @@ func TestE2ELaneUnpaidSwapsAccount(t *testing.T) {
 	defer restore()
 	env.nearlySpent(other, "anthropic", 50, false)
 	env.nearlySpent(native, "anthropic", 30, false)
-	env.deny429.Store(getToken(other))
+	env.deny429.Store(lan.getToken(other))
 	env.denyStatus.Store(400)
 	env.body429.Store(anthInvalid400)
 	fetchPreferredSync()
@@ -112,14 +112,14 @@ func TestE2EMemberThrottleDoesNotSwapToPaid(t *testing.T) {
 	throttleWorld(h.e2eEnv, "frontier/lane:fable")
 	h.bindTo.Store("lane:fable")
 	fetchPreferredSync()
-	if c, _ := routeCheck("frontier/lane:fable", native, "", nowFn()); !c.paid() {
+	if c, _ := lan.routeCheck("frontier/lane:fable", native, "", nowFn()); !c.paid() {
 		t.Fatalf("fixture: native on frontier/lane:fable = %s, want paid", c)
 	}
 	resp := h.postSess(t, "claude-frontier", "CLIENT", "sess-member-throttle")
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	for _, hit := range anthHits(h.e2eEnv) {
-		if hit.auth == "Bearer "+getToken(native) {
+		if hit.auth == "Bearer "+lan.getToken(native) {
 			t.Fatal("the member swapped to the paid account to dodge a throttle")
 		}
 	}
@@ -132,7 +132,7 @@ func TestE2EPoolThrottleDoesNotSwapToPaid(t *testing.T) {
 	h.spentWithCredits("gpt-b", "gpt")
 	h.payFrom("frontier/gpt/gpt-5.6", "gpt-b/credits")
 	fetchPreferredSync()
-	if c, _ := routeCheck("frontier/gpt/gpt-5.6", "gpt-b", "", nowFn()); !c.paid() {
+	if c, _ := lan.routeCheck("frontier/gpt/gpt-5.6", "gpt-b", "", nowFn()); !c.paid() {
 		t.Fatalf("fixture: gpt-b = %s, want paid", c)
 	}
 	h.codexDenyBearer.Store("codex-tok-gpt-a")
@@ -166,7 +166,7 @@ func TestRankUnknownUseAfterKnown(t *testing.T) {
 		}
 		return nil
 	}
-	ok, _ := rankRouteAccounts("lane:opus", "", checkRequest{}, "", []string{"a", "b"}, pct, now)
+	ok, _ := lan.rankRouteAccounts("lane:opus", "", checkRequest{}, "", []string{"a", "b"}, pct, now)
 	if len(ok) != 2 || ok[0].account != "b" {
 		t.Fatalf("ranked %v, want b (90 %%, known) before a (unknown)", ok)
 	}
@@ -178,12 +178,12 @@ func TestFailoverRouteSkipsTheRefusingAccount(t *testing.T) {
 	_, restore := newE2E(t)
 	defer restore()
 	route := laneRouteID("default")
-	cands, _ := rankRouteAccounts(route, "", checkRequest{}, "", routeAccounts(route), lanePct("default"), nowFn())
+	cands, _ := lan.rankRouteAccounts(route, "", checkRequest{}, "", lan.routeAccounts(route), lan.lanePct("default"), nowFn())
 	if len(cands) != 2 {
 		t.Fatalf("fixture: want both accounts admitted, got %v", cands)
 	}
 	first, second := cands[0].account, cands[1].account
-	if _, acct, _, ok := failoverRoute(route, "default", "", first); !ok || acct != second {
+	if _, acct, _, ok := lan.failoverRoute(route, "default", "", first); !ok || acct != second {
 		t.Fatalf("failover after %s refused = %q (%v), want %s", first, acct, ok, second)
 	}
 }

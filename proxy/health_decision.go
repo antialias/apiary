@@ -70,6 +70,7 @@ type routeDecision struct {
 
 type decisionTrace struct {
 	mu       sync.Mutex
+	tenant   *tenant // whose request: its store notes the decision, its events carry it
 	record   routeDecision
 	start    time.Time
 	out      hopOutcome
@@ -107,7 +108,7 @@ func newDecision(r *http.Request) *decisionTrace {
 	}
 	now := time.Now()
 	ent := entryFrom(r.Context())
-	return &decisionTrace{start: now, header: "none", record: routeDecision{
+	return &decisionTrace{tenant: tenantFrom(r.Context()), start: now, header: "none", record: routeDecision{
 		DecisionID: id, TS: now.UTC().Format(time.RFC3339Nano), Session: sess,
 		HopKind: "direct", Reason: "none", HealthState: "n/a", Walked: "none", Outcome: "unknown",
 		Evidence: healthEvidence{Scope: "none"}, ConversationKey: "route:" + id, Epoch: 0, Turn: 1,
@@ -250,8 +251,8 @@ func (d *decisionTrace) head(info reqInfo) {
 		r.Walked = "none"
 	}
 	r.HealthState = hsHealthy
-	if health != nil {
-		_, pinSource := pinForBinding(cc.class, cc.session, cc.bindReason)
+	if health := cc.tenant.health; health != nil {
+		_, pinSource := cc.tenant.pinForBinding(cc.class, cc.session, cc.bindReason)
 		health.mu.Lock()
 		if health.pins == nil {
 			health.pins = map[string]classPinHealth{}
@@ -330,11 +331,13 @@ func (d *decisionTrace) finish(ctx context.Context, status int) string {
 	}
 	d.record = r
 	d.mu.Unlock()
-	if health != nil {
-		health.noteRouteDecision(valueOrEmpty(r.Class), r.HopKind, r.Reason)
-	}
-	if eventsArmed() {
-		publish("route_decision", r)
+	if d.tenant != nil {
+		if health := d.tenant.health; health != nil {
+			health.noteRouteDecision(valueOrEmpty(r.Class), r.HopKind, r.Reason)
+		}
+		if eventsArmed() {
+			publish(d.tenant.id, "route_decision", r)
+		}
 	}
 	// out= is how the hop ended. On a stream that is known only here, after the
 	// 200 went out, so this is where a refused or cut-off stream shows (#132).
@@ -353,24 +356,25 @@ func valueOrEmpty(s *string) string {
 }
 
 func noteLastServed(cc *classRoute) {
-	if cc == nil || health == nil || healthModeV == healthOff {
+	if cc == nil || cc.tenant == nil || cc.tenant.health == nil || healthModeV == healthOff {
 		return
 	}
+	tn := cc.tenant
 	sv := cc.served.snapshot()
-	bindMu.Lock()
+	tn.bindMu.Lock()
 	key := cc.class + "\x00" + cc.session
-	if b, ok := bindCache[key]; ok {
+	if b, ok := tn.bindCache[key]; ok {
 		_, reason, _ := decisionRoute(cc, "")
 		b.servedMember, b.servedReason = sv.member, reason
-		bindCache[key] = b
+		tn.bindCache[key] = b
 	}
-	bindMu.Unlock()
+	tn.bindMu.Unlock()
 }
 
-func pinForBinding(class, session, fallback string) (bool, string) {
-	bindMu.Lock()
-	b, ok := bindCache[class+"\x00"+session]
-	bindMu.Unlock()
+func (tn *tenant) pinForBinding(class, session, fallback string) (bool, string) {
+	tn.bindMu.Lock()
+	b, ok := tn.bindCache[class+"\x00"+session]
+	tn.bindMu.Unlock()
 	if ok && b.pinned != nil {
 		return *b.pinned, "bind_payload"
 	}

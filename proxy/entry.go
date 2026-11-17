@@ -49,6 +49,14 @@ type entryInfo struct {
 	// which keeps every rendered field omitted on that path.
 	device string
 	user   string
+	// tenant is the member the login belongs to (MEMBERS-PLAN 1b): a device
+	// token's `mem` claim, or the lan tenant's id for a users-file login.
+	// Which tenant's state serves the request is decided from it at the
+	// entry (memberOf), never below: an id the index does not name is a
+	// typed 503 on the routed paths and leaves pass-through alone. Empty on
+	// base-URL, whose every request is the lan tenant's: clientGate stamps
+	// it (withTenant), the one place that maps :8787 to the household.
+	tenant string
 	// anon marks a CONNECT that carried NO Proxy-Authorization at all and was
 	// accepted anyway, under SWITCH_HTTPS_PROXY_ANON_PASSTHROUGH and only for
 	// api.anthropic.com:443. It has no client, no device and no user: it may

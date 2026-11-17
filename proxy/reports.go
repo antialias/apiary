@@ -163,38 +163,21 @@ type queuedReport struct {
 	gen uint64
 }
 
-var (
-	repMu sync.Mutex
-	// repQueue is what waits to be sent, by key.
-	repQueue = map[reportKey]queuedReport{}
-	repGen   uint64
-	// repLast is the last reading of each window or pot this proxy queued:
-	// the news filter's own half (reportReading), and what a resync sends
-	// again. A reading that was not news is not put here on its own account:
-	// after a refusal's own 100, a 99 a point below stays out until stale_max/2
-	// re-reports it for freshness (64 §8's known edge, narrowed, not fixed).
-	repLast = map[reportKey]reportEvent{}
-	// repServed is the served events waiting, oldest first; repServedSeq the
-	// last seq given; repServedDropped, repServedRefused and
-	// repServedUnencodable count the events the bound dropped, the brain
-	// refused, and this side could not encode (/_switch/status).
-	repServed            []*servedQueued
-	repServedSeq         int64
-	repServedDropped     int64
-	repServedRefused     int64
-	repServedUnencodable int64
-	// repLastErr is the last post's failure, "" after a clean one: shown on
-	// /_switch/status.
-	repLastErr string
-	// repWake wakes the sender; one slot, so a wake never blocks and many
-	// coalesce into one.
-	repWake = make(chan struct{}, 1)
-	// repSlot holds the one post in flight. A channel, not a mutex, so the
-	// shutdown flush gives up waiting at its bound.
-	repSlot = make(chan struct{}, 1)
-	// repRunner is the running sender (startReporter), nil when none.
-	repRunner *reporterRun
-)
+// Per tenant (MEMBERS-PLAN 1b), on the tenant struct: repMu; repQueue (what
+// waits to be sent, by key); repGen; repLast (the last reading of each window
+// or pot this proxy queued: the news filter's own half, reportReading, and
+// what a resync sends again; a reading that was not news is not put here on
+// its own account, so after a refusal's own 100, a 99 a point below stays out
+// until stale_max/2 re-reports it for freshness, 64 §8's known edge, narrowed,
+// not fixed); repServed (the served events waiting, oldest first), repServedSeq
+// (the last seq given), repServedDropped, repServedRefused and
+// repServedUnencodable (the events the bound dropped, the brain refused, and
+// this side could not encode, /_switch/status); repLastErr (the last post's
+// failure, "" after a clean one: /_switch/status); repWake (wakes the sender;
+// one slot, so a wake never blocks and many coalesce into one); repSlot (the
+// one post in flight: a channel, not a mutex, so the shutdown flush gives up
+// waiting at its bound); repRunner (the running sender, startReporter, nil
+// when none).
 
 // reporterRun is a running sender: stop ends it after its post in flight,
 // abort cancels that post too.
@@ -227,19 +210,19 @@ type servedQueued struct{ ev servedEvent }
 // reportServedEvent queues a served event under the next seq and wakes the
 // sender. Called once a request's response has ended; it never blocks beyond
 // repMu.
-func reportServedEvent(ev servedEvent) int64 {
-	repMu.Lock()
-	repServedSeq++
-	ev.id, ev.boot, ev.seq = newReportID(), repBoot, repServedSeq
-	repServed = append(repServed, &servedQueued{ev: ev})
-	for len(repServed) > reportServedMax {
-		repServed[0] = nil
-		repServed = repServed[1:]
-		repServedDropped++
+func (tn *tenant) reportServedEvent(ev servedEvent) int64 {
+	tn.repMu.Lock()
+	tn.repServedSeq++
+	ev.id, ev.boot, ev.seq = newReportID(), repBoot, tn.repServedSeq
+	tn.repServed = append(tn.repServed, &servedQueued{ev: ev})
+	for len(tn.repServed) > reportServedMax {
+		tn.repServed[0] = nil
+		tn.repServed = tn.repServed[1:]
+		tn.repServedDropped++
 	}
 	seq := ev.seq
-	repMu.Unlock()
-	reportWake()
+	tn.repMu.Unlock()
+	tn.reportWake()
 	return seq
 }
 
@@ -250,24 +233,24 @@ func newReportID() string {
 }
 
 // reportWake wakes the sender. It never blocks.
-func reportWake() {
+func (tn *tenant) reportWake() {
 	select {
-	case repWake <- struct{}{}:
+	case tn.repWake <- struct{}{}:
 	default:
 	}
 }
 
 // queueReportLocked queues ev under k unless an event of k at least as new
 // is already queued. Caller holds repMu.
-func queueReportLocked(k reportKey, ev reportEvent) {
-	if q, had := repQueue[k]; had && q.ev.readAt > ev.readAt {
+func (tn *tenant) queueReportLocked(k reportKey, ev reportEvent) {
+	if q, had := tn.repQueue[k]; had && q.ev.readAt > ev.readAt {
 		return
 	}
 	if ev.id == "" {
 		ev.id = newReportID()
 	}
-	repGen++
-	repQueue[k] = queuedReport{ev: ev, gen: repGen}
+	tn.repGen++
+	tn.repQueue[k] = queuedReport{ev: ev, gen: tn.repGen}
 }
 
 // ---- readings: only news ----
@@ -346,16 +329,16 @@ func potNews(ev reportEvent, base reportBase, known bool, staleMax float64) bool
 // reportHeaderReading queues what of account's reading from one response is
 // news; what it queues is also what a resync sends again. noteHeaderReading
 // calls it for each reading it keeps.
-func reportHeaderReading(account string, hr headerReading) {
+func (tn *tenant) reportHeaderReading(account string, hr headerReading) {
 	at := unixSeconds(hr.asOf)
 	type known struct {
 		base reportBase
 		ok   bool
 	}
 	brain := map[reportKey]known{}
-	pref.mu.RLock()
-	st, measured := pref.accounts[account]
-	staleMax := pref.staleMax
+	tn.pref.mu.RLock()
+	st, measured := tn.pref.accounts[account]
+	staleMax := tn.pref.staleMax
 	if measured && st.AsOf != nil {
 		for name := range hr.windows {
 			w, ok := st.Allowance.Windows[name]
@@ -374,7 +357,7 @@ func reportHeaderReading(account string, hr headerReading) {
 				reportBase{asOf: *st.AsOf, open: p.Open, balance: p.Balance}, true}
 		}
 	}
-	pref.mu.RUnlock()
+	tn.pref.mu.RUnlock()
 
 	var evs []reportEvent
 	names := make([]string, 0, len(hr.windows))
@@ -405,10 +388,10 @@ func reportHeaderReading(account string, hr headerReading) {
 		return
 	}
 	queued := false
-	repMu.Lock()
+	tn.repMu.Lock()
 	for _, ev := range evs {
 		k := reportKey{kind: reportReading, account: account, window: ev.window, pot: ev.pot}
-		last, lastOK := repLast[k]
+		last, lastOK := tn.repLast[k]
 		base, ok := newerBase(brain[k].base, brain[k].ok, last, lastOK)
 		news := windowNews(ev, base, ok, staleMax)
 		if ev.pot != "" {
@@ -417,13 +400,13 @@ func reportHeaderReading(account string, hr headerReading) {
 		if !news {
 			continue
 		}
-		repLast[k] = ev
-		queueReportLocked(k, ev)
+		tn.repLast[k] = ev
+		tn.queueReportLocked(k, ev)
 		queued = true
 	}
-	repMu.Unlock()
+	tn.repMu.Unlock()
 	if queued {
-		reportWake()
+		tn.reportWake()
 	}
 }
 
@@ -431,10 +414,10 @@ func reportHeaderReading(account string, hr headerReading) {
 
 // apiMoneyPot is the name of account's money pot when the brain's document
 // says it is an api account (one money pot), else "".
-func apiMoneyPot(account string) string {
-	pref.mu.RLock()
-	st, ok := pref.accounts[account]
-	pref.mu.RUnlock()
+func (tn *tenant) apiMoneyPot(account string) string {
+	tn.pref.mu.RLock()
+	st, ok := tn.pref.accounts[account]
+	tn.pref.mu.RUnlock()
 	if !ok || st.Kind != "api" || len(st.Money) != 1 {
 		return ""
 	}
@@ -450,18 +433,18 @@ func apiMoneyPot(account string) string {
 // ledger entry on the pot or the owner's re-check is newer. The household
 // doors call it from their money refusals, and recordRefusal from any unpaid
 // refusal on an api account's pot.
-func reportPotShut(account, pot string, at time.Time) {
+func (tn *tenant) reportPotShut(account, pot string, at time.Time) {
 	if account == "" || pot == "" {
 		return
 	}
 	shut := false
 	ev := reportEvent{kind: reportReading, account: account, readAt: unixSeconds(at), pot: pot, open: &shut}
 	k := reportKey{kind: reportReading, account: account, pot: pot}
-	repMu.Lock()
-	repLast[k] = ev
-	queueReportLocked(k, ev)
-	repMu.Unlock()
-	reportWake()
+	tn.repMu.Lock()
+	tn.repLast[k] = ev
+	tn.queueReportLocked(k, ev)
+	tn.repMu.Unlock()
+	tn.reportWake()
 }
 
 // ---- refusals ----
@@ -471,7 +454,7 @@ func reportPotShut(account, pot string, at time.Time) {
 // the limit model:<m> (its key); a pool's, spent, as pool:<name>. ok is false
 // for every other record, and for any record of an api account (Runway's
 // are money, outside 65's figure): those are not sent.
-func reportedAs(account, limit string, r refusalRecord) (window, lim string, ok bool) {
+func (tn *tenant) reportedAs(account, limit string, r refusalRecord) (window, lim string, ok bool) {
 	switch {
 	case r.kind == recSpent && r.limKind == limWindow:
 		window = limit
@@ -482,9 +465,9 @@ func reportedAs(account, limit string, r refusalRecord) (window, lim string, ok 
 	default:
 		return "", "", false
 	}
-	pref.mu.RLock()
-	st, known := pref.accounts[account]
-	pref.mu.RUnlock()
+	tn.pref.mu.RLock()
+	st, known := tn.pref.accounts[account]
+	tn.pref.mu.RUnlock()
 	if known && st.Kind == "api" {
 		return "", "", false
 	}
@@ -518,18 +501,18 @@ func refusalEvent(account, window, lim string, r refusalRecord, ended bool, at t
 
 // reportRecord queues a record's refusal, or its end, when the brain takes
 // it (reportedAs).
-func reportRecord(account, limit string, r refusalRecord, ended bool, at time.Time) {
+func (tn *tenant) reportRecord(account, limit string, r refusalRecord, ended bool, at time.Time) {
 	if account == "" || limit == "" {
 		return
 	}
-	window, lim, ok := reportedAs(account, limit, r)
+	window, lim, ok := tn.reportedAs(account, limit, r)
 	if !ok {
 		return
 	}
-	repMu.Lock()
-	queueReportLocked(refusalKey(account, window, lim), refusalEvent(account, window, lim, r, ended, at))
-	repMu.Unlock()
-	reportWake()
+	tn.repMu.Lock()
+	tn.queueReportLocked(refusalKey(account, window, lim), refusalEvent(account, window, lim, r, ended, at))
+	tn.repMu.Unlock()
+	tn.reportWake()
 }
 
 // reportResync queues every live record the brain takes and the last reading reported
@@ -539,7 +522,7 @@ func reportRecord(account, limit string, r refusalRecord, ended bool, at time.Ti
 // refusal early. Once stale_max/2 re-reports that 99 it is the last reported,
 // and the edge remains (64 §8). It runs on each stream connection's first
 // event: no network, only the queue.
-func reportResync() {
+func (tn *tenant) reportResync() {
 	now := nowFn()
 	type rec struct {
 		k          recKey
@@ -547,25 +530,25 @@ func reportResync() {
 		window, li string
 	}
 	var live, recs []rec
-	recMu.Lock()
-	for k, r := range records {
+	tn.recMu.Lock()
+	for k, r := range tn.records {
 		if r.live(now) {
 			live = append(live, rec{k: k, r: r})
 		}
 	}
-	recMu.Unlock()
+	tn.recMu.Unlock()
 	// reportedAs reads the brain's document: never under recMu.
 	for _, x := range live {
-		if window, lim, ok := reportedAs(x.k.account, x.k.limit, x.r); ok {
+		if window, lim, ok := tn.reportedAs(x.k.account, x.k.limit, x.r); ok {
 			recs = append(recs, rec{x.k, x.r, window, lim})
 		}
 	}
 	sort.Slice(recs, func(i, j int) bool {
 		return recs[i].k.account+"/"+recs[i].k.limit < recs[j].k.account+"/"+recs[j].k.limit
 	})
-	repMu.Lock()
-	keys := make([]reportKey, 0, len(repLast))
-	for k := range repLast {
+	tn.repMu.Lock()
+	keys := make([]reportKey, 0, len(tn.repLast))
+	for k := range tn.repLast {
 		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(i, j int) bool {
@@ -573,49 +556,51 @@ func reportResync() {
 		return a.account+"/"+a.window+"/"+a.pot < b.account+"/"+b.window+"/"+b.pot
 	})
 	for _, k := range keys {
-		ev := repLast[k]
+		ev := tn.repLast[k]
 		ev.id = ""
-		queueReportLocked(k, ev)
+		tn.queueReportLocked(k, ev)
 	}
 	for _, x := range recs {
-		queueReportLocked(refusalKey(x.k.account, x.window, x.li),
+		tn.queueReportLocked(refusalKey(x.k.account, x.window, x.li),
 			refusalEvent(x.k.account, x.window, x.li, x.r, false, time.Time{}))
 	}
 	n := len(keys) + len(recs)
-	repMu.Unlock()
+	tn.repMu.Unlock()
 	if n > 0 {
-		reportWake()
+		tn.reportWake()
 	}
 }
 
 // ---- the sender ----
 
-// startReporter starts the one sender against brain with key; stopReporter
-// ends it. Production starts it once, beside the brain stream.
-func startReporter(brain, key string) {
+// startReporter starts the tenant's one sender against its brain routes
+// (tenant.brainURL + /reports) with switchKey; stopReporter ends it.
+// tenant.start starts it, beside the brain stream.
+func (tn *tenant) startReporter() {
+	brain, key := tn.brainURL(), switchKey
 	loop, stop := context.WithCancel(context.Background())
 	post, abort := context.WithCancel(context.Background())
 	run := &reporterRun{stop: stop, abort: abort, done: make(chan struct{})}
-	repMu.Lock()
-	repRunner = run
-	repMu.Unlock()
+	tn.repMu.Lock()
+	tn.repRunner = run
+	tn.repMu.Unlock()
 	go func() {
 		defer close(run.done)
 		defer abort()
-		runReporter(loop, post, brain, key)
+		tn.runReporter(loop, post, brain, key)
 	}()
-	reportWake() // whatever was queued before it started
+	tn.reportWake() // whatever was queued before it started
 }
 
 // stopReporter ends the sender and waits for it: a post in flight may finish
 // until bound ends, and is then cancelled, what it carried staying queued
 // (a resend is safe: the brain dedupes ledger ids, and a reading or a refusal
 // applied twice changes nothing). A no-op when none runs.
-func stopReporter(bound context.Context) {
-	repMu.Lock()
-	run := repRunner
-	repRunner = nil
-	repMu.Unlock()
+func (tn *tenant) stopReporter(bound context.Context) {
+	tn.repMu.Lock()
+	run := tn.repRunner
+	tn.repRunner = nil
+	tn.repMu.Unlock()
 	if run == nil {
 		return
 	}
@@ -632,16 +617,16 @@ func stopReporter(bound context.Context) {
 // flight): on each wake, posts until nothing is left, backing off after a
 // post that failed or left something to retry. A wake during the backoff
 // waits for it.
-func runReporter(loop, post context.Context, brain, key string) {
+func (tn *tenant) runReporter(loop, post context.Context, brain, key string) {
 	var wait time.Duration
 	for {
 		select {
 		case <-loop.Done():
 			return
-		case <-repWake:
+		case <-tn.repWake:
 		}
 		for loop.Err() == nil {
-			ok, more := reportPost(post, brain, key)
+			ok, more := tn.reportPost(post, brain, key)
 			if loop.Err() != nil || post.Err() != nil {
 				return
 			}
@@ -688,19 +673,19 @@ type sentReport struct {
 // because the queue is bounded by its keys, so it can never starve the
 // ledger, while ledger entries the brain keeps asking for again could starve
 // every reading behind them. Served events come last: they move no dial.
-func reportBatch() []sentReport {
-	repMu.Lock()
-	out := make([]sentReport, 0, len(repQueue))
-	for k, q := range repQueue {
+func (tn *tenant) reportBatch() []sentReport {
+	tn.repMu.Lock()
+	out := make([]sentReport, 0, len(tn.repQueue))
+	for k, q := range tn.repQueue {
 		out = append(out, sentReport{key: k, gen: q.gen, id: q.ev.id, body: q.ev.wire()})
 	}
-	repMu.Unlock()
+	tn.repMu.Unlock()
 	sort.Slice(out, func(i, j int) bool { return out[i].gen < out[j].gen })
 	if len(out) > reportBatchMax {
 		out = out[:reportBatchMax]
 	}
-	ledgerMu.Lock()
-	for _, o := range ledgerOwn {
+	tn.ledgerMu.Lock()
+	for _, o := range tn.ledgerOwn {
 		if len(out) == reportBatchMax {
 			break
 		}
@@ -708,43 +693,43 @@ func reportBatch() []sentReport {
 			out = append(out, sentReport{entry: o, id: o.e.ID, body: ledgerEvent{Kind: reportLedger, ledgerEntry: o.e}})
 		}
 	}
-	ledgerMu.Unlock()
-	repMu.Lock()
-	for _, q := range repServed {
+	tn.ledgerMu.Unlock()
+	tn.repMu.Lock()
+	for _, q := range tn.repServed {
 		if len(out) == reportBatchMax {
 			break
 		}
 		out = append(out, sentReport{srv: q, id: q.ev.id, body: q.ev.wire()})
 	}
-	repMu.Unlock()
+	tn.repMu.Unlock()
 	return out
 }
 
 // dropServedLocked takes the served events in done out of the queue. Caller
 // holds repMu.
-func dropServedLocked(done map[*servedQueued]bool) {
+func (tn *tenant) dropServedLocked(done map[*servedQueued]bool) {
 	if len(done) == 0 {
 		return
 	}
-	kept := repServed[:0]
-	for _, q := range repServed {
+	kept := tn.repServed[:0]
+	for _, q := range tn.repServed {
 		if !done[q] {
 			kept = append(kept, q)
 		}
 	}
-	clear(repServed[len(kept):])
-	repServed = kept
+	clear(tn.repServed[len(kept):])
+	tn.repServed = kept
 }
 
 // reportEncode encodes each event of batch on its own. One that cannot be
 // encoded (reportDrop) leaves the post, and the rest still go.
-func reportEncode(batch []sentReport) ([]sentReport, []json.RawMessage) {
+func (tn *tenant) reportEncode(batch []sentReport) ([]sentReport, []json.RawMessage) {
 	kept := batch[:0:0]
 	var events []json.RawMessage
 	for _, s := range batch {
 		b, err := json.Marshal(s.body)
 		if err != nil {
-			reportDrop(s, err)
+			tn.reportDrop(s, err)
 			continue
 		}
 		kept = append(kept, s)
@@ -756,30 +741,30 @@ func reportEncode(batch []sentReport) ([]sentReport, []json.RawMessage) {
 // reportDrop drops an event that cannot be encoded, as a refusal is dropped:
 // a queued event leaves the queue (unless replaced since), a ledger entry is
 // kept and counted here and never posted.
-func reportDrop(s sentReport, err error) {
+func (tn *tenant) reportDrop(s sentReport, err error) {
 	why := "cannot be encoded: " + err.Error()
 	if s.entry != nil {
-		ledgerMu.Lock()
+		tn.ledgerMu.Lock()
 		s.entry.refused = why
-		ledgerLastErr = "dropped: " + s.id + ": " + why
-		ledgerMu.Unlock()
+		tn.ledgerLastErr = "dropped: " + s.id + ": " + why
+		tn.ledgerMu.Unlock()
 		log.Printf("ledger: %s on %s %s; counted here, never posted", s.id, s.entry.e.potID(), why)
 		return
 	}
-	repMu.Lock()
+	tn.repMu.Lock()
 	if s.srv != nil {
-		dropServedLocked(map[*servedQueued]bool{s.srv: true})
-		repServedUnencodable++
-		repLastErr = "dropped: " + s.id + ": " + why
-		repMu.Unlock()
+		tn.dropServedLocked(map[*servedQueued]bool{s.srv: true})
+		tn.repServedUnencodable++
+		tn.repLastErr = "dropped: " + s.id + ": " + why
+		tn.repMu.Unlock()
 		log.Printf("reports: a served event of %s (seq %d) %s; dropped", s.srv.ev.account, s.srv.ev.seq, why)
 		return
 	}
-	if q, had := repQueue[s.key]; had && q.gen == s.gen {
-		delete(repQueue, s.key)
+	if q, had := tn.repQueue[s.key]; had && q.gen == s.gen {
+		delete(tn.repQueue, s.key)
 	}
-	repLastErr = "dropped: " + s.id + ": " + why
-	repMu.Unlock()
+	tn.repLastErr = "dropped: " + s.id + ": " + why
+	tn.repMu.Unlock()
 	log.Printf("reports: a %s of %s %s%s%s %s; dropped", s.key.kind, s.key.account, s.key.window, s.key.limit, s.key.pot, why)
 }
 
@@ -793,16 +778,16 @@ type reportResult struct {
 // reportPost makes one post of what is queued. ok: the post was answered and
 // nothing in it is left to retry (an empty queue is ok). more: something is
 // still queued after it.
-func reportPost(ctx context.Context, brain, key string) (ok, more bool) {
+func (tn *tenant) reportPost(ctx context.Context, brain, key string) (ok, more bool) {
 	select {
-	case repSlot <- struct{}{}:
+	case tn.repSlot <- struct{}{}:
 	case <-ctx.Done():
-		return false, reportsPending() > 0 // its events stay queued, as after a failed post
+		return false, tn.reportsPending() > 0 // its events stay queued, as after a failed post
 	}
-	defer func() { <-repSlot }()
-	batch, events := reportEncode(reportBatch())
+	defer func() { <-tn.repSlot }()
+	batch, events := tn.reportEncode(tn.reportBatch())
 	if len(batch) == 0 {
-		return true, reportsPending() > 0 // never an empty post
+		return true, tn.reportsPending() > 0 // never an empty post
 	}
 	hasLedger := false
 	for _, s := range batch {
@@ -810,7 +795,7 @@ func reportPost(ctx context.Context, brain, key string) (ok, more bool) {
 	}
 	body, err := json.Marshal(map[string]any{"reporter": reportHost(), "events": events})
 	if err != nil { // raw events already encoded: cannot happen
-		reportFailed(fmt.Sprintf("POST /reports: encoding the post: %v", err), len(batch), hasLedger)
+		tn.reportFailed(fmt.Sprintf("POST /reports: encoding the post: %v", err), len(batch), hasLedger)
 		return false, true
 	}
 	req, _ := http.NewRequestWithContext(ctx, "POST", brain+"/reports", bytes.NewReader(body))
@@ -818,7 +803,7 @@ func reportPost(ctx context.Context, brain, key string) (ok, more bool) {
 	req.Header.Set("X-Switch-Key", key)
 	resp, err := brainClient.Do(req)
 	if err != nil {
-		reportFailed(fmt.Sprintf("POST /reports: %v", err), len(batch), hasLedger)
+		tn.reportFailed(fmt.Sprintf("POST /reports: %v", err), len(batch), hasLedger)
 		return false, true
 	}
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -830,32 +815,32 @@ func reportPost(ctx context.Context, brain, key string) (ok, more bool) {
 	jerr := json.Unmarshal(b, &out)
 	switch {
 	case resp.StatusCode != http.StatusOK:
-		reportFailed(fmt.Sprintf("POST /reports: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(b))), len(batch), hasLedger)
+		tn.reportFailed(fmt.Sprintf("POST /reports: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(b))), len(batch), hasLedger)
 		return false, true
 	case jerr != nil || len(out.Results) != len(batch):
-		reportFailed(fmt.Sprintf("POST /reports: %d result(s) for %d event(s)", len(out.Results), len(batch)), len(batch), hasLedger)
+		tn.reportFailed(fmt.Sprintf("POST /reports: %d result(s) for %d event(s)", len(out.Results), len(batch)), len(batch), hasLedger)
 		return false, true
 	}
 	for i, r := range out.Results {
 		if r.ID != batch[i].id {
-			reportFailed(fmt.Sprintf("POST /reports: result %d is for %q, not %q", i, r.ID, batch[i].id), len(batch), hasLedger)
+			tn.reportFailed(fmt.Sprintf("POST /reports: result %d is for %q, not %q", i, r.ID, batch[i].id), len(batch), hasLedger)
 			return false, true
 		}
 		if batch[i].entry != nil && (r.Result == "applied" || r.Result == "ignored") && out.Seq <= 0 {
-			reportFailed("POST /reports: a ledger entry taken with no seq", len(batch), hasLedger)
+			tn.reportFailed("POST /reports: a ledger entry taken with no seq", len(batch), hasLedger)
 			return false, true
 		}
 	}
-	return reportApply(batch, out.Results, out.Seq)
+	return tn.reportApply(batch, out.Results, out.Seq)
 }
 
 // reportApply settles a post's results: applied and ignored are done (a
 // ledger entry accepted at seq), refused is dropped (a ledger entry is kept
 // and counted, never posted again), retry stays.
-func reportApply(batch []sentReport, results []reportResult, seq int64) (ok, more bool) {
+func (tn *tenant) reportApply(batch []sentReport, results []reportResult, seq int64) (ok, more bool) {
 	var refused, retry []string
 	ledgerAccepted := false
-	ledgerMu.Lock()
+	tn.ledgerMu.Lock()
 	for i, s := range batch {
 		if s.entry == nil {
 			continue
@@ -878,14 +863,14 @@ func reportApply(batch []sentReport, results []reportResult, seq int64) (ok, mor
 		}
 	}
 	if ledgerAccepted {
-		ledgerLastErr = ""
+		tn.ledgerLastErr = ""
 	}
 	if n := len(refused); n > 0 {
-		ledgerLastErr = "refused: " + strings.Join(refused, "; ")
+		tn.ledgerLastErr = "refused: " + strings.Join(refused, "; ")
 	}
-	ledgerMu.Unlock()
+	tn.ledgerMu.Unlock()
 
-	repMu.Lock()
+	tn.repMu.Lock()
 	done := map[*servedQueued]bool{}
 	for i, s := range batch {
 		if s.entry != nil {
@@ -897,7 +882,7 @@ func reportApply(batch []sentReport, results []reportResult, seq int64) (ok, mor
 			case "applied", "ignored", "refused":
 				done[s.srv] = true
 				if r.Result == "refused" {
-					repServedRefused++
+					tn.repServedRefused++
 					refused = append(refused, s.id+": "+r.Why)
 					log.Printf("reports: the brain refused a served event of %s (seq %d): %s; not sent again",
 						s.srv.ev.account, s.srv.ev.seq, r.Why)
@@ -909,8 +894,8 @@ func reportApply(batch []sentReport, results []reportResult, seq int64) (ok, mor
 		}
 		switch r.Result {
 		case "applied", "ignored", "refused":
-			if q, had := repQueue[s.key]; had && q.gen == s.gen {
-				delete(repQueue, s.key)
+			if q, had := tn.repQueue[s.key]; had && q.gen == s.gen {
+				delete(tn.repQueue, s.key)
 			}
 			if r.Result == "refused" {
 				refused = append(refused, s.id+": "+r.Why)
@@ -921,38 +906,38 @@ func reportApply(batch []sentReport, results []reportResult, seq int64) (ok, mor
 			retry = append(retry, s.id+": "+r.Result+" "+r.Why)
 		}
 	}
-	dropServedLocked(done)
-	was := repLastErr
+	tn.dropServedLocked(done)
+	was := tn.repLastErr
 	switch {
 	case len(retry) > 0:
-		repLastErr = "retry: " + strings.Join(retry, "; ")
+		tn.repLastErr = "retry: " + strings.Join(retry, "; ")
 	case len(refused) > 0:
-		repLastErr = "refused: " + strings.Join(refused, "; ")
+		tn.repLastErr = "refused: " + strings.Join(refused, "; ")
 	default:
-		repLastErr = ""
+		tn.repLastErr = ""
 	}
-	now := repLastErr
-	repMu.Unlock()
+	now := tn.repLastErr
+	tn.repMu.Unlock()
 	if len(retry) > 0 && now != was {
 		log.Printf("reports: the brain asked for %d event(s) again; kept for the next post", len(retry))
 	}
 	if was != "" && !strings.HasPrefix(was, "refused") && now == "" {
 		log.Printf("reports: the brain takes reports again")
 	}
-	return len(retry) == 0, reportsPending() > 0
+	return len(retry) == 0, tn.reportsPending() > 0
 }
 
 // reportFailed notes a post that failed: everything in it stays queued. It
 // logs a failure that differs from the last one.
-func reportFailed(why string, n int, hasLedger bool) {
-	repMu.Lock()
-	was := repLastErr
-	repLastErr = why
-	repMu.Unlock()
+func (tn *tenant) reportFailed(why string, n int, hasLedger bool) {
+	tn.repMu.Lock()
+	was := tn.repLastErr
+	tn.repLastErr = why
+	tn.repMu.Unlock()
 	if hasLedger {
-		ledgerMu.Lock()
-		ledgerLastErr = why
-		ledgerMu.Unlock()
+		tn.ledgerMu.Lock()
+		tn.ledgerLastErr = why
+		tn.ledgerMu.Unlock()
 	}
 	if why != was {
 		log.Printf("reports: %s; %d event(s) kept for the next post", why, n)
@@ -961,18 +946,18 @@ func reportFailed(why string, n int, hasLedger bool) {
 
 // reportsPending is how many events wait: queued readings and refusals, and
 // ledger entries the brain has not accepted (refused ones excepted).
-func reportsPending() int {
-	ledgerMu.Lock()
+func (tn *tenant) reportsPending() int {
+	tn.ledgerMu.Lock()
 	n := 0
-	for _, o := range ledgerOwn {
+	for _, o := range tn.ledgerOwn {
 		if o.seq == 0 && o.refused == "" {
 			n++
 		}
 	}
-	ledgerMu.Unlock()
-	repMu.Lock()
-	n += len(repQueue) + len(repServed)
-	repMu.Unlock()
+	tn.ledgerMu.Unlock()
+	tn.repMu.Lock()
+	n += len(tn.repQueue) + len(tn.repServed)
+	tn.repMu.Unlock()
 	return n
 }
 
@@ -982,33 +967,33 @@ func reportsPending() int {
 // queued goes in one post, so an entry settled during the drain, or left by a
 // post that failed, is not lost to the restart when the brain can take it.
 // What is still unposted after it is lost (ledger.go's header).
-func reportsFlush() {
+func (tn *tenant) reportsFlush() {
 	ctx, cancel := context.WithTimeout(context.Background(), reportShutdownPost)
 	defer cancel()
-	stopReporter(ctx)
-	if brainURL == "" {
+	tn.stopReporter(ctx)
+	if tn.brainURL() == "" {
 		return
 	}
 	for {
-		ok, more := reportPost(ctx, brainURL, switchKey)
+		ok, more := tn.reportPost(ctx, tn.brainURL(), switchKey)
 		if !ok || !more || ctx.Err() != nil {
 			break
 		}
 	}
-	ledgerMu.Lock()
+	tn.ledgerMu.Lock()
 	n := 0
-	for _, o := range ledgerOwn {
+	for _, o := range tn.ledgerOwn {
 		if o.seq == 0 && o.refused == "" {
 			n++
 		}
 	}
-	ledgerMu.Unlock()
+	tn.ledgerMu.Unlock()
 	if n > 0 {
 		log.Printf("ledger: shutdown with %d entr(ies) the brain has not accepted; lost to its ledger", n)
 	}
-	repMu.Lock()
-	ns := len(repServed)
-	repMu.Unlock()
+	tn.repMu.Lock()
+	ns := len(tn.repServed)
+	tn.repMu.Unlock()
 	if ns > 0 {
 		log.Printf("reports: shutdown with %d served event(s) unsent; the brain sees the seq gap", ns)
 	}
@@ -1017,11 +1002,41 @@ func reportsFlush() {
 // reportsStatus is /_switch/status's reports block: how many events wait, the
 // last post's failure, and the served events: this process's boot and last
 // seq, how many wait, and how many the bound dropped and the brain refused.
-func reportsStatus() map[string]any {
-	n := reportsPending()
-	repMu.Lock()
-	defer repMu.Unlock()
-	return map[string]any{"pending": n, "last_error": repLastErr,
-		"served": map[string]any{"boot": repBoot, "seq": repServedSeq, "pending": len(repServed),
-			"dropped": repServedDropped, "refused": repServedRefused, "unencodable": repServedUnencodable}}
+func (tn *tenant) reportsStatus() map[string]any {
+	n := tn.reportsPending()
+	tn.repMu.Lock()
+	defer tn.repMu.Unlock()
+	return map[string]any{"pending": n, "last_error": tn.repLastErr,
+		"served": map[string]any{"boot": repBoot, "seq": tn.repServedSeq, "pending": len(tn.repServed),
+			"dropped": tn.repServedDropped, "refused": tn.repServedRefused, "unencodable": tn.repServedUnencodable}}
+}
+
+// reportsFlushAll is shutdown's last act for every tenant, each bounded by
+// reportShutdownPost; the flushes run together so the bound is the whole's.
+func reportsFlushAll() {
+	var wg sync.WaitGroup
+	for _, tn := range allTenants() {
+		wg.Add(1)
+		go func(tn *tenant) { defer wg.Done(); tn.reportsFlush() }(tn)
+	}
+	wg.Wait()
+}
+
+// stopReporterNow ends the tenant's sender, cutting a post in flight, and
+// waits for it to return, bounded: for a tenant that left the index.
+func (tn *tenant) stopReporterNow(bound context.Context) {
+	tn.repMu.Lock()
+	run := tn.repRunner
+	tn.repRunner = nil
+	tn.repMu.Unlock()
+	if run == nil {
+		return
+	}
+	run.abort()
+	run.stop()
+	select {
+	case <-run.done:
+	case <-bound.Done():
+		log.Printf("⚠️  reports: %s: the sender did not return after its stop", tn.id)
+	}
 }

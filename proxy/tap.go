@@ -39,7 +39,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -79,10 +78,7 @@ type tapConv struct {
 	seen   time.Time
 }
 
-var (
-	tapMu    sync.Mutex
-	tapConvs = map[string]*tapConv{}
-)
+// Per tenant: tenant.tapMu, tenant.tapConvs.
 
 // tapAdvance moves a conversation's cursor and reports what this request is owed: the
 // index of the first message to emit, the epoch it belongs to, and whether this event
@@ -91,20 +87,20 @@ var (
 // LOCK ORDER: tapMu is a leaf, like hub.mu, and the two are never held together —
 // tapTurn calls this, unlocks, and only then reaches publish(). Nesting hub.mu inside
 // anything is the one thing events.go's append() forbids.
-func tapAdvance(key string, count int, now time.Time) (from, epoch int, compacted bool, turn int64) {
-	tapMu.Lock()
-	defer tapMu.Unlock()
-	return tapAdvanceLocked(key, count, now)
+func (tn *tenant) tapAdvance(key string, count int, now time.Time) (from, epoch int, compacted bool, turn int64) {
+	tn.tapMu.Lock()
+	defer tn.tapMu.Unlock()
+	return tn.tapAdvanceLocked(key, count, now)
 }
 
 // tapAdvanceLocked is tapAdvance's body, shared with tapAdvanceThread so a continue's
 // anchor lookup and its cursor move happen under one hold of tapMu. Caller holds tapMu.
-func tapAdvanceLocked(key string, count int, now time.Time) (from, epoch int, compacted bool, turn int64) {
-	c := tapConvs[key]
+func (tn *tenant) tapAdvanceLocked(key string, count int, now time.Time) (from, epoch int, compacted bool, turn int64) {
+	c := tn.tapConvs[key]
 	if c == nil {
-		tapEvictLocked(now)
+		tn.tapEvictLocked(now)
 		c = &tapConv{epoch: 1}
-		tapConvs[key] = c
+		tn.tapConvs[key] = c
 	}
 	if count < c.cursor {
 		// The array got SHORTER. That is /compact (or Claude Code's mid-session
@@ -131,18 +127,18 @@ func tapAdvanceLocked(key string, count int, now time.Time) (from, epoch int, co
 // one-shot haiku title call mints one — so this map is a slow leak unless something
 // prunes it. Sweep expired entries first (the normal case, and it usually clears the
 // pressure on its own), then evict least-recently-seen until back under the cap.
-func tapEvictLocked(now time.Time) {
-	if len(tapConvs) < tapMaxConvs {
+func (tn *tenant) tapEvictLocked(now time.Time) {
+	if len(tn.tapConvs) < tapMaxConvs {
 		return
 	}
-	for k, c := range tapConvs {
+	for k, c := range tn.tapConvs {
 		if now.Sub(c.seen) > tapConvTTL {
-			delete(tapConvs, k)
+			delete(tn.tapConvs, k)
 		}
 	}
-	for len(tapConvs) >= tapMaxConvs {
+	for len(tn.tapConvs) >= tapMaxConvs {
 		oldest, at := "", time.Time{}
-		for k, c := range tapConvs {
+		for k, c := range tn.tapConvs {
 			if at.IsZero() || c.seen.Before(at) {
 				oldest, at = k, c.seen
 			}
@@ -150,7 +146,7 @@ func tapEvictLocked(now time.Time) {
 		if oldest == "" {
 			return
 		}
-		delete(tapConvs, oldest)
+		delete(tn.tapConvs, oldest)
 	}
 }
 
@@ -180,23 +176,22 @@ type tapAnchor struct {
 	seen      time.Time
 }
 
-// tapAnchors is guarded by tapMu, like tapConvs: the lookup and the cursor move it feeds
+// tenant.tapAnchors is guarded by tapMu, like tapConvs: the lookup and the cursor move it feeds
 // must be one step, or two continues racing on one anchor could each read a stale cursor.
-var tapAnchors = map[string]tapAnchor{}
 
 // tapRememberReply records the reply id the response tap read off message_start. It is
 // only ever reached from a response tap, which only exists while the hub is armed, so
 // the cold path never gets here.
-func tapRememberReply(msgID string, id *tapRespIdent, now time.Time) {
+func (tn *tenant) tapRememberReply(msgID string, id *tapRespIdent, now time.Time) {
 	if msgID == "" || len(msgID) > tapMaxAnchorID || id == nil || !id.ok || id.tapKey == "" {
 		return
 	}
-	tapMu.Lock()
-	defer tapMu.Unlock()
-	if _, ok := tapAnchors[msgID]; !ok {
-		tapEvictAnchorsLocked(now)
+	tn.tapMu.Lock()
+	defer tn.tapMu.Unlock()
+	if _, ok := tn.tapAnchors[msgID]; !ok {
+		tn.tapEvictAnchorsLocked(now)
 	}
-	tapAnchors[msgID] = tapAnchor{
+	tn.tapAnchors[msgID] = tapAnchor{
 		key:       id.tapKey,
 		sess:      id.sess,
 		convKey:   id.convKey,
@@ -209,18 +204,18 @@ func tapRememberReply(msgID string, id *tapRespIdent, now time.Time) {
 
 // tapEvictAnchorsLocked bounds tapAnchors exactly as tapEvictLocked bounds tapConvs —
 // every reply of every conversation lands here, so it fills far faster. Caller holds tapMu.
-func tapEvictAnchorsLocked(now time.Time) {
-	if len(tapAnchors) < tapMaxAnchors {
+func (tn *tenant) tapEvictAnchorsLocked(now time.Time) {
+	if len(tn.tapAnchors) < tapMaxAnchors {
 		return
 	}
-	for k, a := range tapAnchors {
+	for k, a := range tn.tapAnchors {
 		if now.Sub(a.seen) > tapConvTTL {
-			delete(tapAnchors, k)
+			delete(tn.tapAnchors, k)
 		}
 	}
-	for len(tapAnchors) >= tapMaxAnchors {
+	for len(tn.tapAnchors) >= tapMaxAnchors {
 		oldest, at := "", time.Time{}
-		for k, a := range tapAnchors {
+		for k, a := range tn.tapAnchors {
 			if at.IsZero() || a.seen.Before(at) {
 				oldest, at = k, a.seen
 			}
@@ -228,7 +223,7 @@ func tapEvictAnchorsLocked(now time.Time) {
 		if oldest == "" {
 			return
 		}
-		delete(tapAnchors, oldest)
+		delete(tn.tapAnchors, oldest)
 	}
 }
 
@@ -249,20 +244,20 @@ type tapThreadAdvance struct {
 // restarted, or another process served the create), another session's reply, or a
 // conversation that has since been evicted or moved to a new epoch, where the anchor's
 // index no longer means anything. A miss is never resolved by guessing.
-func tapAdvanceThread(prevID, sess string, delta int, now time.Time) (tapThreadAdvance, bool) {
-	tapMu.Lock()
-	defer tapMu.Unlock()
-	a, ok := tapAnchors[prevID]
+func (tn *tenant) tapAdvanceThread(prevID, sess string, delta int, now time.Time) (tapThreadAdvance, bool) {
+	tn.tapMu.Lock()
+	defer tn.tapMu.Unlock()
+	a, ok := tn.tapAnchors[prevID]
 	if !ok || a.sess != sess {
 		return tapThreadAdvance{}, false
 	}
-	if c := tapConvs[a.key]; c == nil || c.epoch != a.epoch {
+	if c := tn.tapConvs[a.key]; c == nil || c.epoch != a.epoch {
 		return tapThreadAdvance{}, false
 	}
 	a.seen = now
-	tapAnchors[prevID] = a
+	tn.tapAnchors[prevID] = a
 	r := tapThreadAdvance{anchor: a, total: a.index + 1 + delta}
-	r.from, r.epoch, r.compacted, r.turn = tapAdvanceLocked(a.key, r.total, now)
+	r.from, r.epoch, r.compacted, r.turn = tn.tapAdvanceLocked(a.key, r.total, now)
 	return r, true
 }
 
@@ -302,9 +297,9 @@ type tapTurnEvent struct {
 	// be wrong (sub-agents are the part most likely to be), scry can regroup on this
 	// composite, or on Session / ContentFP separately, with no proxy redeploy.
 	ConversationKey string `json:"conversation_key"`
-	Session         string `json:"session"`     // fpSess of x-claude-code-session-id
-	SessionKey      string `json:"session_key"` // opaque full hash accepted by #66's enqueue endpoint
-	ContentFP       string `json:"content_fp"`  // fingerprint(system + first user message)
+	Session         string `json:"session"`              // fpSess of x-claude-code-session-id
+	SessionKey      string `json:"session_key"`          // opaque full hash accepted by #66's enqueue endpoint
+	ContentFP       string `json:"content_fp,omitempty"` // fingerprint(system + first user message); withheld under the metadata tap
 
 	Epoch     int   `json:"epoch"`
 	Compacted bool  `json:"compacted"` // this event opens a new epoch
@@ -373,8 +368,16 @@ type tapTurnEvent struct {
 	Truncated      bool `json:"truncated"`
 	MessagesElided int  `json:"messages_elided"`
 
-	Messages []tapMessage `json:"messages"`
+	// Content is "withheld" under the metadata tap (MEMBERS-PLAN 1b: a
+	// member's turns carry numbers, class, lane and ids, never what was
+	// said), and Messages is then absent; the household's content tap
+	// carries Messages and no Content.
+	Content  string       `json:"content,omitempty"`
+	Messages []tapMessage `json:"messages,omitempty"`
 }
+
+// tapWithheld is Content's one value under the metadata tap.
+const tapWithheld = "withheld"
 
 // tapTurn emits one "turn" event for a /v1/messages request, and returns the
 // conversation identity so requestHandler can hand it to the RESPONSE tap (#61) —
@@ -383,7 +386,7 @@ type tapTurnEvent struct {
 //
 // ctx is the ROUTE context — it carries the reqInfo requestHandler resolved — not a
 // cancellation scope; the tap never blocks and never waits on anything.
-func tapTurn(ctx context.Context, r *http.Request, body []byte, model, tag, eff, clientFP string) tapRespIdent {
+func (tn *tenant) tapTurn(ctx context.Context, r *http.Request, body []byte, model, tag, eff, clientFP string) tapRespIdent {
 	// The gate, first statement, before anything can allocate. count_tokens is
 	// excluded by exact path match: it carries the same conversation but is a
 	// pricing probe, not a turn, and it would double every event.
@@ -423,7 +426,7 @@ func tapTurn(ctx context.Context, r *http.Request, body []byte, model, tag, eff,
 	// are the newest delta. It takes the key of the conversation whose reply it names,
 	// and its messages are numbered from just past that reply — so `total` and every
 	// index count the full conversation, and a sliced array never reads as a shrink.
-	sessionKey := injectObserve(sess, time.Now())
+	sessionKey := tn.injectObserve(sess, time.Now())
 	var (
 		key, contentFP         string
 		from, epoch, total     int
@@ -433,7 +436,7 @@ func tapTurn(ctx context.Context, r *http.Request, body []byte, model, tag, eff,
 		th                     tapThreadAdvance
 	)
 	if s.threadType == "continue" {
-		th, hit = tapAdvanceThread(s.threadPrev, sess, s.count, time.Now())
+		th, hit = tn.tapAdvanceThread(s.threadPrev, sess, s.count, time.Now())
 		orphan = !hit
 	}
 	if hit {
@@ -445,7 +448,7 @@ func tapTurn(ctx context.Context, r *http.Request, body []byte, model, tag, eff,
 		firstText, _ := tapText(tapSlice(body, s.first), tapKeyText, tapMaxDepth)
 		contentFP = tapFP(sysText, firstText)
 		key = sess + "\x00" + contentFP // the FULL session id, so two sessions never merge
-		from, epoch, compacted, turn = tapAdvance(key, s.count, time.Now())
+		from, epoch, compacted, turn = tn.tapAdvance(key, s.count, time.Now())
 		total = s.count
 	}
 
@@ -453,14 +456,23 @@ func tapTurn(ctx context.Context, r *http.Request, body []byte, model, tag, eff,
 	// a request that re-sends an identical array is not a new turn, but its RESPONSE
 	// is still a real reply worth tapping — a blown streaming turn retries with the
 	// same messages, and the retry's answer is exactly what the lost stream held.
+	// Under the metadata tap the conversation key is still one per
+	// conversation, but derived from the tenant and the fingerprint, and the
+	// fingerprint itself (a hash of the system prompt and first message) is
+	// not emitted.
+	convKey, emitFP := tapFP(sess)+"/"+contentFP, contentFP
+	if tn.metadataOnly() {
+		convKey, emitFP = tapFP(sess)+"/"+tapFP(tn.id, contentFP), ""
+	}
 	id := tapRespIdent{
 		ok:         true,
-		convKey:    tapFP(sess) + "/" + contentFP,
+		tenant:     tn,
+		convKey:    convKey,
 		tapKey:     key,
 		sess:       sess,
 		session:    fpSess(sess),
 		sessionKey: sessionKey,
-		contentFP:  contentFP,
+		contentFP:  emitFP,
 		epoch:      epoch,
 		turn:       turn,
 		index:      total, // the reply lands after the conversation's messages 0..total-1
@@ -552,7 +564,7 @@ func tapTurn(ctx context.Context, r *http.Request, body []byte, model, tag, eff,
 	// path does no decoding beyond what it did before they existed.
 	facts := parseReqFactsOpt(r.Header, body, false)
 	ent := entryFrom(ctx)
-	label := sessionLabelsLookup(r.Header.Get("x-claude-code-session-id"), time.Now())
+	label := tn.sessionLabelsLookup(r.Header.Get("x-claude-code-session-id"), time.Now())
 	ev := tapTurnEvent{
 		DecisionID: id.decisionID,
 		// tapFP over the FULL session id, not fpSess. fpSess is an 8-char PREFIX, kept
@@ -566,7 +578,7 @@ func tapTurn(ctx context.Context, r *http.Request, body []byte, model, tag, eff,
 		ConversationKey: id.convKey,
 		Session:         id.session,
 		SessionKey:      sessionKey,
-		ContentFP:       contentFP,
+		ContentFP:       emitFP,
 		Epoch:           epoch,
 		Compacted:       compacted,
 		Turn:            turn,
@@ -613,6 +625,13 @@ func tapTurn(ctx context.Context, r *http.Request, body []byte, model, tag, eff,
 			ev.BindReason = info.classCtx.bindReason
 		}
 	}
+	if tn.metadataOnly() {
+		// The metadata tap: the counts and ids stand, the words do not. The
+		// session's folder and name are the member's too.
+		ev.Messages, ev.Content = nil, tapWithheld
+		ev.Folder, ev.Name = "", ""
+		ev.MessagesElided = 0
+	}
 
 	// Metadata is not free either, and two of these fields are sized by the CLIENT:
 	// ModelRequested is its `model` string verbatim, and Route embeds that same string
@@ -647,7 +666,7 @@ func tapTurn(ctx context.Context, r *http.Request, body []byte, model, tag, eff,
 		ev.Truncated = true
 	}
 
-	publish("turn", ev)
+	publish(tn.id, "turn", ev)
 	return id
 }
 

@@ -102,6 +102,7 @@ func memberWireName(m classMemberPref) string {
 // corroboration. A 200 head is deliberately NOT final: the shape sites (§3's
 // stream/non-stream producers) own its terminal row.
 func classify(m classMemberPref, ctx context.Context, resp *http.Response, err error) hopOutcome {
+	tn := tenantFrom(ctx)
 	out := hopOutcome{phase: "head", key: m.ID}
 	if err != nil {
 		out.final = true
@@ -140,7 +141,7 @@ func classify(m classMemberPref, ctx context.Context, resp *http.Response, err e
 		return out
 	}
 	out.final = true // headFinal: non-200 heads terminate here (§5.3)
-	ref := rungRefusal(m, resp)
+	ref := tn.rungRefusal(m, resp)
 	out.refusal = ref
 	w := memberWireName(m)
 	if ref.walks() {

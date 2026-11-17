@@ -129,10 +129,10 @@ func (sm scopeMap) binds(name, lane string) bool {
 }
 
 // currentScopes is the scope map of the brain's last /preferred.
-func currentScopes() scopeMap {
-	pref.mu.RLock()
-	defer pref.mu.RUnlock()
-	return newScopeMap(pref.laneRules, pref.accounts)
+func (tn *tenant) currentScopes() scopeMap {
+	tn.pref.mu.RLock()
+	defer tn.pref.mu.RUnlock()
+	return newScopeMap(tn.pref.laneRules, tn.pref.accounts)
 }
 
 // ---- an Anthropic response's unified rate-limit headers ----
@@ -273,14 +273,14 @@ func parseUnifiedRL(h http.Header, now time.Time, sm scopeMap) (acctObs, bool) {
 
 // accountByBearer maps an injected Anthropic bearer back to its account (the
 // transport only has the request in hand). "" when it is not one of ours.
-func accountByBearer(auth string) string {
+func accountByBearer(tn *tenant, auth string) string {
 	tok := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
 	if tok == "" {
 		return ""
 	}
-	tokMu.Lock()
-	defer tokMu.Unlock()
-	for a, e := range tokens {
+	tn.tokMu.Lock()
+	defer tn.tokMu.Unlock()
+	for a, e := range tn.tokens {
 		if e.token == tok {
 			return a
 		}
@@ -303,10 +303,10 @@ func servedLane(hop *http.Request, info reqInfo) string {
 }
 
 // laneScope is the scoped cap a lane draws ("Fable"), "" for none.
-func laneScope(lane string) string {
-	pref.mu.RLock()
-	defer pref.mu.RUnlock()
-	for _, r := range pref.laneRules {
+func (tn *tenant) laneScope(lane string) string {
+	tn.pref.mu.RLock()
+	defer tn.pref.mu.RUnlock()
+	for _, r := range tn.pref.laneRules {
 		if r.Lane == lane {
 			return r.Scope
 		}
@@ -347,11 +347,11 @@ func clampReset(t, observed time.Time) time.Time {
 // memberRoutableNow is the pre-flight's question for one member: would the
 // walk get a real attempt out of it right now? Some account of its route has
 // a check that is not `no` (§2.2 row 5).
-func memberRoutableNow(m classMemberPref, now time.Time) bool {
+func (tn *tenant) memberRoutableNow(m classMemberPref, now time.Time) bool {
 	if m.Kind == "provider" && providerByName(m.Provider) == nil {
 		return false
 	}
-	ok, _ := memberPicks(m, now)
+	ok, _ := tn.memberPicks(m, now)
 	return len(ok) > 0
 }
 

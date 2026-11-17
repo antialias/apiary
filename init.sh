@@ -5,9 +5,13 @@
 #
 # It runs in the brain image with the `data` volume at /creds, and:
 #   - writes /creds/switch_key and /creds/client_secret, 32 random bytes each, hex;
+#   - writes /creds/key, the brain's sealing key (credstore.py: every tenant file is AES-256-GCM
+#     sealed with it; the brain refuses to start on a plain one), 32 random bytes, hex, 0400;
+#   - writes /creds/tenants.json with this machine's one tenant (tenancy.py: a fresh ten_ id, lan,
+#     content tap), whose data the brain keeps under /creds/<tenant>/ and serves at /t/<tenant>/…;
 #   - seeds /creds/classes.json from the brain's classes.example.json, only when absent;
 #   - makes /creds/proxy, where the proxy keeps its class state;
-#   - prints the two secrets, this once.
+#   - prints the two secrets and the tenant id, this once (the id is not a secret).
 # It overwrites nothing: if either secret is already there it changes nothing and exits 1.
 #
 # The proxy image runs as distroless's nonroot user (uid 65532), so the files it reads and
@@ -26,12 +30,13 @@ die() {
 
 [ -d "$DIR" ] || die "$DIR is not a directory; run this as: docker compose run --rm init"
 
-for f in switch_key client_secret; do
+for f in switch_key client_secret key tenants.json; do
 	if [ -e "$DIR/$f" ] || [ -L "$DIR/$f" ]; then
 		die "$DIR/$f already exists, so Apiary is already initialised; nothing was changed.
-To read the secrets again:
+To read the secrets and the tenant id again:
   docker compose exec brain cat /creds/client_secret
-  docker compose exec brain cat /creds/switch_key"
+  docker compose exec brain cat /creds/switch_key
+  docker compose exec brain cat /creds/tenants.json"
 	fi
 done
 [ -f "$EXAMPLE" ] || die "no classes example at $EXAMPLE; nothing was changed"
@@ -49,6 +54,15 @@ write_secret() {
 
 write_secret switch_key
 write_secret client_secret
+# The sealing key is the brain's alone (it runs as root); the proxy never opens a sealed file.
+secret >"$DIR/key"
+chmod 0400 "$DIR/key"
+
+TENANT=$(python3 -c 'import tenancy; print(tenancy.new_tenant_id())')
+printf '[{"tenant": "%s", "name": "apiary", "lan": true, "tap": "content"}]\n' "$TENANT" >"$DIR/tenants.json"
+chmod 0600 "$DIR/tenants.json"
+mkdir "$DIR/$TENANT"
+chmod 0700 "$DIR/$TENANT"
 
 if [ -e "$DIR/classes.json" ] || [ -L "$DIR/classes.json" ]; then
 	classes="kept the classes.json already there"
@@ -64,7 +78,7 @@ fi
 chown "$PROXY_UID" "$DIR/proxy"
 chmod 0700 "$DIR/proxy"
 
-say "Apiary is initialised: wrote switch_key and client_secret, $classes."
+say "Apiary is initialised: wrote switch_key, client_secret, the sealing key and tenants.json, $classes."
 say ""
 say "These are printed only now. They stay on the data volume (see the README to read them again)."
 say ""
@@ -74,6 +88,9 @@ say ""
 say "  Switch key: unlocks the brain's /auth page, where accounts are added"
 say "    $(cat "$DIR/switch_key")"
 say ""
+say "  Tenant: this machine's one tenant; every brain route is under /t/<tenant>/"
+say "    $TENANT"
+say ""
 say "Next:"
 say "  docker compose up -d"
-say "  open http://127.0.0.1:9115/auth, paste the switch key when asked, and add an account"
+say "  open http://127.0.0.1:9115/t/$TENANT/auth, paste the switch key when asked, and add an account"

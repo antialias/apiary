@@ -111,7 +111,8 @@ func respTapStatus() map[string]any {
 // across retries, and the ctx is sealed before tapTurn runs.
 type tapRespIdent struct {
 	decisionID string
-	ok         bool // armed + parseable /v1/messages body; zero value = don't tap
+	ok         bool    // armed + parseable /v1/messages body; zero value = don't tap
+	tenant     *tenant // whose turn: its anchors, its events, its tap mode
 	convKey    string
 	tapKey     string // the tapConvs key, never rendered: what tapRememberReply files a reply under
 	sess       string // the full session id, never rendered: an anchor is only good within it
@@ -147,7 +148,7 @@ type respIdentJSON struct {
 	ConversationKey string `json:"conversation_key"`
 	Session         string `json:"session"`
 	SessionKey      string `json:"session_key"`
-	ContentFP       string `json:"content_fp"`
+	ContentFP       string `json:"content_fp,omitempty"` // withheld under the metadata tap
 	Epoch           int    `json:"epoch"`
 	Turn            int64  `json:"turn"`
 	Index           int    `json:"index"`
@@ -227,6 +228,7 @@ type respMessageEvent struct {
 	Ratio           float64     `json:"ratio,omitempty"`   // #76: declared r_p of the served hop (absent = unscaled)
 	Scaling         *tapScaling `json:"scaling,omitempty"` // #76: present ONLY when the mark resolved ok/fail_open
 	Message         tapMessage  `json:"message"`           // same shape as the request side, so scry's reader is one function
+	Content         string      `json:"content,omitempty"` // "withheld" under the metadata tap: Message then carries no blocks
 	BlocksElided    int         `json:"blocks_elided"`
 	Truncated       bool        `json:"truncated"`
 	Lossy           bool        `json:"lossy"`
@@ -545,7 +547,7 @@ func (t *respTap) run() {
 
 	sse := strings.HasPrefix(t.ct, "text/event-stream")
 	respTapStarts.Add(1)
-	publish("turn_started", respStartedEvent{
+	publish(t.id.tenant.id, "turn_started", respStartedEvent{
 		respIdentJSON: t.id.render(),
 		Status:        t.status,
 		SSE:           sse,
@@ -617,7 +619,7 @@ func (t *respTap) runSSE(r io.Reader, cr *chanReader) {
 			// message_stop: a continue naming it may follow a stream the tap ends early
 			// (a backstop, a lossy drop), and the conversation is the same either way.
 			remembered = true
-			tapRememberReply(a.id, &t.id, time.Now())
+			t.id.tenant.tapRememberReply(a.id, &t.id, time.Now())
 		}
 		return !a.ended
 	})
@@ -692,7 +694,7 @@ func (t *respTap) runJSON(r io.Reader, cr *chanReader) {
 	a.model = tapStr(f["model"])
 	a.stopReason = tapStr(f["stop_reason"])
 	a.usage.overlay(f["usage"])
-	tapRememberReply(a.id, &t.id, time.Now()) // see runSSE
+	t.id.tenant.tapRememberReply(a.id, &t.id, time.Now()) // see runSSE
 	// The response body IS a role+content object — the request side's renderer
 	// applies verbatim, which is exactly what keeps the two sides' block shape from
 	// ever drifting.
@@ -983,8 +985,13 @@ func (t *respTap) publishBuilt(a *respAgg, cr *chanReader, msg tapMessage, elide
 		ev.Message.Blocks = []tapBlock{}
 		ev.Truncated = true
 	}
+	if t.id.tenant.metadataOnly() {
+		// The metadata tap: the reply's shape and usage, not its words.
+		ev.Message.Blocks, ev.Content = nil, tapWithheld
+		ev.BlocksElided = 0
+	}
 	respTapMessages.Add(1)
-	publish("assistant_message", ev)
+	publish(t.id.tenant.id, "assistant_message", ev)
 }
 
 // publishPanic is the recover path's terminal. It reads ONLY fields that are
@@ -997,7 +1004,7 @@ func (t *respTap) publishPanic() {
 	}
 	t.terminal = true
 	respTapEnds.Add(1)
-	publish("turn_ended", respEndedEvent{
+	publish(t.id.tenant.id, "turn_ended", respEndedEvent{
 		respIdentJSON: t.id.render(),
 		Reason:        "tap_panic",
 		ChunksDropped: t.dropped.Load(),
@@ -1028,7 +1035,7 @@ func (t *respTap) publishEnded(reason string, a *respAgg, cr *chanReader) {
 		ev.DurationMS = time.Since(t.t0).Milliseconds()
 	}
 	respTapEnds.Add(1)
-	publish("turn_ended", ev)
+	publish(t.id.tenant.id, "turn_ended", ev)
 }
 
 // respErrEnvelope reads {"type":"error","error":{"type":...,"message":...}} without

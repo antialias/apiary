@@ -23,9 +23,9 @@ func (env *e2eEnv) nearlySpent(account, provider string, pct float64, credits bo
 
 // unpaidCheck is account's check on a route that may not pay (pay []).
 func unpaidCheck(account string) dialCheck {
-	_, pots, _, _ := routeOf(laneRouteID("opus"))
+	_, pots, _, _ := lan.routeOf(laneRouteID("opus"))
 	now := nowFn()
-	return evalDialCheck(routePolicy{ID: "b", Pay: []string{}}, account, standingFor(account, now), pots, nil, staleMax(), unixSeconds(now), checkRequest{})
+	return evalDialCheck(routePolicy{ID: "b", Pay: []string{}}, account, lan.standingFor(account, now), pots, nil, lan.staleMax(), unixSeconds(now), checkRequest{})
 }
 
 // A paid 2xx says the money served, not that the allowance has room: it must
@@ -40,7 +40,7 @@ func TestE2EPaidServeKeepsTheSpentRecord(t *testing.T) {
 	h.payFrom("frontier/kimi/kimi-k3", "kimi/credits")
 	fetchPreferredSync()
 	seedSpent("kimi", "seven_day", 429, "weekly limit", time.Now().Add(3*24*time.Hour))
-	if c, _ := routeCheck("frontier/kimi/kimi-k3", "kimi", "", nowFn()); !c.paid() {
+	if c, _ := lan.routeCheck("frontier/kimi/kimi-k3", "kimi", "", nowFn()); !c.paid() {
 		t.Fatalf("fixture: route A check %s, want paid", c)
 	}
 
@@ -53,7 +53,7 @@ func TestE2EPaidServeKeepsTheSpentRecord(t *testing.T) {
 	if hit := <-h.hosted; hit.model != "kimi-k3" {
 		t.Fatalf("served %q, want kimi-k3", hit.model)
 	}
-	if _, ok := spentRecordOf("kimi", nowFn()); !ok {
+	if _, ok := lan.spentRecordOf("kimi", nowFn()); !ok {
 		t.Fatal("the paid 200 ended kimi's seven_day record")
 	}
 	if c := unpaidCheck("kimi"); !c.no() || c.Reason != "pay" {
@@ -72,7 +72,7 @@ func TestE2EPaidLaneServeKeepsTheSpentRecord(t *testing.T) {
 	env.payFrom(laneRouteID("fable"), native+"/credits")
 	fetchPreferredSync()
 	seedSpent(native, "seven_day", 429, "weekly limit", time.Now().Add(3*24*time.Hour))
-	if c, _ := routeCheck(laneRouteID("fable"), native, "", nowFn()); !c.paid() {
+	if c, _ := lan.routeCheck(laneRouteID("fable"), native, "", nowFn()); !c.paid() {
 		t.Fatalf("fixture: lane:fable check %s, want paid", c)
 	}
 
@@ -82,13 +82,13 @@ func TestE2EPaidLaneServeKeepsTheSpentRecord(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d (%s), want lane:fable served on money", resp.StatusCode, b)
 	}
-	if hit := env.hit(t); hit.auth != "Bearer "+getToken(native) {
+	if hit := env.hit(t); hit.auth != "Bearer "+lan.getToken(native) {
 		t.Fatalf("served on %q, want native's token", hit.auth)
 	}
-	if _, ok := spentRecordOf(native, nowFn()); !ok {
+	if _, ok := lan.spentRecordOf(native, nowFn()); !ok {
 		t.Fatal("the paid 200 ended native's seven_day record")
 	}
-	if c, _ := routeCheck(laneRouteID("default"), native, "", nowFn()); !c.no() || c.Reason != "pay" {
+	if c, _ := lan.routeCheck(laneRouteID("default"), native, "", nowFn()); !c.no() || c.Reason != "pay" {
 		t.Fatalf("lane:default (pay []) on native = %s, want no(pay)", c)
 	}
 }
@@ -107,7 +107,7 @@ func TestE2EPaidCrossServeKeepsTheSpentRecord(t *testing.T) {
 	h.bindTo.Store("kimi/kimi-k3")
 	fetchPreferredSync()
 	seedSpent(native, "seven_day", 429, "weekly limit", time.Now().Add(3*24*time.Hour))
-	if c, _ := routeCheck("frontier/lane:fable", native, "", nowFn()); !c.paid() {
+	if c, _ := lan.routeCheck("frontier/lane:fable", native, "", nowFn()); !c.paid() {
 		t.Fatalf("fixture: native on frontier/lane:fable = %s, want paid", c)
 	}
 	h.deny403.Store(true) // kimi's quota refusal: spent, so the walk may reach money
@@ -118,13 +118,13 @@ func TestE2EPaidCrossServeKeepsTheSpentRecord(t *testing.T) {
 	if first := h.hostedHit(t); first.model != "kimi-k3" {
 		t.Fatalf("attempt 1 = %+v, want the bound kimi member", first)
 	}
-	if hit := h.hit(t); hit.auth != "Bearer "+getToken(native) || hit.model != "claude-fable-5" {
+	if hit := h.hit(t); hit.auth != "Bearer "+lan.getToken(native) || hit.model != "claude-fable-5" {
 		t.Fatalf("cross = %+v, want lane:fable on native's token", hit)
 	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("status %d (%s), want the crossed 200", resp.StatusCode, b)
 	}
-	if _, ok := spentRecordOf(native, nowFn()); !ok {
+	if _, ok := lan.spentRecordOf(native, nowFn()); !ok {
 		t.Fatal("the paid cross's 200 ended native's seven_day record")
 	}
 }

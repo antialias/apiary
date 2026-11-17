@@ -62,6 +62,7 @@ func respTest(t *testing.T) {
 
 func respIdentFixture() tapRespIdent {
 	return tapRespIdent{
+		tenant:     lan,
 		ok:         true,
 		convKey:    "abcd1234/ef567890",
 		session:    "sess0000",
@@ -242,7 +243,7 @@ func TestTapResendIdentityCarriesHarness(t *testing.T) {
 	post := func() tapRespIdent {
 		r := httptest.NewRequest("POST", "/v1/messages", nil)
 		r.Header.Set("x-claude-code-session-id", "sess-H")
-		return tapTurn(ctx, r, []byte(tapConvo("hello", 3)), "claude-fable-1", " ROUTED [acct] lane=default", "acct", "deadbeef")
+		return lan.tapTurn(ctx, r, []byte(tapConvo("hello", 3)), "claude-fable-1", " ROUTED [acct] lane=default", "acct", "deadbeef")
 	}
 	if first := post(); first.harness != harnessClaudeCode {
 		t.Fatalf("first identity harness = %q, want %q", first.harness, harnessClaudeCode)
@@ -699,7 +700,7 @@ func TestRespTapColdPathNoAlloc(t *testing.T) {
 
 	var id tapRespIdent
 	n := testing.AllocsPerRun(1000, func() {
-		id = tapTurn(ctx, r, body, "claude-fable-1", " ROUTED [acct] lane=default", "acct", "deadbeef")
+		id = lan.tapTurn(ctx, r, body, "claude-fable-1", " ROUTED [acct] lane=default", "acct", "deadbeef")
 	})
 	if n != 0 {
 		t.Fatalf("cold tapTurn allocated %.1f times — returning the identity must not cost the idle proxy anything", n)
@@ -1115,7 +1116,7 @@ func TestTapTurnLeavesSpeedToTheResponse(t *testing.T) {
 	post := func() tapRespIdent {
 		r := httptest.NewRequest("POST", "/v1/messages", nil)
 		r.Header.Set("x-claude-code-session-id", "sess-S")
-		return tapTurn(ctx, r, []byte(tapConvo("hello", 3)), "claude-fable-1", " ROUTED [acct] lane=default", "acct", "deadbeef")
+		return lan.tapTurn(ctx, r, []byte(tapConvo("hello", 3)), "claude-fable-1", " ROUTED [acct] lane=default", "acct", "deadbeef")
 	}
 	if first := post(); first.cap != c {
 		t.Fatal("the identity does not carry the request's capture")

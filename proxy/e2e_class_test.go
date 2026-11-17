@@ -421,9 +421,9 @@ func TestE2EClassBrainDownRidesCachedBindStale(t *testing.T) {
 	dead := httptest.NewServer(http.NotFoundHandler())
 	deadURL := dead.URL
 	dead.Close() // port now refuses: a transport error, not a refusal
-	oldBrain := brainURL
-	brainURL = deadURL
-	defer func() { brainURL = oldBrain }()
+	oldBrain := brainBase
+	brainBase = deadURL
+	defer func() { brainBase = oldBrain }()
 	oldFresh := bindFresh
 	bindFresh = 0 // force a refresh attempt on every request
 	defer func() { bindFresh = oldFresh }()
@@ -438,16 +438,11 @@ func TestE2EClassBrainDownRidesCachedBindStale(t *testing.T) {
 		t.Fatalf("stale ride = %+v, want the cached member on its cached token", hit)
 	}
 
-	sresp, err := http.Get(h.proxy.URL + "/_switch/status")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sresp.Body.Close()
 	var s struct {
 		StateByLane   map[string]string         `json:"state_by_lane"`
 		ClassBindings map[string]map[string]any `json:"class_bindings"`
 	}
-	if err := json.NewDecoder(sresp.Body).Decode(&s); err != nil {
+	if err := json.Unmarshal(statusMine(t, h.proxy.URL), &s); err != nil {
 		t.Fatal(err)
 	}
 	if s.StateByLane["class:frontier"] != "STALE" {
@@ -467,9 +462,9 @@ func TestE2EClassBrainDownColdTyped503(t *testing.T) {
 	dead := httptest.NewServer(http.NotFoundHandler())
 	deadURL := dead.URL
 	dead.Close()
-	oldBrain := brainURL
-	brainURL = deadURL
-	defer func() { brainURL = oldBrain }()
+	oldBrain := brainBase
+	brainBase = deadURL
+	defer func() { brainBase = oldBrain }()
 
 	resp := h.postSess(t, "claude-frontier", "CLIENT", "sess-cold")
 	defer resp.Body.Close()
@@ -1004,7 +999,7 @@ func TestE2EClass429CrossHardLineComesFromBrain(t *testing.T) {
 		h.brainHard = 85
 		h.brainMu.Unlock()
 		helpdeskShape(h, 90.0)
-		if got := hardPct(); got != 85 {
+		if got := lan.hardPct(); got != 85 {
 			t.Fatalf("hardPct = %v after /preferred with thresholds.hard=85", got)
 		}
 		h.deny.Store(true)
@@ -1221,13 +1216,13 @@ func TestE2EClassProviderAuth403IsNotExhaustion(t *testing.T) {
 	m := classMemberPref{ID: "kimi/kimi-k3", Kind: "provider", Provider: "kimi", Model: "kimi-k3"}
 	resp := &http.Response{StatusCode: 403, Header: http.Header{},
 		Body: io.NopCloser(strings.NewReader(`{"type":"error","error":{"type":"permission_error","message":"invalid api key"}}`))}
-	if r := rungRefusal(m, resp); r.walks() {
+	if r := lan.rungRefusal(m, resp); r.walks() {
 		t.Fatalf("an auth 403 must not walk, classified %q", r.class)
 	}
 	anth := classMemberPref{ID: "lane:opus", Kind: "anthropic", Lane: "opus", Model: "claude-opus-5"}
 	resp = &http.Response{StatusCode: 403, Header: http.Header{},
 		Body: io.NopCloser(strings.NewReader(`{"type":"error","error":{"type":"permission_error","message":"You've reached your usage limit for this billing cycle."}}`))}
-	if r := rungRefusal(anth, resp); r.walks() {
+	if r := lan.rungRefusal(anth, resp); r.walks() {
 		t.Fatalf("a 403 on an anthropic member is auth, never quota, classified %q", r.class)
 	}
 }

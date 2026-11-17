@@ -29,7 +29,6 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
-	"sync"
 	"time"
 )
 
@@ -41,13 +40,9 @@ type apiKeyEntry struct {
 	fetched time.Time
 }
 
-var (
-	apiKeyMu sync.Mutex
-	apiKeys  = map[string]apiKeyEntry{}
-	// apiKeyStates is each account's last state, "" = a key in hand, else
-	// the named reason it has none. Logged on each change.
-	apiKeyStates = map[string]string{}
-)
+// Per tenant: tenant.apiKeyMu, tenant.apiKeys (the keys in hand) and
+// tenant.apiKeyStates (each account's last state, "" = a key in hand, else
+// why none: "missing", "fetch failed").
 
 // apiKeyFresh is how long the brain's answer is used without asking again: a
 // rotation, a key placed and a key withdrawn are each adopted within it.
@@ -55,13 +50,13 @@ var apiKeyFresh = 5 * time.Minute
 
 // getAPIKey is the account's key, or an error that names why there is none.
 // ctx is the caller's (nil: it has none).
-func getAPIKey(ctx context.Context, account string) (string, error) {
+func (tn *tenant) getAPIKey(ctx context.Context, account string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	apiKeyMu.Lock()
-	e, has := apiKeys[account]
-	apiKeyMu.Unlock()
+	tn.apiKeyMu.Lock()
+	e, has := tn.apiKeys[account]
+	tn.apiKeyMu.Unlock()
 	now := time.Now()
 	if has && now.Sub(e.fetched) < apiKeyFresh {
 		if e.val == "" {
@@ -69,37 +64,37 @@ func getAPIKey(ctx context.Context, account string) (string, error) {
 		}
 		return e.val, nil
 	}
-	key, missing, err := fetchAPIKey(ctx, account)
+	key, missing, err := tn.fetchAPIKey(ctx, account)
 	if err != nil && ctx.Err() != nil {
 		return "", fmt.Errorf("the ask for the api key was cut short: %w", ctx.Err())
 	}
-	apiKeyMu.Lock()
-	defer apiKeyMu.Unlock()
+	tn.apiKeyMu.Lock()
+	defer tn.apiKeyMu.Unlock()
 	switch {
 	case err == nil:
-		apiKeys[account] = apiKeyEntry{val: key, fetched: now}
-		noteAPIKeyState(account, "")
+		tn.apiKeys[account] = apiKeyEntry{val: key, fetched: now}
+		tn.noteAPIKeyState(account, "")
 		return key, nil
 	case missing:
 		// The brain answered that it has no key: a cached one is withdrawn.
-		apiKeys[account] = apiKeyEntry{none: err.Error(), fetched: now}
+		tn.apiKeys[account] = apiKeyEntry{none: err.Error(), fetched: now}
 	case has && e.val != "":
-		noteAPIKeyState(account, "")
+		tn.noteAPIKeyState(account, "")
 		return e.val, nil // STALE: the brain is unreachable, the key is still the key
 	default:
 		err = fmt.Errorf("the brain's /api-key is unreachable and no key is cached (%v)", err)
 	}
-	noteAPIKeyState(account, err.Error())
+	tn.noteAPIKeyState(account, err.Error())
 	return "", err
 }
 
 // fetchAPIKey asks the brain. missing: the brain answered that it has none
 // (its 404), as against an error reaching it.
-func fetchAPIKey(ctx context.Context, account string) (key string, missing bool, err error) {
-	if brainURL == "" {
+func (tn *tenant) fetchAPIKey(ctx context.Context, account string) (key string, missing bool, err error) {
+	if tn.brainURL() == "" {
 		return "", false, errors.New("no brain configured")
 	}
-	req, _ := http.NewRequestWithContext(ctx, "GET", brainURL+"/api-key?account="+url.QueryEscape(account), nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", tn.brainURL()+"/api-key?account="+url.QueryEscape(account), nil)
 	req.Header.Set("X-Switch-Key", switchKey)
 	resp, err := brainClient.Do(req)
 	if err != nil {
@@ -124,12 +119,12 @@ func fetchAPIKey(ctx context.Context, account string) (key string, missing bool,
 }
 
 // noteAPIKeyState logs an account's key state when it changes. Under apiKeyMu.
-func noteAPIKeyState(account, state string) {
-	prev, seen := apiKeyStates[account]
+func (tn *tenant) noteAPIKeyState(account, state string) {
+	prev, seen := tn.apiKeyStates[account]
 	if seen && prev == state {
 		return
 	}
-	apiKeyStates[account] = state
+	tn.apiKeyStates[account] = state
 	if state == "" {
 		if seen {
 			log.Printf("✅ api key for %s: dispensed by the brain", account)
@@ -141,29 +136,29 @@ func noteAPIKeyState(account, state string) {
 
 // dropAPIKey forgets an account's cached key (the provider refused it), so
 // the next dial asks the brain again.
-func dropAPIKey(account string) {
-	apiKeyMu.Lock()
-	delete(apiKeys, account)
-	apiKeyMu.Unlock()
+func (tn *tenant) dropAPIKey(account string) {
+	tn.apiKeyMu.Lock()
+	delete(tn.apiKeys, account)
+	tn.apiKeyMu.Unlock()
 }
 
 // apiKeyStatus is /_switch/status's "api_keys": each account asked for, its
 // state and, when it has no key, why. Never the key.
-func apiKeyStatus() []map[string]any {
-	apiKeyMu.Lock()
-	defer apiKeyMu.Unlock()
-	names := make([]string, 0, len(apiKeyStates))
-	for a := range apiKeyStates {
+func (tn *tenant) apiKeyStatus() []map[string]any {
+	tn.apiKeyMu.Lock()
+	defer tn.apiKeyMu.Unlock()
+	names := make([]string, 0, len(tn.apiKeyStates))
+	for a := range tn.apiKeyStates {
 		names = append(names, a)
 	}
 	sort.Strings(names)
 	out := make([]map[string]any, 0, len(names))
 	for _, a := range names {
 		row := map[string]any{"account": a, "state": "ok"}
-		if why := apiKeyStates[a]; why != "" {
+		if why := tn.apiKeyStates[a]; why != "" {
 			row["state"], row["reason"] = "missing", why
 		}
-		if e, ok := apiKeys[a]; ok && e.val != "" {
+		if e, ok := tn.apiKeys[a]; ok && e.val != "" {
 			row["fetched_at"] = e.fetched.UTC().Format(time.RFC3339)
 		}
 		out = append(out, row)

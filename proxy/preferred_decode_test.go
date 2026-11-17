@@ -26,15 +26,15 @@ func brainServing(t *testing.T) (set func(map[string]any)) {
 	}))
 	t.Cleanup(srv.Close)
 	t.Cleanup(resetQuotaState())
-	oldBrain, oldPref := brainURL, pref
-	brainURL, pref = srv.URL, &decision{}
+	oldBrain, oldPref := brainBase, lan.pref
+	brainBase, lan.pref = srv.URL, &decision{}
 	classRowsMu.Lock()
 	oldRows, oldSource := classRowsSet, classRowsSource
 	classRowsMu.Unlock()
 	t.Cleanup(func() {
 		prewarmWG.Wait()
 		stopPrewarmTimers()
-		brainURL, pref = oldBrain, oldPref
+		brainBase, lan.pref = oldBrain, oldPref
 		classRowsMu.Lock()
 		classRowsSet, classRowsSource = oldRows, oldSource
 		classRowsMu.Unlock()
@@ -72,9 +72,9 @@ func TestPreferredWithoutPolicyIsADecodeFailure(t *testing.T) {
 			set := brainServing(t)
 			set(brainPreferred(t))
 			fetchPreferred()
-			pref.mu.RLock()
-			ok, routes, accounts, staleMax, ledger := pref.ok, len(pref.routes), len(pref.accounts), pref.staleMax, pref.ledger
-			pref.mu.RUnlock()
+			lan.pref.mu.RLock()
+			ok, routes, accounts, staleMax, ledger := lan.pref.ok, len(lan.pref.routes), len(lan.pref.accounts), lan.pref.staleMax, lan.pref.ledger
+			lan.pref.mu.RUnlock()
 			if !ok || routes == 0 || accounts == 0 || staleMax != 1800 || ledger == nil {
 				t.Fatalf("the brain's own payload: ok=%v routes=%d accounts=%d stale_max=%v", ok, routes, accounts, staleMax)
 			}
@@ -86,14 +86,14 @@ func TestPreferredWithoutPolicyIsADecodeFailure(t *testing.T) {
 			}
 			set(p)
 			fetchPreferred()
-			pref.mu.RLock()
-			defer pref.mu.RUnlock()
-			if pref.ok {
+			lan.pref.mu.RLock()
+			defer lan.pref.mu.RUnlock()
+			if lan.pref.ok {
 				t.Fatalf("a /preferred without %s decoded as reachable", drop)
 			}
-			if len(pref.routes) != routes || len(pref.accounts) != accounts || pref.staleMax != staleMax || pref.ledger != ledger {
+			if len(lan.pref.routes) != routes || len(lan.pref.accounts) != accounts || lan.pref.staleMax != staleMax || lan.pref.ledger != ledger {
 				t.Fatalf("without %s: the last good state was replaced (routes %d accounts %d stale_max %v)",
-					drop, len(pref.routes), len(pref.accounts), pref.staleMax)
+					drop, len(lan.pref.routes), len(lan.pref.accounts), lan.pref.staleMax)
 			}
 		})
 	}
@@ -113,9 +113,9 @@ func TestPreferredWithNoAccountPickIsApplied(t *testing.T) {
 	}
 	set(p)
 	fetchPreferred()
-	pref.mu.RLock()
-	ok, account, routes := pref.ok, pref.account, len(pref.routes)
-	pref.mu.RUnlock()
+	lan.pref.mu.RLock()
+	ok, account, routes := lan.pref.ok, lan.pref.account, len(lan.pref.routes)
+	lan.pref.mu.RUnlock()
 	if !ok || account != "" || routes == 0 {
 		t.Fatalf("a /preferred naming no account: ok=%v account=%q routes=%d", ok, account, routes)
 	}

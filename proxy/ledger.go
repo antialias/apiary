@@ -118,17 +118,11 @@ type ownEntry struct {
 	refused string
 }
 
-var (
-	ledgerMu  sync.Mutex
-	ledgerOwn []*ownEntry
-	// ledgerLastErr is the failure of the last post that carried entries, or
-	// the brain's refusal of one, "" after a post it took them in: shown on
-	// /_switch/status.
-	ledgerLastErr string
-	// ledgerHolds are the dials in flight that reserved their max_cost
-	// (ledgerReserve), until each releases its hold.
-	ledgerHolds = map[*ledgerHold]struct{}{}
-)
+// Per tenant: tenant.ledgerMu, tenant.ledgerOwn, tenant.ledgerLastErr (the
+// failure of the last post that carried entries, or the brain's refusal of
+// one, "" after a post it took them in: shown on /_switch/status) and
+// tenant.ledgerHolds (the dials in flight that reserved their max_cost,
+// ledgerReserve, until each releases its hold).
 
 // ledgerMark is one client request's: set once any dial made for it entered a
 // ledger entry (any pot, any basis, uncounted included), so its reply tells
@@ -166,6 +160,7 @@ type ledgerHold struct {
 // nothing.
 type ledgerHop struct {
 	once                sync.Once
+	tenant              *tenant // whose ledger the entry goes to
 	account, pot, route string
 	model, unit, speed  string
 	rates               *ledgerRates
@@ -176,7 +171,7 @@ type ledgerHop struct {
 // not draw a pot the ledger counts. model is the model the dial asked for; the
 // response's own model, when it names one, is the one charged. ctx is the
 // hop's: its client request's ledgerMark is set when the hop enters.
-func armLedger(ctx context.Context, chk dialCheck, model string) *ledgerHop {
+func (tn *tenant) armLedger(ctx context.Context, chk dialCheck, model string) *ledgerHop {
 	if !chk.paid() || chk.route == "" {
 		return nil
 	}
@@ -184,25 +179,25 @@ func armLedger(ctx context.Context, chk dialCheck, model string) *ledgerHop {
 	if i <= 0 {
 		return nil
 	}
-	pref.mu.RLock()
-	defer pref.mu.RUnlock()
-	if pref.ledger == nil {
+	tn.pref.mu.RLock()
+	defer tn.pref.mu.RUnlock()
+	if tn.pref.ledger == nil {
 		return nil
 	}
-	lp, ok := pref.ledger.Pots[chk.Pot]
+	lp, ok := tn.pref.ledger.Pots[chk.Pot]
 	if !ok || lp.Unit == nil {
 		return nil // not a pot whose charges the ledger counts
 	}
-	h := &ledgerHop{account: chk.Pot[:i], pot: chk.Pot[i+1:], route: chk.route, model: model,
+	h := &ledgerHop{tenant: tn, account: chk.Pot[:i], pot: chk.Pot[i+1:], route: chk.route, model: model,
 		unit: *lp.Unit, mark: ledgerMarkOf(ctx)}
-	if containsStr(pref.ledger.RateTables[h.unit], "speed_weights") {
+	if containsStr(tn.pref.ledger.RateTables[h.unit], "speed_weights") {
 		// A unit whose charges a speed weighs (codex credits). This proxy
 		// asks codex for no speed mode (translateAnthropicToCodex sets no
 		// service_tier), so every request is the standard speed. A unit with
 		// no speed (a Runway task's credits) enters none.
 		h.speed = "standard"
 	}
-	if r, ok := pref.ledger.Rates[h.unit]; ok {
+	if r, ok := tn.pref.ledger.Rates[h.unit]; ok {
 		h.rates = &r
 	}
 	return h
@@ -269,7 +264,7 @@ func (h *ledgerHop) enter(e ledgerEntry) {
 	if h.mark != nil {
 		h.mark.entered.Store(true)
 	}
-	ledgerEnter(e)
+	h.tenant.ledgerEnter(e)
 }
 
 func ledgerMarkOf(ctx context.Context) *ledgerMark {
@@ -384,10 +379,10 @@ func newLedgerID() string {
 
 // ledgerEnter keeps the entry (it counts in the budget gate from now on) and
 // wakes the reporter, which sends it to the brain (reports.go).
-func ledgerEnter(e ledgerEntry) {
-	ledgerMu.Lock()
-	ledgerOwn = append(ledgerOwn, &ownEntry{e: e})
-	ledgerMu.Unlock()
+func (tn *tenant) ledgerEnter(e ledgerEntry) {
+	tn.ledgerMu.Lock()
+	tn.ledgerOwn = append(tn.ledgerOwn, &ownEntry{e: e})
+	tn.ledgerMu.Unlock()
 	what := "uncounted"
 	if e.Charge != nil {
 		what = fmt.Sprintf("%.4f %s (%s)", *e.Charge, e.Unit, *e.Basis)
@@ -395,18 +390,18 @@ func ledgerEnter(e ledgerEntry) {
 		what += ": " + *e.Reason
 	}
 	log.Printf("ledger: %s on %s route %s %s", e.ID, e.potID(), e.Route, what)
-	reportWake()
+	tn.reportWake()
 }
 
 // ledgerPulled drops the entries a pulled ledger covers (accepted at a seq it
 // has reached) and, of the rest, the refused ones whose period has ended.
 // Caller passes the new ledger.
-func ledgerPulled(l *checkLedger, now float64) {
+func (tn *tenant) ledgerPulled(l *checkLedger, now float64) {
 	start, _ := budgetPeriod(now)
-	ledgerMu.Lock()
-	defer ledgerMu.Unlock()
-	keep := ledgerOwn[:0]
-	for _, o := range ledgerOwn {
+	tn.ledgerMu.Lock()
+	defer tn.ledgerMu.Unlock()
+	keep := tn.ledgerOwn[:0]
+	for _, o := range tn.ledgerOwn {
 		switch {
 		case o.seq > 0 && l != nil && l.Seq >= o.seq:
 		case o.refused != "" && o.e.At < start:
@@ -414,10 +409,10 @@ func ledgerPulled(l *checkLedger, now float64) {
 			keep = append(keep, o)
 		}
 	}
-	for i := len(keep); i < len(ledgerOwn); i++ {
-		ledgerOwn[i] = nil
+	for i := len(keep); i < len(tn.ledgerOwn); i++ {
+		tn.ledgerOwn[i] = nil
 	}
-	ledgerOwn = keep
+	tn.ledgerOwn = keep
 }
 
 // ledgerView is the ledger the budget gate reads at now: the last pulled one
@@ -432,10 +427,10 @@ func ledgerPulled(l *checkLedger, now float64) {
 // newer one covers already dropped, and spend would vanish from one check.
 // Lock order: ledgerMu, then pref.mu. Every hold in flight is added to its
 // pot's reserved and its route's (ledgerReserve).
-func ledgerView(now float64) *checkLedger {
-	ledgerMu.Lock()
-	defer ledgerMu.Unlock()
-	return ledgerViewLocked(now)
+func (tn *tenant) ledgerView(now float64) *checkLedger {
+	tn.ledgerMu.Lock()
+	defer tn.ledgerMu.Unlock()
+	return tn.ledgerViewLocked(now)
 }
 
 // ledgerReserve is the dial check of (route, account) for req, on the ledger
@@ -445,9 +440,9 @@ func ledgerView(now float64) *checkLedger {
 // budget). release ends the hold, once the dial's entry is made; a no-op
 // when nothing was held. Lock order: ledgerMu, then pref.mu and recMu
 // (routeCheckOn), as ledgerView.
-func ledgerReserve(routeID, account, model string, req checkRequest, now time.Time) (dialCheck, func()) {
-	c, _, release := ledgerReserveBy(routeID, req, now, func(l *checkLedger) dialCheck {
-		c, _, _ := routeCheckOn(routeID, account, model, req, l, now)
+func (tn *tenant) ledgerReserve(routeID, account, model string, req checkRequest, now time.Time) (dialCheck, func()) {
+	c, _, release := tn.ledgerReserveBy(routeID, req, now, func(l *checkLedger) dialCheck {
+		c, _, _ := tn.routeCheckOn(routeID, account, model, req, l, now)
 		return c
 	})
 	return c, release
@@ -457,53 +452,53 @@ func ledgerReserve(routeID, account, model string, req checkRequest, now time.Ti
 // ledger view, under ledgerMu (lock order as ledgerReserve's). It also
 // returns the hold (nil when nothing was held), which ledgerHoldTo may
 // lower once the upstream names its own maximum.
-func ledgerReserveBy(routeID string, req checkRequest, now time.Time, check func(*checkLedger) dialCheck) (dialCheck, *ledgerHold, func()) {
-	ledgerMu.Lock()
-	defer ledgerMu.Unlock()
-	c := check(ledgerViewLocked(unixSeconds(now)))
+func (tn *tenant) ledgerReserveBy(routeID string, req checkRequest, now time.Time, check func(*checkLedger) dialCheck) (dialCheck, *ledgerHold, func()) {
+	tn.ledgerMu.Lock()
+	defer tn.ledgerMu.Unlock()
+	c := check(tn.ledgerViewLocked(unixSeconds(now)))
 	if !c.paid() || req.MaxCost == nil {
 		return c, nil, func() {}
 	}
 	h := &ledgerHold{pot: c.Pot, route: routeID, amount: *req.MaxCost}
-	ledgerHolds[h] = struct{}{}
-	return c, h, func() { ledgerRelease(h) }
+	tn.ledgerHolds[h] = struct{}{}
+	return c, h, func() { tn.ledgerRelease(h) }
 }
 
 // ledgerHoldOn holds amount on pot for route with no check: a task that
 // already exists, restored after a restart (video_api.go), whose charge is
 // still to be entered. release ends it.
-func ledgerHoldOn(pot, route string, amount float64) (h *ledgerHold, release func()) {
+func (tn *tenant) ledgerHoldOn(pot, route string, amount float64) (h *ledgerHold, release func()) {
 	h = &ledgerHold{pot: pot, route: route, amount: amount}
-	ledgerMu.Lock()
-	ledgerHolds[h] = struct{}{}
-	ledgerMu.Unlock()
-	return h, func() { ledgerRelease(h) }
+	tn.ledgerMu.Lock()
+	tn.ledgerHolds[h] = struct{}{}
+	tn.ledgerMu.Unlock()
+	return h, func() { tn.ledgerRelease(h) }
 }
 
 // ledgerHoldTo lowers a hold to amount (never raises it): the upstream's
 // own maximum for a task, once known, replaces the price-table bound.
-func ledgerHoldTo(h *ledgerHold, amount float64) {
+func (tn *tenant) ledgerHoldTo(h *ledgerHold, amount float64) {
 	if h == nil {
 		return
 	}
-	ledgerMu.Lock()
-	defer ledgerMu.Unlock()
+	tn.ledgerMu.Lock()
+	defer tn.ledgerMu.Unlock()
 	if amount >= 0 && amount < h.amount {
 		h.amount = amount
 	}
 }
 
-func ledgerRelease(h *ledgerHold) {
-	ledgerMu.Lock()
-	delete(ledgerHolds, h)
-	ledgerMu.Unlock()
+func (tn *tenant) ledgerRelease(h *ledgerHold) {
+	tn.ledgerMu.Lock()
+	delete(tn.ledgerHolds, h)
+	tn.ledgerMu.Unlock()
 }
 
 // ledgerViewLocked is ledgerView; the caller holds ledgerMu.
-func ledgerViewLocked(now float64) *checkLedger {
-	pref.mu.RLock()
-	l := pref.ledger
-	pref.mu.RUnlock()
+func (tn *tenant) ledgerViewLocked(now float64) *checkLedger {
+	tn.pref.mu.RLock()
+	l := tn.pref.ledger
+	tn.pref.mu.RUnlock()
 	if l == nil {
 		return nil
 	}
@@ -525,7 +520,7 @@ func ledgerViewLocked(now float64) *checkLedger {
 	}
 	v.Period.Start, v.Period.End = start, end
 	v.unposted = map[string]float64{}
-	for _, o := range ledgerOwn {
+	for _, o := range tn.ledgerOwn {
 		e := o.e
 		if e.Charge == nil || e.At < start || e.At >= end || (o.seq > 0 && l.Seq >= o.seq) {
 			continue
@@ -544,7 +539,7 @@ func ledgerViewLocked(now float64) *checkLedger {
 		}
 		v.Pots[e.potID()] = p
 	}
-	for h := range ledgerHolds {
+	for h := range tn.ledgerHolds {
 		p := v.Pots[h.pot]
 		if p.RoutesReserved == nil {
 			p.RoutesReserved = map[string]float64{}
@@ -558,14 +553,14 @@ func ledgerViewLocked(now float64) *checkLedger {
 
 // ledgerStatus is /_switch/status's ledger block: what of ours the brain has
 // not counted yet, and the last post's failure.
-func ledgerStatus() map[string]any {
-	pref.mu.RLock()
-	l := pref.ledger
-	pref.mu.RUnlock()
-	ledgerMu.Lock()
-	defer ledgerMu.Unlock()
+func (tn *tenant) ledgerStatus() map[string]any {
+	tn.pref.mu.RLock()
+	l := tn.pref.ledger
+	tn.pref.mu.RUnlock()
+	tn.ledgerMu.Lock()
+	defer tn.ledgerMu.Unlock()
 	var pending, unseen, refused int
-	for _, o := range ledgerOwn {
+	for _, o := range tn.ledgerOwn {
 		switch {
 		case o.refused != "":
 			refused++
@@ -576,7 +571,7 @@ func ledgerStatus() map[string]any {
 		}
 	}
 	out := map[string]any{"pending": pending, "accepted_unpulled": unseen, "refused": refused,
-		"last_error": ledgerLastErr, "pulled_seq": nil, "pulled_as_of": nil}
+		"last_error": tn.ledgerLastErr, "pulled_seq": nil, "pulled_as_of": nil}
 	if l != nil {
 		out["pulled_seq"], out["pulled_as_of"] = l.Seq, l.AsOf
 		spend := map[string]float64{}

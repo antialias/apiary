@@ -262,11 +262,11 @@ func TestLoadRegistryFileErrors(t *testing.T) {
 }
 
 func TestAdvertisableConfigured(t *testing.T) {
-	oldProv, oldReg, oldBrain := providers, registry, brainURL
-	t.Cleanup(func() { providers, registry, brainURL = oldProv, oldReg, oldBrain })
+	oldProv, oldReg, oldBrain := providers, registry, brainBase
+	t.Cleanup(func() { providers, registry, brainBase = oldProv, oldReg, oldBrain })
 	withClassRows(t, "")
 
-	providers, registry, brainURL = nil, nil, ""
+	providers, registry, brainBase = nil, nil, ""
 	if advertisableConfigured() {
 		t.Fatal("nothing configured must not be advertisable")
 	}
@@ -288,11 +288,11 @@ func TestAdvertisableConfigured(t *testing.T) {
 	// #93: class rows are config-shaped advertisable too — a configured brain
 	// will serve them, and a boot-loaded last-good active row already does.
 	registry = nil
-	brainURL = "http://brain:9115"
+	brainBase = "http://brain:9115"
 	if !advertisableConfigured() {
 		t.Fatal("a configured brain must count (class rows derive from it)")
 	}
-	brainURL = ""
+	brainBase = ""
 	withClassRows(t, "last-good", registryEntry{Name: "frontier", Type: "class", Class: "frontier", ContextWindow: 200000})
 	if !advertisableConfigured() {
 		t.Fatal("a boot-loaded active class row must count")

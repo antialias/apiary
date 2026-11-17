@@ -2,7 +2,6 @@ package main
 
 import (
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -251,31 +250,28 @@ type sessionKnown struct {
 	Name string
 }
 
-var sessionLabels = struct {
-	sync.Mutex
-	m map[string]*sessionLabel
-}{m: map[string]*sessionLabel{}}
+// Per tenant: tenant.labelsMu, tenant.labels.
 
 // sessionLabelsObserve is called for every POST /v1/messages on the request
 // path. It marks the session seen, takes the name a main-thread request's
 // /rename output gives it, and, on a request that carries the whole
 // conversation (a thread create, or a client that sends no thread), applies
 // the environment it names.
-func sessionLabelsObserve(sess string, f reqFacts, now time.Time) {
+func (tn *tenant) sessionLabelsObserve(sess string, f reqFacts, now time.Time) {
 	if sess == "" {
 		return
 	}
-	sessionLabels.Lock()
-	defer sessionLabels.Unlock()
-	cur := sessionLabels.m[sess]
+	tn.labelsMu.Lock()
+	defer tn.labelsMu.Unlock()
+	cur := tn.labels[sess]
 	if cur != nil {
 		cur.seen = now
 	}
 	if f.Rename != "" && !f.subagent() {
 		if cur == nil {
-			sessionLabelsMakeRoomLocked(now)
+			tn.sessionLabelsMakeRoomLocked(now)
 			cur = &sessionLabel{seen: now}
-			sessionLabels.m[sess] = cur
+			tn.labels[sess] = cur
 		}
 		cur.name = f.Rename
 	}
@@ -286,8 +282,8 @@ func sessionLabelsObserve(sess string, f reqFacts, now time.Time) {
 	}
 	switch {
 	case cur == nil:
-		sessionLabelsMakeRoomLocked(now)
-		sessionLabels.m[sess] = &sessionLabel{env: f.Env, seen: now}
+		tn.sessionLabelsMakeRoomLocked(now)
+		tn.labels[sess] = &sessionLabel{env: f.Env, seen: now}
 	case cur.env.Folder == "": // known so far only by its name
 		cur.env = f.Env
 	case !f.subagent() && f.EnvInSystem:
@@ -297,13 +293,13 @@ func sessionLabelsObserve(sess string, f reqFacts, now time.Time) {
 
 // sessionLabelsLookup is what is known of a session, zero when nothing is or
 // the session has been idle past sessionLabelIdle.
-func sessionLabelsLookup(sess string, now time.Time) sessionKnown {
+func (tn *tenant) sessionLabelsLookup(sess string, now time.Time) sessionKnown {
 	if sess == "" {
 		return sessionKnown{}
 	}
-	sessionLabels.Lock()
-	defer sessionLabels.Unlock()
-	cur := sessionLabels.m[sess]
+	tn.labelsMu.Lock()
+	defer tn.labelsMu.Unlock()
+	cur := tn.labels[sess]
 	if cur == nil || now.Sub(cur.seen) > sessionLabelIdle {
 		return sessionKnown{}
 	}
@@ -313,19 +309,19 @@ func sessionLabelsLookup(sess string, now time.Time) sessionKnown {
 // sessionLabelsMakeRoomLocked drops sessions idle past sessionLabelIdle (a
 // week) and then, at the cap, the least recently seen, so one more fits.
 // It runs only when a new session is added.
-func sessionLabelsMakeRoomLocked(now time.Time) {
-	for k, l := range sessionLabels.m {
+func (tn *tenant) sessionLabelsMakeRoomLocked(now time.Time) {
+	for k, l := range tn.labels {
 		if now.Sub(l.seen) > sessionLabelIdle {
-			delete(sessionLabels.m, k)
+			delete(tn.labels, k)
 		}
 	}
-	for len(sessionLabels.m) >= sessionLabelCap {
+	for len(tn.labels) >= sessionLabelCap {
 		oldest, at := "", time.Time{}
-		for k, l := range sessionLabels.m {
+		for k, l := range tn.labels {
 			if oldest == "" || l.seen.Before(at) {
 				oldest, at = k, l.seen
 			}
 		}
-		delete(sessionLabels.m, oldest)
+		delete(tn.labels, oldest)
 	}
 }

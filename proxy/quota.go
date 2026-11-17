@@ -202,14 +202,14 @@ func routerViewStale(heard time.Time, now time.Time) bool {
 // wire than the request being refused, so a member this request could not have
 // crossed to may still be one the NEXT request reaches. Counting every member
 // can only produce silence, never a false "nothing is routable".
-func routerDry() (dry, known bool) {
-	pref.mu.RLock()
-	ok, heard := pref.ok, pref.heardAt
-	classes := make(map[string][]classMemberPref, len(pref.classes))
-	for name, cp := range pref.classes {
+func (tn *tenant) routerDry() (dry, known bool) {
+	tn.pref.mu.RLock()
+	ok, heard := tn.pref.ok, tn.pref.heardAt
+	classes := make(map[string][]classMemberPref, len(tn.pref.classes))
+	for name, cp := range tn.pref.classes {
 		classes[name] = cp.Members
 	}
-	pref.mu.RUnlock()
+	tn.pref.mu.RUnlock()
 
 	if !ok || routerViewStale(heard, nowFn()) || len(classes) == 0 {
 		return false, false
@@ -218,7 +218,7 @@ func routerDry() (dry, known bool) {
 	// recMu and re-takes pref.mu, and routeClass already orders them this way.
 	// Keeping that the only order means they are never nested.
 	for _, members := range classes {
-		if len(classCandidates(members, "")) > 0 {
+		if len(tn.classCandidates(nil, members, "")) > 0 {
 			return false, true
 		}
 	}
@@ -231,8 +231,8 @@ func routerDry() (dry, known bool) {
 // a shelf life measured in seconds and no action attached — the consumer learns
 // nothing it could not discover by simply trying. "Nothing is routable" is the
 // one that changes behaviour: it says a failover round-trip is wasted effort.
-func routerDryClause() string {
-	if dry, known := routerDry(); known && dry {
+func (tn *tenant) routerDryClause() string {
+	if dry, known := tn.routerDry(); known && dry {
 		return "; no other model on this router is routable right now"
 	}
 	return ""
@@ -260,15 +260,16 @@ func classExhaustAfterWalk(cc *classRoute, last *http.Response) *http.Response {
 	if !ok {
 		return nil
 	}
-	if ref := rungRefusal(m, last); !ref.walks() || ref.class == refWrongMember {
+	tn := cc.tenant
+	if ref := tn.rungRefusal(m, last); !ref.walks() || ref.class == refWrongMember {
 		return nil
 	}
-	u := classUnavailable(cc.members, cc.classReq, nowFn())
+	u := tn.classUnavailable(cc.members, cc.classReq, nowFn())
 	if u == nil {
 		return nil
 	}
 	cc.unavail = u
-	return unavailableResponse(cc)
+	return tn.unavailableResponse(cc)
 }
 
 // ---- the drill endpoint -----------------------------------------------------
@@ -298,14 +299,19 @@ func quotaDrillHandler(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"error":"class query parameter is required"}`))
 		return
 	}
-	pref.mu.RLock()
-	cp, found := pref.classes[class]
+	// The drill reads the entry's tenant: what ITS class would be served.
+	tn := mustTenant(w, r)
+	if tn == nil {
+		return
+	}
+	tn.pref.mu.RLock()
+	cp, found := tn.pref.classes[class]
 	members := cp.Members
-	known := make([]string, 0, len(pref.classes))
-	for name := range pref.classes {
+	known := make([]string, 0, len(tn.pref.classes))
+	for name := range tn.pref.classes {
 		known = append(known, name)
 	}
-	pref.mu.RUnlock()
+	tn.pref.mu.RUnlock()
 	sort.Strings(known)
 
 	if !found {
@@ -317,18 +323,18 @@ func quotaDrillHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := nowFn()
-	unavailableNow := classUnavailable(members, classReq{ctx: r.Context()}, now) != nil
+	unavailableNow := tn.classUnavailable(members, classReq{ctx: r.Context()}, now) != nil
 	var routes []unavailRoute
 	for _, m := range members {
-		if why := memberUnroutable(r.Context(), m); why != "" {
+		if why := tn.memberUnroutable(r.Context(), m); why != "" {
 			routes = append(routes, unavailRoute{policy: routePolicy{ID: m.Route}, unroutable: why})
 			continue
 		}
-		rp, _, _, _ := routeOf(m.Route)
+		rp, _, _, _ := tn.routeOf(m.Route)
 		routes = append(routes, unavailRoute{policy: rp.routePolicy, accounts: rp.Accounts})
 	}
-	u := routesUnavailable(routes, modelsOf(members), now)
-	dry, dryKnown := routerDry()
+	u := tn.routesUnavailable(routes, modelsOf(members), now)
+	dry, dryKnown := tn.routerDry()
 	// No member's route has an account: there is no unavailable reply, only
 	// the typed 503 (configuration), so would_serve is null.
 	var serve map[string]any
@@ -346,7 +352,7 @@ func quotaDrillHandler(w http.ResponseWriter, r *http.Request) {
 		"class_unavailable": unavailableNow,
 		"router_dry":        dry,
 		"router_dry_known":  dryKnown,
-		"clause":            routerDryClause(),
+		"clause":            tn.routerDryClause(),
 		"known_classes":     known,
 		"would_serve":       serve,
 	})

@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -51,11 +50,9 @@ type injectSession struct {
 	inFlight int64 // one request may reserve the queue; 0 means available
 }
 
-var (
-	injectMu       sync.Mutex
-	injectSessions = map[string]*injectSession{}
-	injectSeq      int64
-)
+// Per tenant: tenant.injectMu, tenant.injectSessions. injectSeq numbers
+// every item the proxy queues, across tenants.
+var injectSeq int64
 
 type injectError struct {
 	Type    string `json:"type"`
@@ -95,30 +92,30 @@ func injectSessionKey(session string) string {
 
 // injectObserve makes an opaque session key addressable by Scry. It is called only
 // while the event hub is armed, from tapTurn, so an idle proxy does not grow this map.
-func injectObserve(session string, now time.Time) string {
+func (tn *tenant) injectObserve(session string, now time.Time) string {
 	key := injectSessionKey(session)
-	injectMu.Lock()
-	defer injectMu.Unlock()
-	if s := injectSessions[key]; s != nil {
+	tn.injectMu.Lock()
+	defer tn.injectMu.Unlock()
+	if s := tn.injectSessions[key]; s != nil {
 		s.seen = now
 		return key
 	}
-	injectEvictLocked(now)
-	if len(injectSessions) < injectMaxSessions {
-		injectSessions[key] = &injectSession{seen: now}
+	tn.injectEvictLocked(now)
+	if len(tn.injectSessions) < injectMaxSessions {
+		tn.injectSessions[key] = &injectSession{seen: now}
 	}
 	return key
 }
 
-func injectEvictLocked(now time.Time) {
-	for key, s := range injectSessions {
+func (tn *tenant) injectEvictLocked(now time.Time) {
+	for key, s := range tn.injectSessions {
 		if len(s.items) == 0 && now.Sub(s.seen) > injectSessionTTL {
-			delete(injectSessions, key)
+			delete(tn.injectSessions, key)
 		}
 	}
-	for len(injectSessions) >= injectMaxSessions {
+	for len(tn.injectSessions) >= injectMaxSessions {
 		oldest, at := "", time.Time{}
-		for key, s := range injectSessions {
+		for key, s := range tn.injectSessions {
 			if len(s.items) != 0 {
 				continue
 			}
@@ -129,11 +126,11 @@ func injectEvictLocked(now time.Time) {
 		if oldest == "" {
 			return // every tracked session has queued work; reject the new observation
 		}
-		delete(injectSessions, oldest)
+		delete(tn.injectSessions, oldest)
 	}
 }
 
-func injectEnqueue(sessionKey, text string, now time.Time) (queuedInstruction, int, *injectError) {
+func (tn *tenant) injectEnqueue(sessionKey, text string, now time.Time) (queuedInstruction, int, *injectError) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return queuedInstruction{}, 0, &injectError{
@@ -151,16 +148,16 @@ func injectEnqueue(sessionKey, text string, now time.Time) (queuedInstruction, i
 		}
 	}
 
-	injectMu.Lock()
-	s := injectSessions[sessionKey]
+	tn.injectMu.Lock()
+	s := tn.injectSessions[sessionKey]
 	if s == nil {
-		injectMu.Unlock()
+		tn.injectMu.Unlock()
 		return queuedInstruction{}, 0, &injectError{
 			Type: "unknown_session", Message: "session is not live in this proxy process", Status: http.StatusNotFound,
 		}
 	}
 	if len(s.items) >= injectMaxItems || s.bytes+len(text) > injectMaxSessionBytes {
-		injectMu.Unlock()
+		tn.injectMu.Unlock()
 		return queuedInstruction{}, len(s.items), &injectError{
 			Type: "queue_full", Message: "session instruction queue is full", Status: http.StatusConflict,
 		}
@@ -171,9 +168,9 @@ func injectEnqueue(sessionKey, text string, now time.Time) (queuedInstruction, i
 	s.bytes += item.Bytes
 	s.seen = now
 	depth := len(s.items)
-	injectMu.Unlock()
+	tn.injectMu.Unlock()
 
-	publish("instruction_queued", injectQueuedEvent{
+	publish(tn.id, "instruction_queued", injectQueuedEvent{
 		SessionKey: sessionKey, Session: sessionKey[:8], ID: id,
 		Bytes: item.Bytes, Depth: depth, Queued: item.Queued.Format(time.RFC3339Nano),
 	})
@@ -185,26 +182,26 @@ func decimal(n int64) string { return strconv.FormatInt(n, 10) }
 // injectRequest appends all currently queued work and reserves it for this request. A
 // malformed body changes nothing. A second concurrent request sees the reservation and
 // passes through unchanged; finishInject releases or commits it after the response.
-func injectRequest(body []byte, session string) ([]byte, *injectReservation) {
+func (tn *tenant) injectRequest(body []byte, session string) ([]byte, *injectReservation) {
 	if len(body) == 0 || session == "" {
 		return body, nil
 	}
 	key := injectSessionKey(session)
-	injectMu.Lock()
-	s := injectSessions[key]
+	tn.injectMu.Lock()
+	s := tn.injectSessions[key]
 	if s == nil || len(s.items) == 0 || s.inFlight != 0 {
-		injectMu.Unlock()
+		tn.injectMu.Unlock()
 		return body, nil
 	}
 	items := append([]queuedInstruction(nil), s.items...)
 	message, err := injectMessage(items)
 	if err != nil {
-		injectMu.Unlock()
+		tn.injectMu.Unlock()
 		return body, nil
 	}
 	scan, ok := tapScanBody(body)
 	if !ok || scan.messagesClose < 0 || scan.messagesClose > len(body) {
-		injectMu.Unlock()
+		tn.injectMu.Unlock()
 		return body, nil
 	}
 	joint := []byte(nil)
@@ -219,23 +216,23 @@ func injectRequest(body []byte, session string) ([]byte, *injectReservation) {
 	token := atomic.AddInt64(&injectSeq, 1)
 	s.inFlight = token
 	s.seen = time.Now()
-	injectMu.Unlock()
+	tn.injectMu.Unlock()
 	return out, &injectReservation{key: key, token: token, items: items}
 }
 
-func finishInject(res *injectReservation, delivered bool) {
+func (tn *tenant) finishInject(res *injectReservation, delivered bool) {
 	if res == nil {
 		return
 	}
-	injectMu.Lock()
-	s := injectSessions[res.key]
+	tn.injectMu.Lock()
+	s := tn.injectSessions[res.key]
 	if s == nil || s.inFlight != res.token {
-		injectMu.Unlock()
+		tn.injectMu.Unlock()
 		return
 	}
 	s.inFlight = 0
 	if !delivered {
-		injectMu.Unlock()
+		tn.injectMu.Unlock()
 		return
 	}
 	// Items enqueued while the request was in flight remain behind the delivered prefix.
@@ -247,7 +244,7 @@ func finishInject(res *injectReservation, delivered bool) {
 		s.bytes += item.Bytes
 	}
 	s.seen = time.Now()
-	injectMu.Unlock()
+	tn.injectMu.Unlock()
 
 	ids := make([]string, len(res.items))
 	bytesN := 0
@@ -255,7 +252,7 @@ func finishInject(res *injectReservation, delivered bool) {
 		ids[i] = item.ID
 		bytesN += item.Bytes
 	}
-	publish("instruction_delivered", injectDeliveredEvent{
+	publish(tn.id, "instruction_delivered", injectDeliveredEvent{
 		SessionKey: res.key, Session: res.key[:8], IDs: ids, Items: len(res.items), Bytes: bytesN,
 	})
 }
@@ -286,17 +283,17 @@ func injectMessage(items []queuedInstruction) ([]byte, error) {
 	})
 }
 
-func injectReset() {
-	injectMu.Lock()
-	injectSessions = map[string]*injectSession{}
-	injectMu.Unlock()
+func (tn *tenant) injectReset() {
+	tn.injectMu.Lock()
+	tn.injectSessions = map[string]*injectSession{}
+	tn.injectMu.Unlock()
 }
 
-func injectStatus() map[string]any {
-	injectMu.Lock()
-	defer injectMu.Unlock()
+func (tn *tenant) injectStatus() map[string]any {
+	tn.injectMu.Lock()
+	defer tn.injectMu.Unlock()
 	queuedSessions, queuedItems, queuedBytes := 0, 0, 0
-	for _, s := range injectSessions {
+	for _, s := range tn.injectSessions {
 		if len(s.items) > 0 {
 			queuedSessions++
 			queuedItems += len(s.items)
@@ -304,14 +301,18 @@ func injectStatus() map[string]any {
 		}
 	}
 	return map[string]any{
-		"known_sessions": len(injectSessions), "queued_sessions": queuedSessions,
+		"known_sessions": len(tn.injectSessions), "queued_sessions": queuedSessions,
 		"queued_items": queuedItems, "queued_bytes": queuedBytes,
 		"max_items_per_session": injectMaxItems, "max_item_bytes": injectMaxItemBytes,
 		"max_session_bytes": injectMaxSessionBytes,
 	}
 }
 
+// injectPostBody names the tenant whose session the instruction is for
+// (MEMBERS-PLAN 1b): a session key is live in one tenant's queue only, and a
+// post that names another tenant is unknown_session there, never a cross.
 type injectPostBody struct {
+	Tenant     string `json:"tenant"`
 	SessionKey string `json:"session_key"`
 	Text       string `json:"text"`
 }
@@ -326,6 +327,15 @@ func injectHandler(w http.ResponseWriter, r *http.Request) {
 		writeInjectError(w, &injectError{Type: "invalid_request", Message: "invalid enqueue request", Status: http.StatusBadRequest})
 		return
 	}
+	if in.Tenant == "" {
+		writeInjectError(w, &injectError{Type: "invalid_request", Message: "tenant is required: the member whose session this is", Status: http.StatusBadRequest})
+		return
+	}
+	tn := memberOf(in.Tenant)
+	if tn == nil {
+		writeInjectError(w, &injectError{Type: "unknown_tenant", Message: "tenant is not in this proxy's index", Status: http.StatusNotFound})
+		return
+	}
 	if len(in.SessionKey) != sha256.Size*2 {
 		writeInjectError(w, &injectError{Type: "invalid_session", Message: "session_key must be an opaque session key from a turn event", Status: http.StatusBadRequest})
 		return
@@ -334,7 +344,7 @@ func injectHandler(w http.ResponseWriter, r *http.Request) {
 		writeInjectError(w, &injectError{Type: "invalid_session", Message: "session_key must be an opaque session key from a turn event", Status: http.StatusBadRequest})
 		return
 	}
-	item, depth, problem := injectEnqueue(in.SessionKey, in.Text, time.Now())
+	item, depth, problem := tn.injectEnqueue(in.SessionKey, in.Text, time.Now())
 	if problem != nil {
 		writeInjectError(w, problem)
 		return

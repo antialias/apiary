@@ -283,6 +283,7 @@ type epState struct {
 // healthStore owns every epState under one mutex (§7.5). The lock is never
 // held across a dial; settleLease's CAS runs outside it.
 type healthStore struct {
+	tenantID      string // the tenant whose store this is: its events carry it
 	mu            sync.Mutex
 	authFailures  map[string]int64
 	bindingHealth map[string]bindingHealth
@@ -893,7 +894,7 @@ func (h *healthStore) rampHoldsLocked(key, class, sess string, bindingAt time.Ti
 // health is the process-wide store. nil unless main() armed observe/enforce —
 // every producer nil-guards on it, so `off` runs zero health code (E0). Written
 // once in main() before the listener starts, then only read.
-var health *healthStore
+// The store is per tenant (tenant.health); nil under SWITCH_HEALTH=off.
 
 // healthLargePromptTok is §8's SWITCH_HEALTH_LARGE_PROMPT_TOK: the ring's
 // forced gate (R-22) and nothing else.
@@ -909,8 +910,8 @@ var healthReqCtr atomic.Uint64
 
 // healthReqID returns a fresh request id, or "" when no store is armed (the
 // producers won't run, so there is nothing to correlate).
-func healthReqID() string {
-	if health == nil {
+func (tn *tenant) healthReqID() string {
+	if tn.health == nil {
 		return ""
 	}
 	return nextDecisionID()
@@ -920,8 +921,7 @@ func healthReqID() string {
 // write the evidence sample, run Rule 4, settle the lease. Producers hand it
 // terminal outcomes only (Rule 3), after the last byte was forwarded — it
 // takes healthMu off the client's critical path (§0.8).
-func healthRecord(out hopOutcome, class, reqID string, fp uint64, forced bool) {
-	h := health
+func healthRecord(h *healthStore, out hopOutcome, class, reqID string, fp uint64, forced bool) {
 	if h == nil || out.key == "" {
 		return
 	}
@@ -966,7 +966,7 @@ func (hs *hopScore) settle(out hopOutcome) {
 	if hs != nil && hs.cc != nil {
 		hs.cc.trace.outcome(out)
 	}
-	if hs == nil || health == nil || hs.cc == nil || hs.key == "" {
+	if hs == nil || hs.cc == nil || hs.cc.tenant == nil || hs.cc.tenant.health == nil || hs.key == "" {
 		return
 	}
 	out.key, out.lease = hs.key, hs.lease
@@ -975,7 +975,7 @@ func (hs *hopScore) settle(out hopOutcome) {
 	}
 	forced := soleAdmissible(hs.cc, hs.key)
 	hs.cc.trace.forced(forced)
-	healthRecord(out, hs.cc.class, hs.cc.reqID, healthFP(hs.cc.origBody), forced)
+	healthRecord(hs.cc.tenant.health, out, hs.cc.class, hs.cc.reqID, healthFP(hs.cc.origBody), forced)
 }
 
 // hopCtx is hs.ctx, nil-safe for the translator's defer.
@@ -1171,17 +1171,22 @@ func (h *healthStore) syncRegistry(present map[string]bool) {
 // class on the enforce allowlist (nil = every class). Observe keeps routing
 // untouched — only the would-act counter runs.
 func healthEnforcedClass(class string) bool {
-	return health != nil && healthModeV == healthEnforce &&
+	return healthModeV == healthEnforce &&
 		(healthEnforceFor == nil || healthEnforceFor[class])
 }
 
-// healthTickLoop drives §4.3's tick column and the §7.1 snapshot cadence.
-// Started by main() only when a mode is armed.
-func healthTickLoop() {
+// healthTickLoop drives §4.3's tick column and the §7.1 snapshot cadence for
+// the tenant's store. Started by tenant.start only when a mode is armed.
+func (tn *tenant) healthTickLoop(ctx context.Context) {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
-	for range t.C {
-		health.tick()
-		publishHealthSnapshot(nil)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		tn.health.tick()
+		tn.publishHealthSnapshot(nil)
 	}
 }

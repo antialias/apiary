@@ -54,7 +54,7 @@ from providers import register, register_route
 #     available_count, total_earned_count, immediate_reset_purchase_eligible
 #
 # Neither is an inference, so neither draws on the window or on credits.
-OPENAI_CODEX_CREDS_FILE = os.environ.get("OPENAI_CODEX_CREDS_FILE", "/creds/openai-codex.json")
+OPENAI_CODEX_CREDS_FILE = "openai-codex.json"  # in each tenant's dir
 OPENAI_TOKEN_URL = os.environ.get("OPENAI_TOKEN_URL", "https://auth.openai.com/oauth/token")
 OPENAI_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"  # codex CLI's public client id
 OPENAI_USAGE_URL = os.environ.get(
@@ -114,24 +114,24 @@ def _oauth_refresh(creds, token_url, client_id, persist_fn):
     req = urllib.request.Request(token_url, data=body, method="POST",
                                  headers={"Content-Type": "application/json"})
     with core.urlopen(req, timeout=20) as resp:
-        t = json.loads(resp.read().decode("utf-8"))
-    creds["access_token"] = t["access_token"]
-    creds["expires_at"] = time.time() + int(t.get("expires_in", 864000))
-    if t.get("refresh_token"):
-        creds["refresh_token"] = t["refresh_token"]  # rotates every refresh
-    if t.get("earliest_refresh_at") is not None:
-        creds["earliest_refresh_at"] = t["earliest_refresh_at"]
+        resp_doc = json.loads(resp.read().decode("utf-8"))
+    creds["access_token"] = resp_doc["access_token"]
+    creds["expires_at"] = time.time() + int(resp_doc.get("expires_in", 864000))
+    if resp_doc.get("refresh_token"):
+        creds["refresh_token"] = resp_doc["refresh_token"]  # rotates every refresh
+    if resp_doc.get("earliest_refresh_at") is not None:
+        creds["earliest_refresh_at"] = resp_doc["earliest_refresh_at"]
     persist_fn()
     return creds["access_token"]
 
 
-def _oauth_ensure_token(creds, token_url, client_id, persist_fn, margin=3600):
+def _oauth_ensure_token(t, creds, token_url, client_id, persist_fn, margin=3600):
     """Return a valid access token, refreshing inside `margin` seconds of expiry.
 
     Honors the server's earliest_refresh_at throttle (epoch or ISO): an early,
     margin-driven refresh is deferred while the throttle window is open, but a
     hard-expired token refreshes regardless (nothing better to do)."""
-    with core._refresh_lock:
+    with t.refresh_lock:
         now = time.time()
         exp = creds.get("expires_at", 0)
         if creds.get("access_token") and now < exp - margin:
@@ -153,12 +153,21 @@ def _oauth_ensure_token(creds, token_url, client_id, persist_fn, margin=3600):
 # (#33) — loads AND refreshes serialize under the shared _refresh_lock, which
 # also closes the load-vs-rotation race that could resurrect a rotated-out
 # refresh token (STRICT rotation: writing a stale RT kills the chain).
-_openai_pool = None            # {name: creds-dict} or None
-_openai_pool_shape = "legacy"  # "legacy" | "array" — governs _persist's shape
-_openai_pool_mtime = None      # st_mtime of the loaded file (live adoption)
+class _Store:
+    """One tenant's codex pool (tenant.stores["gpt"], _st)."""
+
+    def __init__(self, t):
+        self.file = t.path(OPENAI_CODEX_CREDS_FILE)
+        self.pool = None            # {name: creds-dict} or None
+        self.pool_shape = "legacy"  # "legacy" | "array" — governs _persist's shape
+        self.pool_mtime = None      # st_mtime of the loaded file (live adoption)
 
 
-def _parse_openai_pool(raw):
+def _st(t):
+    return t.store_for("gpt", _Store)
+
+
+def _parse_openai_pool(t, raw):
     """File JSON -> (pool, shape). Array entries need name + refresh_token and
     a name that doesn't collide with an Anthropic account or another provider
     id — _state is one flat namespace, keyed by target name."""
@@ -177,7 +186,7 @@ def _parse_openai_pool(raw):
         if n in pool:
             core.log(f"WARN openai creds entry {i} skipped: duplicate name {n!r}")
             continue
-        if n in core._account_loop_names() or n in (set(core.PROVIDERS) - {"gpt"}):
+        if n in core._account_loop_names(t) or n in (set(core.PROVIDERS) - {"gpt"}):
             core.log(f"WARN openai creds entry {i} skipped: name {n!r} collides with "
                 f"an account/provider target")
             continue
@@ -185,59 +194,52 @@ def _parse_openai_pool(raw):
     return pool, "array"
 
 
-def _load_openai_creds(force=False):
+def _load_openai_creds(t, force=False):
     """Return the codex creds pool {name: creds}, or None when there is no file.
 
     Cached, with an mtime guard: an out-of-band rewrite (operator re-seeds a
     dead chain, or converts legacy->array to add an account) is adopted on the
     next call — live, no restart. force=True re-reads unconditionally (the
     401 escape hatch; also covers mtime-granularity aliasing)."""
-    global _openai_pool, _openai_pool_shape, _openai_pool_mtime
-    with core._refresh_lock:
-        try:
-            mtime = os.stat(OPENAI_CODEX_CREDS_FILE).st_mtime
-        except OSError:
-            _openai_pool = None
-            _openai_pool_mtime = None
+    with t.refresh_lock:
+        mtime = core._store.mtime(_st(t).file)
+        if mtime is None:
+            _st(t).pool = None
+            _st(t).pool_mtime = None
             return None
-        if _openai_pool is not None and not force and mtime == _openai_pool_mtime:
-            return _openai_pool
+        if _st(t).pool is not None and not force and mtime == _st(t).pool_mtime:
+            return _st(t).pool
         try:
-            with open(OPENAI_CODEX_CREDS_FILE) as f:
-                raw = json.load(f)
-        except OSError:
-            _openai_pool = None
-            _openai_pool_mtime = None
-            return None
-        except ValueError as e:
+            raw = core._store.read_json(_st(t).file)
+        except (ValueError, core.credstore.CredStoreError) as e:
             core.log(f"WARN openai creds file unreadable: {e}")
-            _openai_pool = None
-            _openai_pool_mtime = None
+            _st(t).pool = None
+            _st(t).pool_mtime = None
             return None
-        _openai_pool, _openai_pool_shape = _parse_openai_pool(raw)
-        _openai_pool_mtime = mtime
-        return _openai_pool
+        if raw is None:
+            _st(t).pool = None
+            _st(t).pool_mtime = None
+            return None
+        _st(t).pool, _st(t).pool_shape = _parse_openai_pool(t, raw)
+        _st(t).pool_mtime = mtime
+        return _st(t).pool
 
 
-def _persist_openai_creds():
+def _persist_openai_creds(t):
     """Atomic, SHAPE-PRESERVING rewrite of the codex creds file after a token
     rotation. A legacy dict file is written back as the single dict — a
     rolled-back brain calls .get() on the parsed file and would crash on a
     list, so array form is only ever on disk when the operator seeded array
     form. Callers hold _refresh_lock (persist runs inside _oauth_refresh)."""
-    global _openai_pool_mtime
-    if not _openai_pool:
+    if not _st(t).pool:
         return
     try:
-        if _openai_pool_shape == "legacy":
-            data = next(iter(_openai_pool.values()))
+        if _st(t).pool_shape == "legacy":
+            data = next(iter(_st(t).pool.values()))
         else:
-            data = list(_openai_pool.values())
-        tmp = OPENAI_CODEX_CREDS_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, OPENAI_CODEX_CREDS_FILE)
-        _openai_pool_mtime = os.stat(OPENAI_CODEX_CREDS_FILE).st_mtime
+            data = list(_st(t).pool.values())
+        core._store.write_json(_st(t).file, data)
+        _st(t).pool_mtime = core._store.mtime(_st(t).file)
     except Exception as e:  # noqa: BLE001
         core.log(f"WARN could not persist rotated openai tokens: {e}")
 
@@ -256,11 +258,11 @@ def _openai_pool_entry(pool, account):
     return name, pool[name]
 
 
-def _openai_account_names():
+def _openai_account_names(t):
     """Poll-target names for the gpt provider: None = legacy single-target mode
     (one target named "gpt", account arg None), else the array entries' names."""
-    pool = _load_openai_creds()
-    if pool is None or _openai_pool_shape == "legacy":
+    pool = _load_openai_creds(t)
+    if pool is None or _st(t).pool_shape == "legacy":
         return None
     return sorted(pool)
 
@@ -439,7 +441,7 @@ def _codex_reading(raw, reset_options, as_of, name="gpt"):
             "pots": pots, "beside": [], "models": models}, ""
 
 
-def poll_gpt(prev=None, account=None):
+def poll_gpt(t, prev=None, account=None):
     """Return one codex/ChatGPT-subscription poll result (never raises).
 
     Emits provider="gpt" — NOT "openai" — because the class-member join
@@ -451,14 +453,14 @@ def poll_gpt(prev=None, account=None):
 
     Reads GET wham/usage, then GET wham/rate-limit-reset-credits (see the
     section comment), into the §1.5 reading (_codex_reading)."""
-    pool = _load_openai_creds()
+    pool = _load_openai_creds(t)
     name, creds = _openai_pool_entry(pool, account)
     out = {"name": name or account or "gpt", "kind": "provider", "provider": "gpt",
            "ok": 0, "ts": time.time(), "good_ts": None, "stale": 0,
            "http": 0, "err": "", "retry_after": None, "reading": None,
            "source": "GET wham/usage + GET wham/rate-limit-reset-credits"}
     if not creds or not creds.get("refresh_token"):
-        out["err"] = f"no codex creds at {OPENAI_CODEX_CREDS_FILE}"
+        out["err"] = f"no codex creds at {_st(t).file}"
         return out
     account_id = creds.get("account_id") or ""
 
@@ -467,8 +469,8 @@ def poll_gpt(prev=None, account=None):
     tok = None
     for attempt in (0, 1):
         try:
-            tok = _oauth_ensure_token(creds, OPENAI_TOKEN_URL, OPENAI_CLIENT_ID,
-                                      _persist_openai_creds,
+            tok = _oauth_ensure_token(t, creds, OPENAI_TOKEN_URL, OPENAI_CLIENT_ID,
+                                      lambda: _persist_openai_creds(t),
                                       margin=OPENAI_REFRESH_MARGIN)
             break
         except urllib.error.HTTPError as e:
@@ -477,7 +479,7 @@ def poll_gpt(prev=None, account=None):
             out["retry_after"] = core._retry_after(e)
             if e.code != 401 or attempt:
                 return out
-            _, creds = _openai_pool_entry(_load_openai_creds(force=True), account)
+            _, creds = _openai_pool_entry(_load_openai_creds(t, force=True), account)
             if not creds or not creds.get("refresh_token"):
                 return out
             account_id = creds.get("account_id") or ""
@@ -496,9 +498,9 @@ def poll_gpt(prev=None, account=None):
             return out
         # Access token rejected mid-lifetime: force one refresh and retry once.
         try:
-            with core._refresh_lock:
+            with t.refresh_lock:
                 tok = _oauth_refresh(creds, OPENAI_TOKEN_URL, OPENAI_CLIENT_ID,
-                                     _persist_openai_creds)
+                                     lambda: _persist_openai_creds(t))
             raw = _get_codex_usage(tok, account_id)
         except urllib.error.HTTPError as e2:
             out["http"] = e2.code
@@ -550,21 +552,21 @@ def _jwt_claims(token):
 _CODEX_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 
-def _codex_name_error(name):
+def _codex_name_error(t, name):
     """Why `name` can't label a codex chain, or None. Mirrors the
     _parse_openai_pool skip rules — the pool loader silently DROPS a colliding
     entry on the next load, so a name that would vanish must be refused at
     enrollment instead. An existing chain name is fine: that's a re-enroll."""
     if not _CODEX_NAME_RE.match(name or ""):
         return "name must be lowercase letters/digits/dot/dash/underscore (e.g. gpt-b)"
-    if name in core._account_loop_names():
+    if name in core._account_loop_names(t):
         return f"{name!r} collides with an Anthropic account"
     if name in (set(core.PROVIDERS) - {"gpt"}):
         return f"{name!r} collides with a provider id"
     return None
 
 
-def _codex_pool_enroll(entry):
+def _codex_pool_enroll(t, entry):
     """Append (or replace, same name) one chain in the codex pool and persist.
     Re-enrolling the legacy singleton under its own name keeps the legacy dict
     shape (rollback-neutral repair); anything else persists ARRAY form —
@@ -573,9 +575,8 @@ def _codex_pool_enroll(entry):
     (rollback floor becomes the first pool-aware brain). Ordinary rotation
     persists (_persist_openai_creds) stay shape-preserving either way.
     Returns True when an existing chain was replaced."""
-    global _openai_pool, _openai_pool_shape
-    with core._refresh_lock:
-        cur = _load_openai_creds() or {}
+    with t.refresh_lock:
+        cur = _load_openai_creds(t) or {}
         replaced = entry["name"] in cur
         # Replace-don't-mutate: a stale in-flight refresh holds the OLD dict;
         # copying every entry makes its later mutations invisible rather than
@@ -585,41 +586,41 @@ def _codex_pool_enroll(entry):
         # be silently DROPPED by the next load — losing the original chain.
         new_pool = {n: dict(e, name=n) for n, e in cur.items()}
         new_pool[entry["name"]] = dict(entry)
-        if not (_openai_pool_shape == "legacy" and replaced and set(new_pool) == {"gpt"}):
-            if _openai_pool_shape == "legacy" and cur:
-                core.log(f"codex enrollment converts {OPENAI_CODEX_CREDS_FILE} legacy->array — "
+        if not (_st(t).pool_shape == "legacy" and replaced and set(new_pool) == {"gpt"}):
+            if _st(t).pool_shape == "legacy" and cur:
+                core.log(f"codex enrollment converts {_st(t).file} legacy->array — "
                     "a pre-#71 brain can no longer read it (hand-revert to a single "
                     "dict before rolling back past 4ecbe41)")
-            _openai_pool_shape = "array"
-        _openai_pool = new_pool
-        _persist_openai_creds()
+            _st(t).pool_shape = "array"
+        _st(t).pool = new_pool
+        _persist_openai_creds(t)
     core.log(f"codex chain {entry['name']!r} {'re-enrolled' if replaced else 'enrolled'} "
         f"(pool size {len(new_pool)})")
     return replaced
 
 
-def _gpt_auth_status(now):
+def _gpt_auth_status(t, now):
     """One row per pool chain (the legacy singleton shows as 'gpt'). Health is
     the same per-target poll bookkeeping the poller writes — a dead chain reads
     auth_dead here exactly as an Anthropic account would."""
-    with core._refresh_lock:
-        pool = _load_openai_creds()
+    with t.refresh_lock:
+        pool = _load_openai_creds(t)
         if pool is None:
             return []
         names = sorted(pool)
         exp = {n: (pool.get(n) or {}).get("expires_at") for n in names}
-    accounts = core._account_health(names, now)["accounts"]
+    accounts = core._account_health(t, names, now)["accounts"]
     for a in accounts:
         a["token_expires_at"] = exp.get(a["name"]) or None
     return accounts
 
 
-def _codex_auth_begin(account=None):
+def _codex_auth_begin(t, account=None):
     """Mint the codex-CLI-shaped PKCE authorize URL (constants block: ASSUMED,
     fail-visible). `account` is advisory — the chain's identity is the `name`
     field at complete time."""
     verifier = core._b64url(secrets.token_bytes(32))
-    state = core._auth_grant_mint("gpt", "reauth" if account else "add",
+    state = core._auth_grant_mint(t, "gpt", "reauth" if account else "add",
                              account=account, verifier=verifier)
     params = {"response_type": "code", "client_id": OPENAI_CLIENT_ID,
               "redirect_uri": CODEX_REDIRECT, "scope": CODEX_SCOPE,
@@ -630,14 +631,14 @@ def _codex_auth_begin(account=None):
     return CODEX_AUTHORIZE + "?" + urllib.parse.urlencode(params), state
 
 
-def _codex_auth_complete(grant, fields):
+def _codex_auth_complete(t, grant, fields):
     """The paste-the-redirect-URL exchange. Order is load-bearing:
     name validation FIRST (a bad name must not burn the one-shot code), then
     URL parse + state match, then the code exchange, then a usage PROBE on the
     new chain — only a probe-passing chain is persisted, so a wrong flow
     assumption (constants block) yields a clean 422 and zero state."""
     name = str(fields.get("name") or "").strip()
-    err = _codex_name_error(name)
+    err = _codex_name_error(t, name)
     if err:
         raise ValueError(err)
     q = parse_qs(urlparse(str(fields.get("redirect_url") or "").strip()).query)
@@ -679,18 +680,18 @@ def _codex_auth_complete(grant, fields):
     rl = raw.get("rate_limit") if isinstance(raw, dict) else None
     if not isinstance(rl, dict) or not isinstance(rl.get("allowed"), bool):
         raise ValueError("usage probe returned no rate_limit — nothing was saved; begin again")
-    replaced = _codex_pool_enroll({
+    replaced = _codex_pool_enroll(t, {
         "name": name, "refresh_token": rt, "access_token": at,
         "expires_at": time.time() + int(tok.get("expires_in", 864000)),
         "account_id": account_id})
-    with core._poll_health_lock:
-        core._poll_fails.pop(name, None)
-        core._poll_schedule.pop(name, None)  # due immediately
+    with t.poll_health_lock:
+        t.poll_fails.pop(name, None)
+        t.poll_schedule.pop(name, None)  # due immediately
     core._poll_wakeup.set()
     return {"account": name, "enrolled": not replaced, "reauthorized": replaced}
 
 
-def _openai_token(self, parsed):
+def _openai_token(t, self, parsed):
     """Dispense a fresh codex (ChatGPT-subscription) access token plus the
     account id the caller must send as ChatGPT-Account-Id — the id is a
     mandatory request header on the codex endpoint, not metadata. Secret-
@@ -712,35 +713,35 @@ def _openai_token(self, parsed):
         self.send_response(401)
         self.end_headers()
         return
-    pool = _load_openai_creds()
+    pool = _load_openai_creds(t)
     if not pool:
-        return self._json(503, {"error": f"no codex creds at {OPENAI_CODEX_CREDS_FILE}"})
+        return self._json(503, {"error": f"no codex creds at {_st(t).file}"})
     account = (parse_qs(parsed.query).get("account") or [""])[0]
     if account and account not in pool:
         return self._json(404, {"error": f"unknown codex account {account!r}"})
     if not account:
         # The pool incumbent, when the policy has bootstrapped one; else the
         # legacy singleton resolution (sole entry / "gpt" / sorted-first).
-        with core._plock:
-            incumbent = (core._preferred.get("providers", {}).get("gpt") or {}).get("account")
+        with t.plock:
+            incumbent = (t.preferred.get("providers", {}).get("gpt") or {}).get("account")
         if incumbent in pool:
             account = incumbent
     name, creds = _openai_pool_entry(pool, account)
     if not creds or not creds.get("refresh_token"):
-        return self._json(503, {"error": f"no codex creds at {OPENAI_CODEX_CREDS_FILE}"})
+        return self._json(503, {"error": f"no codex creds at {_st(t).file}"})
     tok = None
     # Same acquire shape as poll_gpt: normal path, then one retry after a
     # force-re-read (adopts an externally re-seeded chain if our RT died).
     for attempt in (0, 1):
         try:
-            tok = _oauth_ensure_token(creds, OPENAI_TOKEN_URL, OPENAI_CLIENT_ID,
-                                      _persist_openai_creds,
+            tok = _oauth_ensure_token(t, creds, OPENAI_TOKEN_URL, OPENAI_CLIENT_ID,
+                                      lambda: _persist_openai_creds(t),
                                       margin=OPENAI_REFRESH_MARGIN)
             break
         except urllib.error.HTTPError as e:
             if e.code != 401 or attempt:
                 return self._json(502, {"error": f"token refresh HTTP {e.code}"})
-            name, creds = _openai_pool_entry(_load_openai_creds(force=True), account)
+            name, creds = _openai_pool_entry(_load_openai_creds(t, force=True), account)
             if not creds or not creds.get("refresh_token"):
                 return self._json(503, {"error": "codex creds unusable after re-read"})
         except Exception as e:  # noqa: BLE001
@@ -752,7 +753,7 @@ def _openai_token(self, parsed):
 
 
 register("gpt", {
-    "poll": poll_gpt, "enabled": lambda: os.path.exists(OPENAI_CODEX_CREDS_FILE),
+    "poll": poll_gpt, "enabled": lambda t: os.path.exists(_st(t).file),
     "accounts": _openai_account_names,
     "auth": {
         "kind": "oauth-rotating",
