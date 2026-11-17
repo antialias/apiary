@@ -70,6 +70,11 @@ type entryInfo struct {
 	// request on such a connection rather than routing or forwarding one whose
 	// login nobody can name.
 	unattributed bool
+	// public marks a connection that arrived on the entry's public listener
+	// rather than its LAN one. It grants nothing: the public listener's own
+	// login rules decided whether the connection exists at all. It only tags
+	// the connection's log lines and metric outcomes.
+	public bool
 }
 
 // hpAnonClient is the client label for an anonymous connection, in logs and
@@ -117,6 +122,9 @@ func (e entryInfo) logTag() string {
 	short := e.kind
 	if e.kind == entryHTTPSProxy {
 		short = "hp"
+		if e.public {
+			short = "hp-public"
+		}
 	}
 	if e.client == "" {
 		return " via=" + short
