@@ -55,6 +55,8 @@ Notes:
 - Only `origin/main` ever deploys.
 - `site/docker-compose.yml` here is a local-dev example. The production
   compose (Traefik labels, signup-data volume) is pinned host-side on purpose.
+  Its router rule and priority must match this one's: apiary.wtf is shared
+  with the members app, and the comment on the labels gives the order.
 - Signup data lives outside the checkout and survives deploys.
 
 ## Reading the signups
