@@ -39,6 +39,10 @@ Each page's preview card is `static/og/<page>.jpg` (1200x630), named by the page
 in the site's own fonts. `og/render.sh [page ...]` screenshots it with Google Chrome into
 `static/og/`. A new page adds a row to `PAGES` in `card.html`, its art, and its `og:*` tags.
 
+Two cards are for the members app that shares apiary.wtf: `signin` for its `/sign-in` page and
+`invite` for every `/join/...` link. They live here so `/og/` serves every card; the app's pages
+name them in their own `og:*` tags. An invite's card is the same for every invite.
+
 Apps that play an animated preview (Slack and Discord, told apart by User-Agent in `og.go`) get
 `static/og/<page>.gif` instead, when the page has one; everyone else gets the JPEG. The GIF is made
 by `og/animate.sh <page>` from `og/motion/<page>.mp4`, a five-second image-to-video clip of the
