@@ -54,6 +54,9 @@ func (tn *tenant) getAPIKey(ctx context.Context, account string) (string, error)
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Read before the cache: a drop after it moves the count, so neither a
+	// fetch's answer nor the copy read here is kept or served stale.
+	gen := tn.credDrops.Load()
 	tn.apiKeyMu.Lock()
 	e, has := tn.apiKeys[account]
 	tn.apiKeyMu.Unlock()
@@ -70,6 +73,14 @@ func (tn *tenant) getAPIKey(ctx context.Context, account string) (string, error)
 	}
 	tn.apiKeyMu.Lock()
 	defer tn.apiKeyMu.Unlock()
+	if tn.credDrops.Load() != gen {
+		// A drop began since this fetch did: answer it once, cache nothing,
+		// and never fall back to the copy read before it.
+		if err != nil {
+			return "", err
+		}
+		return key, nil
+	}
 	switch {
 	case err == nil:
 		tn.apiKeys[account] = apiKeyEntry{val: key, fetched: now}

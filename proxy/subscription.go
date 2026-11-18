@@ -119,9 +119,13 @@ func (tn *tenant) fetchToken(account, refusedFP string) (string, time.Time, erro
 // getToken returns a currently-valid access token for account, or "" if none can be
 // obtained (caller then routes FAILED — a loud 503, never the client's ambient bearer).
 // A still-valid cached token is returned when a live fetch fails (this is what makes a
-// brain-down route STALE rather than FAILED). The network fetch runs without the lock
+// brain-down route STALE rather than FAILED), unless a drop happened since it was read:
+// a dropped token is never served. The network fetch runs without the lock
 // held so concurrent requests don't serialize behind it.
 func (tn *tenant) getToken(account string) string {
+	// Read before the cache: a drop after it moves the count, so neither a
+	// fetch's answer nor the copy read here is kept or served stale.
+	gen := tn.credDrops.Load()
 	tn.tokMu.Lock()
 	e := tn.tokens[account]
 	tn.tokMu.Unlock()
@@ -130,20 +134,25 @@ func (tn *tenant) getToken(account string) string {
 	}
 	tok, exp, err := tn.fetchToken(account, "")
 	if err != nil {
-		if e.token != "" && time.Now().Before(e.exp) {
+		if e.token != "" && time.Now().Before(e.exp) && tn.credDrops.Load() == gen {
 			return e.token // still-valid cached token (keeps a brain-down route STALE, not FAILED)
 		}
 		log.Printf("token fetch for %s failed: %v (no cached token — route will FAIL loud)", account, err)
 		return ""
 	}
-	tn.storeToken(account, tok, exp)
+	tn.storeToken(account, tok, exp, gen)
 	return tok
 }
 
 // storeToken caches a freshly fetched token and arms its prewarm timer. The
-// account's refusal history stays; a new copy lifts the reauth quiet.
-func (tn *tenant) storeToken(account, tok string, exp time.Time) {
+// account's refusal history stays; a new copy lifts the reauth quiet. gen is
+// credDrops as the fetch began: a drop since then caches nothing.
+func (tn *tenant) storeToken(account, tok string, exp time.Time, gen uint64) {
 	tn.tokMu.Lock()
+	if tn.credDrops.Load() != gen {
+		tn.tokMu.Unlock()
+		return
+	}
 	e := tn.tokens[account]
 	if e.token != tok {
 		e.quietUntil = time.Time{}
@@ -228,6 +237,7 @@ func (tn *tenant) reauthToken(account, refused, msg string) reauthResult {
 	if quiet {
 		return reauthResult{how: "quiet", old: old, quietFor: e.quietFor}
 	}
+	gen := tn.credDrops.Load()
 	tok, exp, err := tn.fetchToken(account, rfp)
 	switch {
 	case err != nil:
@@ -237,7 +247,7 @@ func (tn *tenant) reauthToken(account, refused, msg string) reauthResult {
 		tn.quietAccount(account, refused, reauthQuiet)
 		return reauthResult{how: "same", old: old}
 	}
-	tn.storeToken(account, tok, exp)
+	tn.storeToken(account, tok, exp, gen)
 	return reauthResult{tok: tok, how: "fetched", old: old}
 }
 
@@ -412,9 +422,10 @@ func (tn *tenant) armWarmTimerLocked(account string, d, wait time.Duration) {
 // unless another path armed a timer meanwhile or the account left the warm
 // set. The first failure of a run is logged; the retries are not.
 func (tn *tenant) prewarmRefresh(account string, wait time.Duration) {
+	gen := tn.credDrops.Load()
 	tok, exp, err := tn.fetchToken(account, "")
 	if err == nil {
-		tn.storeToken(account, tok, exp)
+		tn.storeToken(account, tok, exp, gen)
 		return
 	}
 	tn.tokMu.Lock()

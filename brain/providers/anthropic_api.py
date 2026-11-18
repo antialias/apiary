@@ -37,6 +37,9 @@ class _Store:
     def __init__(self, t):
         self.file = t.path(ANTHROPIC_API_CREDS_FILE)
         self.keys_lock = threading.Lock()
+        # Held from read to write by every edit of the file (enrol, remove), so
+        # an edit never writes back a copy another edit has since changed.
+        self.edit_lock = threading.Lock()
         self.keys = None
         self.keys_mtime = None
 
@@ -75,7 +78,7 @@ def _persist(t, keys):
         try:
             core._store.write_json(_st(t).file, doc, indent=1)
         except Exception as e:  # noqa: BLE001
-            raise ValueError(f"cannot write {_st(t).file}: {e}") from e
+            raise ValueError(f"the keys could not be stored ({type(e).__name__}) — nothing was changed") from e
         _st(t).keys, _st(t).keys_mtime = dict(keys), core._store.mtime(_st(t).file)
 
 
@@ -184,9 +187,16 @@ def _auth_complete(t, grant, fields):
                          f"{core._key_fingerprint(key)}) — nothing was saved") from e
     except Exception as e:  # noqa: BLE001
         raise ValueError(f"key validation {type(e).__name__} — nothing was saved") from e
-    replaced = name in keys
-    keys[name] = key
-    _persist(t, keys)
+    # Read again under the edit lock: the probe took seconds, and a key
+    # removed (or added) meanwhile is not written back from the first read.
+    with _st(t).edit_lock:
+        keys = _load(t)
+        err = _name_error(t, name, keys)
+        if err:
+            raise ValueError(err + " — nothing was saved")
+        replaced = name in keys
+        keys[name] = key
+        _persist(t, keys)
     core.log(f"{PROVIDER} key {'replaced' if replaced else 'enrolled'} for {name} "
              f"(fingerprint {core._key_fingerprint(key)})")
     with t.poll_health_lock:
@@ -194,6 +204,21 @@ def _auth_complete(t, grant, fields):
         t.poll_schedule.pop(name, None)  # due at once
     core._poll_wakeup.set()
     return {"account": name, "enrolled": True, "reauthorized": replaced}
+
+
+def _auth_remove(t, account):
+    """Drop one key from the file, and the file with its last key."""
+    with _st(t).edit_lock:
+        keys = _load(t)
+        if keys.pop(account, None) is None:
+            raise ValueError(f"{account!r} is not enrolled — nothing was removed")
+        if keys:
+            _persist(t, keys)
+        else:
+            with _st(t).keys_lock:
+                core._remove_credentials(_st(t).file)
+                _st(t).keys, _st(t).keys_mtime = None, None
+    core.log(f"{PROVIDER} key removed for {account}")
 
 
 register(PROVIDER, {
@@ -219,5 +244,6 @@ register(PROVIDER, {
         "status": _auth_status,
         "begin": _auth_begin,
         "complete": _auth_complete,
+        "remove": _auth_remove,
     },
 })

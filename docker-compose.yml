@@ -41,7 +41,6 @@ services:
       SWITCH_CLIENT_SECRET_FILE: /creds/client_secret
       SWITCH_CLASS_STATE_FILE: /creds/proxy/class-rows.json
       SWITCH_CLIENT_BASE_URL: http://127.0.0.1:8787
-      SWITCH_KIMI_KEY: ${SWITCH_KIMI_KEY:-}
       SWITCH_LOCAL_UPSTREAM: ${LOCAL_UPSTREAM:-}
     volumes:
       - data:/creds

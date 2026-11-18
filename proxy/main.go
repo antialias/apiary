@@ -64,7 +64,6 @@
 // policy-free ids were deleted in quota-model C2 (§2.2 row 10). Keys come from the
 // environment — NEVER the repo.
 //
-//	SWITCH_KIMI_KEY         Kimi API key (enables the kimi provider)
 //	SWITCH_KIMI_UPSTREAM    Anthropic-format Kimi endpoint (default https://api.kimi.com/coding for
 //	                        sk-kimi-* Kimi-for-Coding keys; Moonshot platform keys use https://api.moonshot.ai/anthropic)
 //	An edition's providers and doors document their own env where they read
@@ -140,10 +139,11 @@ var (
 	localUpstream = ""
 
 	// Hosted direct providers (see the direct-providers section). Set from env in
-	// main(); a provider is enabled only when its key is present. Keys are secrets —
-	// they live in the process env, never in the repo.
-	kimiKey      string
-	kimiUpstream = "https://api.kimi.com/coding" // Kimi-for-Coding (sk-kimi-*); Moonshot platform keys override to https://api.moonshot.ai/anthropic
+	// main(). No key lives here: each tenant's is its brain's (bearerWire).
+	// kimiUpstream is Kimi-for-Coding's (sk-kimi-*) unless SWITCH_KIMI_UPSTREAM
+	// says otherwise (Moonshot platform keys: https://api.moonshot.ai/anthropic);
+	// package default "" keeps tests hermetic.
+	kimiUpstream string
 	// The gpt provider is the codex subscription backend (#33) — translated
 	// in-proxy, bearer dispensed by the brain. See codex.go for the upstream/auth
 	// model; the old LiteLLM + dev-key path (SWITCH_GPT_KEY/SWITCH_GPT_UPSTREAM)
@@ -655,6 +655,7 @@ func (tn *tenant) applyPreferred(body io.Reader) {
 	fleet, fleetErr := decodeFleet(d.Fleet)
 	pref.mu.Lock()
 	wasOK := pref.ok
+	left := departedAccounts(pref.accounts, *d.Accounts)
 	pref.account, pref.reason, pref.weekly = d.Account, d.Reason, d.Weekly
 	pref.laneRules, pref.lanes, pref.classes = d.LaneRules, d.Lanes, classes
 	pref.hardPct = d.Thresholds.Hard // 0 when absent => defaultHardPct at the read site
@@ -673,6 +674,7 @@ func (tn *tenant) applyPreferred(body io.Reader) {
 	if logFleet {
 		log.Printf("brain fleet unreadable, sessions show no room until a readable one: %v", fleetErr)
 	}
+	tn.dropDeparted(left)
 	tn.pruneRecords(accounts)
 	// The ledger just pulled covers what it covers; what it does not waits in
 	// the reporter's queue (reports.go), which this wakes. Nothing is posted
@@ -2118,12 +2120,16 @@ func main() {
 			localUpstream = v
 		}
 	}
-	// Hosted direct providers (Kimi/GPT). Enabled only when their key is set; the key
-	// is read from the environment and never touches the repo.
-	kimiKey = os.Getenv("SWITCH_KIMI_KEY")
+	// Hosted direct providers (Kimi/GPT). Neither holds a key: each tenant's
+	// credential is its brain's. "off" disables a provider.
 	wireInitFromEnv()
+	kimiUpstream = "https://api.kimi.com/coding"
 	if v := strings.TrimRight(os.Getenv("SWITCH_KIMI_UPSTREAM"), "/"); v != "" {
-		kimiUpstream = v
+		if strings.EqualFold(v, "off") || v == "0" {
+			kimiUpstream = ""
+		} else {
+			kimiUpstream = v
+		}
 	}
 	// The gpt provider (#33): the codex subscription backend, translated in-proxy.
 	// Resolved here ONLY (package default "" keeps tests hermetic); "off"
@@ -2505,10 +2511,8 @@ func buildHandlers() (gated, core http.Handler) {
 	if t := parseDirectTarget("SWITCH_LOCAL_UPSTREAM", localUpstream); t != nil {
 		providers = append(providers, &provider{name: "local", target: t, wire: localWire{}})
 	}
-	if kimiKey != "" {
-		if t := parseDirectTarget("SWITCH_KIMI_UPSTREAM", kimiUpstream); t != nil {
-			providers = append(providers, &provider{name: "kimi", target: t, wire: bearerWire{key: kimiKey}})
-		}
+	if t := parseDirectTarget("SWITCH_KIMI_UPSTREAM", kimiUpstream); t != nil {
+		providers = append(providers, &provider{name: "kimi", target: t, wire: bearerWire{account: "kimi"}})
 	}
 	if codexUpstream != "" {
 		if t := parseDirectTarget("SWITCH_CODEX_UPSTREAM", codexUpstream); t != nil {

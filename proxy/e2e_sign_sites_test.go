@@ -84,7 +84,7 @@ func TestE2EClassCrossOntoAnAPIAccountCarriesOnlyItsKey(t *testing.T) {
 	haikuClass(h, false)
 	h.brainMu.Lock()
 	h.standings = map[string]any{native: apiStanding(), other: apiStanding()}
-	h.apiKeys = map[string]string{native: "sk-test-native", other: "sk-test-other"}
+	h.apiKeys = map[string]string{native: "sk-test-native", other: "sk-test-other", "kimi": "kimi-secret"}
 	h.lanes["haiku"] = map[string]any{"account": other, "reason": "incumbent", "effective": map[string]float64{other: 10, native: 20}}
 	h.brainMu.Unlock()
 	h.payFrom("frontier/lane:haiku", other+"/usd", native+"/usd")

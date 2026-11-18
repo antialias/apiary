@@ -101,8 +101,11 @@ func wireOf(p *provider) wire {
 // ---- pass-through wires ----
 
 // bearerWire is a hosted provider that speaks Anthropic natively and
-// authenticates with its own key (Kimi). The key replaces the client's bearer.
-type bearerWire struct{ key string }
+// authenticates with a static key (Kimi). The key is the asking tenant's own,
+// dispensed by its brain's GET /api-key?account=<account> (apikey.go) and
+// cached per tenant like an api account's; the proxy holds none of its own.
+// It replaces the client's bearer.
+type bearerWire struct{ account string }
 
 func (bearerWire) authLabel() string                                       { return "inject" }
 func (bearerWire) name() string                                            { return "bearer" }
@@ -110,15 +113,30 @@ func (bearerWire) owns(*http.Request) bool                                 { ret
 func (bearerWire) translate(resp *http.Response, _ reqInfo) *http.Response { return resp }
 func (bearerWire) reauth(*http.Request) bool                               { return false }
 
-func (bearerWire) prepare(info *reqInfo, body []byte, _ string) string {
+// prepare fetches the tenant's key: an account the tenant's document does not
+// list is refused before anything is fetched (actuatorFor), and a tenant with
+// no key is refused rather than signed with anyone else's.
+func (w bearerWire) prepare(info *reqInfo, body []byte, _ string) string {
 	info.body = body
+	if _, _, err := info.tenant.actuatorFor(w.account); err != nil {
+		return err.Error()
+	}
+	key, err := info.tenant.getAPIKey(nil, w.account)
+	if err != nil {
+		return "no " + w.account + " key: " + err.Error()
+	}
+	info.token = key
 	return ""
 }
 
-func (w bearerWire) apply(out *http.Request, _ reqInfo) {
-	// Anthropic convention: the provider's own key as a bearer.
-	out.Header.Set("Authorization", "Bearer "+w.key)
+func (w bearerWire) apply(out *http.Request, info reqInfo) {
+	// Anthropic convention: the provider's key as a bearer. Never the client's.
 	out.Header.Del("X-Api-Key")
+	if info.token == "" {
+		out.Header.Del("Authorization")
+		return
+	}
+	out.Header.Set("Authorization", "Bearer "+info.token)
 }
 
 // localWire is a llama-server (#135): an open runtime with no auth

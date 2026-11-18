@@ -477,7 +477,7 @@ def _splice_refresh_token(t, email, refresh_token, facts=None):
         try:
             arr = _read_file(t)
         except Exception as e:  # noqa: BLE001
-            raise ValueError(f"cannot read {_st(t).file}: {e}") from e
+            raise ValueError(f"the accounts could not be read ({type(e).__name__})") from e
         facts = dict(facts or {})
         hit = False
         for a in arr:
@@ -494,7 +494,7 @@ def _splice_refresh_token(t, email, refresh_token, facts=None):
         try:
             _write_file(t, arr)
         except Exception as e:  # noqa: BLE001
-            raise ValueError(f"cannot update {_st(t).file}: {e}") from e
+            raise ValueError(f"the accounts could not be updated ({type(e).__name__})") from e
         _st(t).creds[email] = {"refresh_token": refresh_token,
                          "access_token": None, "expires_at": 0, **facts}
         _st(t).cred_generation[email] = _st(t).cred_generation.get(email, 0) + 1
@@ -510,7 +510,7 @@ def _append_account(t, email, refresh_token, facts=None):
         try:
             arr = _read_file(t)  # a first enrollment may legitimately create the file
         except Exception as e:  # noqa: BLE001
-            raise ValueError(f"cannot read {_st(t).file}: {e}") from e
+            raise ValueError(f"the accounts could not be read ({type(e).__name__})") from e
         if any(a.get("name") == email for a in arr if isinstance(a, dict)):
             raise ValueError(f"{email} is already configured — re-authorize it instead")
         if email in core.PROVIDERS or email in core._provider_poll_targets(t):
@@ -522,7 +522,7 @@ def _append_account(t, email, refresh_token, facts=None):
         try:
             _write_file(t, arr)
         except Exception as e:  # noqa: BLE001
-            raise ValueError(f"cannot update {_st(t).file}: {e}") from e
+            raise ValueError(f"the accounts could not be updated ({type(e).__name__})") from e
         _st(t).creds[email] = {"refresh_token": refresh_token,
                         "access_token": None, "expires_at": 0, **facts}
         _st(t).cred_generation[email] = _st(t).cred_generation.get(email, 0) + 1
@@ -569,6 +569,34 @@ def _anthropic_auth_complete(t, grant, fields):
         raise ValueError("code is required — paste the code shown after approving")
     email, enrolled = _reauth_exchange_grant(t, grant, code)
     return {"account": email, "enrolled": enrolled, "reauthorized": not enrolled}
+
+
+def _anthropic_auth_remove(t, account):
+    """Drop one account from accounts.json (the file with the last one) and
+    from the live cache. Its generation moves on, so a poll of it already in
+    flight is discarded rather than published."""
+    with t.refresh_lock:
+        try:
+            arr = _read_file(t)
+        except Exception as e:  # noqa: BLE001
+            raise ValueError(f"the accounts could not be read ({type(e).__name__})") from e
+        rest = [a for a in arr if not (isinstance(a, dict) and a.get("name") == account)]
+        if len(rest) == len(arr):
+            raise ValueError(f"{account} is not connected — nothing was removed")
+        try:
+            if rest:
+                _write_file(t, rest)
+            else:
+                core._remove_credentials(_st(t).file)
+        except OSError as e:
+            raise ValueError(f"the accounts could not be updated ({type(e).__name__})") from e
+        _st(t).creds.pop(account, None)
+        _st(t).cred_generation[account] = _st(t).cred_generation.get(account, 0) + 1
+        _st(t).last_refresh.pop(account, None)
+    with _st(t).proxy_refusals_lock:
+        _st(t).proxy_refusals.pop(account, None)
+        _st(t).forced_refresh_at.pop(account, None)
+    core.log(f"removed anthropic account {account}")
 
 
 _REAUTH_HTML = """<!doctype html>
@@ -861,6 +889,7 @@ register("anthropic", {
         "status": _anthropic_auth_status,
         "begin": _anthropic_auth_begin,
         "complete": _anthropic_auth_complete,
+        "remove": _anthropic_auth_remove,
     },
 })
 register_route("GET", "/token", _token)

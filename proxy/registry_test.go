@@ -273,7 +273,7 @@ func TestAdvertisableConfigured(t *testing.T) {
 	// A provider advertises nothing of its own (quota-model C2; local since #135).
 	for _, p := range []*provider{
 		{name: "local", target: mustURL(t, "http://127.0.0.1:11434"), wire: localWire{}},
-		{name: "kimi", target: mustURL(t, "http://x"), wire: bearerWire{key: "k"}},
+		{name: "kimi", target: mustURL(t, "http://x"), wire: bearerWire{account: "kimi"}},
 	} {
 		providers = []*provider{p}
 		if advertisableConfigured() {

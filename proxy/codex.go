@@ -85,10 +85,13 @@ var codexTokenFresh = 5 * time.Minute
 // getCodexToken returns (bearer, account_id, pool name, ok) from the brain's
 // /openai-token dispenser for one pool account (""=incumbent), mirroring
 // getToken's contract: a fetch failure rides the cached bearer while it is
-// still unexpired (STALE), and ok=false only when there is nothing usable at
-// all. The returned pool name is the brain's own (response `name` key); an old
+// still unexpired (STALE) unless a drop happened since it was read, and
+// ok=false only when there is nothing usable at all. The returned pool name is the brain's own (response `name` key); an old
 // brain sends none and the requested name is echoed back so labels stay honest.
 func (tn *tenant) getCodexToken(account string) (string, string, string, bool) {
+	// Read before the cache: a drop after it moves the count, so neither a
+	// fetch's answer nor the copy read here is kept or served stale.
+	gen := tn.credDrops.Load()
 	tn.codexTokMu.Lock()
 	e, has := tn.codexToks[account]
 	tn.codexTokMu.Unlock()
@@ -97,7 +100,7 @@ func (tn *tenant) getCodexToken(account string) (string, string, string, bool) {
 		return e.val, e.acct, e.name, true
 	}
 	stale := func() (string, string, string, bool) {
-		if has && e.val != "" && now.Before(e.exp) {
+		if has && e.val != "" && now.Before(e.exp) && tn.credDrops.Load() == gen {
 			return e.val, e.acct, e.name, true // STALE — dispenser down, bearer still valid
 		}
 		return "", "", "", false
@@ -127,8 +130,10 @@ func (tn *tenant) getCodexToken(account string) (string, string, string, bool) {
 					name = account
 				}
 				tn.codexTokMu.Lock()
-				tn.codexToks[account] = codexTokEntry{val: d.AccessToken, acct: d.AccountID,
-					name: name, exp: time.Unix(int64(d.ExpiresAt), 0), fetched: now}
+				if tn.credDrops.Load() == gen { // else a drop began since: cache nothing
+					tn.codexToks[account] = codexTokEntry{val: d.AccessToken, acct: d.AccountID,
+						name: name, exp: time.Unix(int64(d.ExpiresAt), 0), fetched: now}
+				}
 				tn.codexTokMu.Unlock()
 				return d.AccessToken, d.AccountID, name, true
 			}

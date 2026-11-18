@@ -268,10 +268,17 @@ func newE2EHosted(t *testing.T, kimiPathSuffix string) (*e2eHosted, func()) {
 
 	// snapshot + install provider globals
 	oldLocal := localUpstream
-	oldKK, oldKU := kimiKey, kimiUpstream
+	oldKU := kimiUpstream
 	oldCU := codexUpstream
 	localUpstream = "" // isolate: table = kimi + gpt only
-	kimiKey, kimiUpstream = "kimi-secret", h.up.URL+kimiPathSuffix
+	// Kimi's key is the tenant's, dispensed by its brain's /api-key (bearerWire).
+	kimiUpstream = h.up.URL + kimiPathSuffix
+	env.brainMu.Lock()
+	if env.apiKeys == nil {
+		env.apiKeys = map[string]string{}
+	}
+	env.apiKeys["kimi"] = "kimi-secret"
+	env.brainMu.Unlock()
 	codexUpstream = h.codexUp.URL
 
 	env.proxy.Close()
@@ -281,7 +288,7 @@ func newE2EHosted(t *testing.T, kimiPathSuffix string) (*e2eHosted, func()) {
 		h.up.Close()
 		h.codexUp.Close()
 		localUpstream = oldLocal
-		kimiKey, kimiUpstream = oldKK, oldKU
+		kimiUpstream = oldKU
 		codexUpstream = oldCU
 		providers = nil
 		restoreBase()

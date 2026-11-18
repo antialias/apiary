@@ -37,6 +37,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -65,6 +66,12 @@ type tenant struct {
 	name string
 	lan  bool
 	tap  string
+
+	// credDrops counts dropDeparted's drops of cached credentials. A brain
+	// fetch reads it before it starts and caches its answer only when it has
+	// not moved since, so a fetch begun before a drop never re-caches what the
+	// drop forgot.
+	credDrops atomic.Uint64
 
 	// The brain's document and the per-lane routing state (main.go).
 	pref          *decision
@@ -732,4 +739,74 @@ func (tn *tenant) closureKey(key string) string {
 		return key
 	}
 	return tn.id + "/" + key
+}
+
+// departedAccounts is every account the last applied document listed and next
+// does not: an account disconnected on the brain (POST /auth/<pid>/remove).
+// The first document departs nothing.
+func departedAccounts(prev, next map[string]acctStanding) []string {
+	var left []string
+	for a, was := range prev {
+		now, ok := next[a]
+		// A re-added account is a new identity: the brain sets its
+		// recheck_epoch to the enrolment, so a remove and an add between two
+		// documents still drops what was cached for the old credential.
+		if !ok || epochAdvanced(was.RecheckEpoch, now.RecheckEpoch) {
+			left = append(left, a)
+		}
+	}
+	sort.Strings(left)
+	return left
+}
+
+// epochAdvanced: the next document's recheck_epoch is newer than the last's.
+func epochAdvanced(prev, next *float64) bool {
+	return next != nil && (prev == nil || *next > *prev)
+}
+
+// dropDeparted forgets every credential this proxy holds for accounts that
+// left the tenant's document: the subscription token and its prewarm timer,
+// the codex bearer (cached under its pool name, or under "" for the
+// incumbent the brain named), and the api key. Without it a cached copy would
+// outlive its account by up to its expiry. The refusal records go through
+// pruneRecords as before.
+func (tn *tenant) dropDeparted(left []string) {
+	if len(left) == 0 {
+		return
+	}
+	gone := make(map[string]bool, len(left))
+	for _, a := range left {
+		gone[a] = true
+	}
+	// Before the deletes: a fetch that read the count earlier and stores after
+	// them finds it moved and caches nothing.
+	tn.credDrops.Add(1)
+	tn.warmMu.Lock()
+	for a := range gone {
+		if t := tn.warmTimers[a]; t != nil {
+			t.Stop()
+			delete(tn.warmTimers, a)
+		}
+	}
+	tn.warmMu.Unlock()
+	tn.tokMu.Lock()
+	for a := range gone {
+		delete(tn.tokens, a)
+	}
+	tn.tokMu.Unlock()
+	tn.codexTokMu.Lock()
+	for k, e := range tn.codexToks {
+		if gone[k] || (e.name != "" && gone[e.name]) {
+			delete(tn.codexToks, k)
+		}
+	}
+	tn.codexTokMu.Unlock()
+	tn.apiKeyMu.Lock()
+	for a := range gone {
+		delete(tn.apiKeys, a)
+		delete(tn.apiKeyStates, a)
+	}
+	tn.apiKeyMu.Unlock()
+	log.Printf("tenant %s: dropped the cached credentials of %s (left the brain's document, or re-added)",
+		tn.id, strings.Join(left, ", "))
 }

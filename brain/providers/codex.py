@@ -691,6 +691,28 @@ def _codex_auth_complete(t, grant, fields):
     return {"account": name, "enrolled": not replaced, "reauthorized": replaced}
 
 
+def _codex_auth_remove(t, account):
+    """Drop one chain from the pool and persist the rest; the file goes with
+    the last chain (a legacy file holds only one). Unlike a rotation's
+    persist, a failed write raises: the chain is still there."""
+    with t.refresh_lock:
+        pool = _load_openai_creds(t, force=True)
+        if not pool or account not in pool:
+            raise ValueError(f"{account!r} is not in the codex pool — nothing was removed")
+        rest = {n: dict(e, name=n) for n, e in pool.items() if n != account}
+        try:
+            if rest:
+                core._store.write_json(_st(t).file, list(rest.values()))
+                _st(t).pool, _st(t).pool_shape = rest, "array"
+                _st(t).pool_mtime = core._store.mtime(_st(t).file)
+            else:
+                core._remove_credentials(_st(t).file)
+                _st(t).pool, _st(t).pool_mtime = None, None
+        except OSError as e:
+            raise ValueError(f"the chains could not be updated ({type(e).__name__})") from e
+    core.log(f"codex chain {account!r} removed (pool size {len(rest)})")
+
+
 def _openai_token(t, self, parsed):
     """Dispense a fresh codex (ChatGPT-subscription) access token plus the
     account id the caller must send as ChatGPT-Account-Id — the id is a
@@ -772,6 +794,7 @@ register("gpt", {
         "status": _gpt_auth_status,
         "begin": _codex_auth_begin,
         "complete": _codex_auth_complete,
+        "remove": _codex_auth_remove,
     },
     # Codex credits (C6) are charged from tokens: chat tokens (models, weighted
     # by speed) and the image tool's tokens (images), each per per_tokens.

@@ -269,10 +269,19 @@ UA = None  # set in main
 #                  per-target poll health, guarded by t.poll_health_lock. The
 #                  poller thread is the only writer; the HTTP handlers read.
 #   recheck_epochs the owner's re-checks (quota-model 50 §2.6, C7): account ->
-#                  the instant of its last /recheck, published as the account's
-#                  recheck_epoch; the proxy drops every refusal record on the
-#                  account older than it. Guarded by t.poll_health_lock; kept in
+#                  the instant of its last /recheck or enrolment (C11),
+#                  published as the account's recheck_epoch; the proxy drops
+#                  every refusal record on the account older than it, and an
+#                  advance drops its cached credential (a re-added account is a
+#                  new identity). Guarded by t.poll_health_lock; kept in
 #                  t.recheck_file (_save_rechecks_locked, _load_rechecks).
+#   enrol_lock     a remove (POST /auth/<pid>/remove) holds it from its
+#                  driver's remove through _forget_account; an enrolment
+#                  (/auth/<pid>/complete) takes it for its epoch advance, after
+#                  its driver wrote the account. So a remove's forget never
+#                  lands after an overlapping re-add's advance: an enrolled
+#                  account always has an epoch newer than any forget. Outermost:
+#                  taken before any lock a driver or the core takes.
 _start_time = time.time()
 # Re-authorization sets this after clearing one account's schedule; a tenant's
 # creation or removal sets it too. One poller serves every tenant. Event
@@ -3361,16 +3370,18 @@ def _account_roster(t, snap):
 
 
 def api_key(t, account):
-    """(key, "") for an api-kind account (§1.2) whose provider's reader finds
-    a key; ("", "not_api") for an account that is not one here, ("", "no_key")
-    for one with no key placed. An api account is named in the roster, else
-    by its provider's id (a single-account provider's one account), so one
-    whose key is absent (its poll not enabled) is still known as api."""
+    """(key, "") for a key-signed account whose provider's reader finds a
+    key: an api-kind account (§1.2), or a provider whose static key the proxy
+    signs with (Kimi). ("", "not_api") for an account whose provider has no
+    reader here, ("", "no_key") for one with no key placed. The account is
+    named in the roster, else by its provider's id (a single-account
+    provider's one account), so one whose key is absent (its poll not
+    enabled) is still known."""
     with t.lock:
         roster = _account_roster(t, list(t.state.values()))
     provider = roster.get(account) or account
     reader = (PROVIDERS.get(provider) or {}).get("api_key")
-    if _account_kind(provider) != "api" or reader is None:
+    if reader is None:
         return "", "not_api"
     key = (reader(t, account) or "").strip()
     return (key, "") if key else ("", "no_key")
@@ -3386,12 +3397,22 @@ def recheck(t, account, now):
         roster = _account_roster(t, list(t.state.values()))
     if account not in roster:
         return None
+    epoch = _advance_epoch(t, account, now)
+    _poll_wakeup.set()
+    return epoch
+
+
+def _advance_epoch(t, account, now):
+    """Bump account's recheck_epoch to now (never back), persist it and make
+    the account due at once. A /recheck and every enrolment (C11) do: the
+    proxy reads an advanced epoch as a new identity, dropping its refusal
+    records and its cached credential, so a remove and a re-add between two
+    of its pulls never leaves it holding the removed one."""
     with t.poll_health_lock:
         epoch = max(now, t.recheck_epochs.get(account) or 0)
         t.recheck_epochs[account] = epoch
         _save_rechecks_locked(t)
         t.poll_schedule.pop(account, None)  # due at once
-    _poll_wakeup.set()
     return epoch
 
 
@@ -8381,6 +8402,11 @@ def _poll_pass(t):
             if is_provider:
                 pid, acct = provider_dispatch[name]
                 res = PROVIDERS[pid]["poll"](t, prev, account=acct)
+                if name not in _provider_poll_targets(t):
+                    # Removed while it was polled (POST /auth/<pid>/remove): its
+                    # result would list it again until the next pass pruned it.
+                    log(f"{name}: discarded poll of a removed account")
+                    continue
             else:
                 # Re-authorization can finish while this network poll is in flight.
                 # Never publish/schedule a result produced by the superseded token.
@@ -8389,6 +8415,9 @@ def _poll_pass(t):
                 res = loop["poll"](t, name, known_meta)
                 if generation != loop["generation"](t, name):
                     log(f"{name}: discarded poll from replaced credential")
+                    continue
+                if name not in loop["names"](t):
+                    log(f"{name}: discarded poll of a removed account")
                     continue
             if res["ok"]:
                 line = _reading_line(res)
@@ -8498,6 +8527,38 @@ def _auth_grant_take(t, state, provider):
         raise ValueError(f"this attempt was started for {grant.get('provider')} "
                          "— begin again on the right provider")
     return grant
+
+
+def _remove_credentials(path):
+    """Delete a driver's credentials file and any write left half-done beside
+    it (a remove's last account). ValueError, naming the file, on failure."""
+    try:
+        _store.remove(path)
+    except OSError as e:
+        raise ValueError(f"the credentials could not be removed ({type(e).__name__})") from e
+
+
+def _forget_account(t, name):
+    """Drop everything the core keeps on account `name` once its driver has
+    removed its credentials (POST /auth/<pid>/remove): its reading, its poll
+    health and schedule, its re-check epoch and its served mark. Then the
+    decision is recomputed, the state written and the document republished,
+    so the next /preferred and /events no longer list it. A poll of it already
+    in flight is discarded (the driver's remove bumps its generation) or pruned
+    at the next pass (a provider target its driver no longer enumerates)."""
+    with t.lock:
+        t.state.pop(name, None)
+    with t.poll_health_lock:
+        t.poll_fails.pop(name, None)
+        t.poll_schedule.pop(name, None)
+        if t.recheck_epochs.pop(name, None) is not None:
+            _save_rechecks_locked(t)
+    with t.served_lock:
+        t.served["head_at"].pop(name, None)
+    compute_preferred(t)
+    with t.plock:
+        _save_state(t)
+    _events_mark(t)
 
 
 def _auth_providers_payload(t, now):
@@ -9291,7 +9352,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
-        m = re.match(r"^/auth/([a-z0-9-]+)/(begin|complete)$", path)
+        m = re.match(r"^/auth/([a-z0-9-]+)/(begin|complete|remove)$", path)
         md = re.match(r"^/(consumers|money)/(validate|reload)$", path)
         if ("POST", path) in ROUTES:
             ROUTES[("POST", path)](t, self, parsed)
@@ -9561,8 +9622,8 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, _auth_providers_payload(t, time.time()))
 
     def _auth_flow(self, pid, step):
-        """POST /auth/<pid>/begin|complete — the ONE enrollment surface every
-        provider authority is driven through (#72)."""
+        """POST /auth/<pid>/begin|complete|remove — the ONE enrollment surface
+        every provider authority is driven through (#72), and its undo."""
         t = self.tenant
         if not self._guard():
             return
@@ -9573,6 +9634,8 @@ class Handler(BaseHTTPRequestHandler):
                                     "providers": sorted(k for k, v in PROVIDERS.items()
                                                         if v.get("auth"))})
         body = self._read_json_body() or {}
+        if step == "remove":
+            return self._auth_remove(t, pid, auth, body)
         if step == "begin":
             account = body.get("account") or None
             if account is not None and \
@@ -9593,9 +9656,37 @@ class Handler(BaseHTTPRequestHandler):
             res = auth["complete"](t, grant, body)
         except ValueError as e:
             return self._json(422, {"error": str(e)})
+        if res.get("account"):
+            # After any remove of the same account that overlapped this add:
+            # its forget can't then drop the epoch this advance writes.
+            with t.enrol_lock:
+                _advance_epoch(t, res["account"], time.time())
+            _poll_wakeup.set()
         log(f"auth complete: {pid} account={res.get('account')} "
             f"enrolled={res.get('enrolled')}")
         return self._json(200, res)
+
+    def _auth_remove(self, t, pid, auth, body):
+        """POST /auth/<pid>/remove {account} (C11): disconnect one account. The
+        driver deletes its record from the credentials file (the file itself
+        when it was the last), then the core forgets its poll state, so the
+        next document no longer lists it. 400 without an account, 404 for one
+        this provider does not hold, 422 when the driver cannot rewrite its
+        file (nothing is forgotten then: the account is still there)."""
+        account = body.get("account")
+        if not isinstance(account, str) or not account.strip():
+            return self._json(400, {"error": "account is required"})
+        account = account.strip()
+        if account not in {r["name"] for r in auth["status"](t, time.time())}:
+            return self._json(404, {"error": f"unknown {pid} account {account!r}"})
+        with t.enrol_lock:
+            try:
+                auth["remove"](t, account)
+            except ValueError as e:
+                return self._json(422, {"error": str(e)})
+            _forget_account(t, account)
+        log(f"auth remove: {pid} account={account}")
+        return self._json(200, {"account": account, "removed": True})
 
 
     def _read_json_body(self, max_bytes=16384):

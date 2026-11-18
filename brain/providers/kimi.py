@@ -85,7 +85,7 @@ def _persist_kimi_key(t, key):
         try:
             core._store.write_json(_st(t).file, {"api_key": key})
         except Exception as e:  # noqa: BLE001
-            raise ValueError(f"cannot write {_st(t).file}: {e}") from e
+            raise ValueError(f"the key could not be stored ({type(e).__name__}) — nothing was saved") from e
         _st(t).file_key = key
         _st(t).file_mtime = core._store.mtime(_st(t).file)
     core.log(f"kimi key enrolled (fingerprint {core._key_fingerprint(key)})")
@@ -280,20 +280,28 @@ def _kimi_auth_complete(t, grant, fields):  # noqa: ARG001 — uniform authority
         t.poll_fails.pop("kimi", None)
         t.poll_schedule.pop("kimi", None)  # due immediately
     core._poll_wakeup.set()
-    return {"account": "kimi", "enrolled": True, "reauthorized": False,
-            "note": "the routing proxy holds its own copy of this key "
-                    "(SWITCH_KIMI_KEY) — update the proxy env separately"}
+    return {"account": "kimi", "enrolled": True, "reauthorized": False}
+
+
+def _kimi_auth_remove(t, account):  # noqa: ARG001 — the one account is "kimi"
+    with t.refresh_lock:
+        core._remove_credentials(_st(t).file)
+        _st(t).file_key = None
+        _st(t).file_mtime = None
+    core.log("kimi key removed")
 
 
 register("kimi", {
     "poll": poll_kimi, "enabled": lambda t: bool(_kimi_key(t)),
+    # The proxy signs this tenant's Kimi requests with this key, dispensed by
+    # GET /api-key?account=kimi like an api account's; it holds none of its own.
+    "api_key": lambda t, _account: _kimi_key(t),
     "auth": {
         "kind": "static-key",
         "label": "Kimi for Coding (Moonshot)",
         "custody": {"rotation": "none",
-                    "note": "A static API key. The routing proxy injects its OWN "
-                            "copy (SWITCH_KIMI_KEY); enrolling here fixes quota "
-                            "polling only — update the proxy env separately."},
+                    "note": "A static API key, held by this brain alone: the routing "
+                            "proxy is dispensed it by GET /api-key."},
         "enroll": {"flow": "paste-key", "can_add": True,
                    "instructions": "Paste the sk-kimi-* key. It is validated with a "
                                    "usage probe before anything is saved.",
@@ -301,6 +309,7 @@ register("kimi", {
         "status": _kimi_auth_status,
         "begin": _kimi_auth_begin,
         "complete": _kimi_auth_complete,
+        "remove": _kimi_auth_remove,
     },
     # Sized from the brain's own polls (quota-model 66 §7).
     "sizing": lambda wid, kind: "poll" if kind in ("window", "cycle_pool") else None,

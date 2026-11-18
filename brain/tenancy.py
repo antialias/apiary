@@ -105,6 +105,7 @@ class Tenant:
         self.events_cond = threading.Condition()
         self.events_publish_lock = threading.RLock()
         self.reauth_lock = threading.Lock()
+        self.enrol_lock = threading.Lock()
         self.events_dirty = True
         self.stopped = False
 

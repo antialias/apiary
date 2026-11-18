@@ -130,13 +130,10 @@ whoever can read `key` can open everything. Back the volume up whole.
 > against OpenAI's. Read the terms that apply to you. Apiary supports both, but if you sign
 > one in, you do so at your own risk. API keys are the route those terms allow.
 
-**Kimi.** Put the key in a `.env` file beside `docker-compose.yml`:
-
-    SWITCH_KIMI_KEY=<your Kimi for Coding key>
-
-Then run `docker compose up -d`: the proxy signs Kimi requests with the key. The brain polls
-Kimi's quota with the key enrolled on `/t/<tenant>/auth` (its sealed `kimi.json`); enrol the
-same one there, and the Kimi members of the shipped classes come into use.
+**Kimi.** Enrol the key on `/t/<tenant>/auth` (or the dashboard's Sources page). The brain
+keeps it sealed in the tenant's `kimi.json`, polls Kimi's quota with it, and dispenses it to
+the proxy, which signs that tenant's Kimi requests with it; the proxy holds no key of its own.
+Once it is enrolled, the Kimi members of the shipped classes come into use.
 
 **A local model.** Serve one with an Anthropic-compatible API and an OpenAI-style
 `GET /models` (llama-server does both). Point both services at it in `.env`, then run

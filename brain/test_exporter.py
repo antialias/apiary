@@ -4301,7 +4301,7 @@ class TestReauthFlow(HTTPBase):
         ex.os.replace = lambda src, dst: (_ for _ in ()).throw(OSError("disk full"))
         self.addCleanup(setattr, ex.os, "replace", orig_replace)
 
-        with self.assertRaisesRegex(ValueError, "cannot update"):
+        with self.assertRaisesRegex(ValueError, "could not be updated"):
             psub._splice_refresh_token(T, ACCT_A, "new-rt-a")
 
         self.assertEqual(psub._st(T).creds, before)
@@ -6087,10 +6087,18 @@ def fake_id_token(account_id="ws-uuid-1"):
     return seg({"alg": "none"}) + "." + seg(claims) + ".sig"
 
 
+def restore_recheck_epochs(epochs):
+    with T.poll_health_lock:
+        T.recheck_epochs.clear()
+        T.recheck_epochs.update(epochs)
+        ex._save_rechecks_locked(T)
+
+
 class AuthHTTP(HTTPBase):
     """HTTPBase plus a JSON POST helper and the #72 hygiene contract: every
     subclass leaves the grant store, both creds files, and the kimi cache the
-    way it found them."""
+    way it found them, and the household's recheck epochs (an enrolment
+    advances its account's)."""
 
     def post(self, path, obj, key=None):
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}{tp(path)}",
@@ -6110,6 +6118,9 @@ class AuthHTTP(HTTPBase):
         self.addCleanup(T.reauth_pending.clear)
         self.addCleanup(clear_openai_creds)
         self.addCleanup(clear_kimi_creds)
+        with T.poll_health_lock:
+            epochs = dict(T.recheck_epochs)
+        self.addCleanup(restore_recheck_epochs, epochs)
 
 
 class TestAuthRegistryShape(unittest.TestCase):
@@ -6122,16 +6133,12 @@ class TestAuthRegistryShape(unittest.TestCase):
     ALLOWED_FLOWS = {"paste-code", "paste-url", "paste-key"}
 
     def test_every_row_carries_a_complete_authority(self):
-        # Runway has no authority: its key is a file the owner places
-        # (RUNWAY_CREDS_FILE), and enrolling one would mean a probe of the
-        # live API, which C8 does not make. ElevenLabs is the same: a key file
-        # the owner places (ELEVENLABS_CREDS_FILE). Nor has local (#135): a LAN
-        # address in a file, no credential at all. Every reader skips an
-        # auth-less row.
-        # The household drivers' rows are TestAuthRegistryShapeHousehold's.
+        # Local has no authority (#135): a LAN address in a file, no
+        # credential at all. Every reader skips an auth-less row. An edition
+        # with more drivers runs this test over its own rows too.
         self.assertIsNone(ex.PROVIDERS["local"].get("auth"), "local")
         for pid, p in ex.PROVIDERS.items():
-            if pid in ("runway", "elevenlabs", "typesafe", "local"):
+            if pid == "local":
                 continue
             a = p.get("auth")
             self.assertIsNotNone(a, f"{pid}: every registered provider is authorizable")
@@ -6145,7 +6152,7 @@ class TestAuthRegistryShape(unittest.TestCase):
             self.assertTrue(e["instructions"], pid)
             for f in e["fields"]:
                 self.assertEqual(set(f), {"name", "label", "secret"}, f"{pid}: {f}")
-            for fn in ("status", "begin", "complete"):
+            for fn in ("status", "begin", "complete", "remove"):
                 self.assertTrue(callable(a[fn]), f"{pid}.{fn}")
 
     def test_custody_semantics_are_the_documented_ones(self):
@@ -6723,8 +6730,7 @@ class TestKimiEnrollAndKeySource(AuthHTTP):
                             key="test-switch-key")
         self.assertEqual(code, 200, r)
         self.assertEqual(r["account"], "kimi")
-        self.assertIn("SWITCH_KIMI_KEY", r["note"],
-                      "the operator must learn the proxy holds its own copy")
+        self.assertNotIn("note", r, "the proxy is dispensed this key; there is no copy to update")
         self.assertEqual(probed, ["sk-kimi-new"], "validated with the TRIMMED key")
         self.assertEqual(json.load(open(pkimi._st(T).file)), {"api_key": "sk-kimi-new"})
         self.assertEqual(pkimi._kimi_key(T), "sk-kimi-new")
@@ -13412,6 +13418,346 @@ class TestNoticesRecharge(NoticesBase):
         self.assertEqual(self.bridge.posts, [])
         rec = self.tick(t + 60, balance=90, read_at=t, resets_at=t + 2 * notices.DAY)
         self.assertEqual(rec["state"], "low", "a reset after it runs out does not help")
+
+
+# ---- C11: POST /auth/<pid>/remove ----------------------------------------------
+
+def tenant_bytes(t, store=None):
+    """Every byte the tenant's dir holds, as the store reads each file (opened
+    when sealed) and as it lies on disk, for the no-credential-left checks."""
+    store = store or ex._store
+    out = []
+    for root, _dirs, files in os.walk(t.dir):
+        for fname in files:
+            path = os.path.join(root, fname)
+            with open(path, "rb") as f:
+                raw = f.read()
+            out.append((path, raw))
+            if store.sealed and ex.credstore.is_sealed_bytes(raw):
+                out.append((path + " (opened)", store.read_bytes(path)))
+    return out
+
+
+class AuthRemoveBase(AuthHTTP):
+    """C11: disconnecting an account deletes its record from its credentials
+    file (the file with its last one), forgets its poll state, and the next
+    document no longer lists it; nothing of its credential stays in the
+    tenant's dir. Each test runs on a fresh tenant, so its dir holds only what
+    the test put there."""
+
+    # Fake credentials, distinctive so a leftover byte is found.
+    SECRETS = {
+        "api-a": "test-remove-apikey-aaaaaaaa", "api-b": "test-remove-apikey-bbbbbbbb",
+        "sub-a": "test-remove-refresh-aaaaaaaa", "sub-b": "test-remove-refresh-bbbbbbbb",
+        "gpt-a": "test-remove-codex-rt-aaaaaaa", "gpt-b": "test-remove-codex-rt-bbbbbbb",
+        "kimi": "test-remove-kimi-key-kkkkkkkk",
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.t = new_tenant("remove")
+        self.addCleanup(ex._registry.delete, self.t.id)
+        orig = papi._get_models
+        self.addCleanup(setattr, papi, "_get_models", orig)
+        papi._get_models = lambda key: {"data": []}
+
+    def post_t(self, path, obj, key="test-switch-key"):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{tp(path, self.t)}",
+                                     data=json.dumps(obj).encode(), method="POST")
+        req.add_header("Content-Type", "application/json")
+        if key:
+            req.add_header("X-Switch-Key", key)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()
+            return e.code, (json.loads(body) if body else None)
+
+    def enroll_api(self, name):
+        _, d = self.post_t("/auth/anthropic-api/begin", {})
+        code, d = self.post_t("/auth/anthropic-api/complete",
+                              {"state": d["state"], "name": name, "api_key": self.SECRETS[name]})
+        self.assertEqual(code, 200, d)
+
+    def seed_subscription(self, *names):
+        ex._store.write_json(psub._st(self.t).file,
+                             [{"name": n, "refresh_token": self.SECRETS[n], "access_token": "at-" + n,
+                               "expires_at": time.time() + 9999} for n in names])
+        psub._load_creds(self.t)
+
+    def seed_codex(self, *names):
+        ex._store.write_json(pcodex._st(self.t).file,
+                             [{"name": n, "refresh_token": self.SECRETS[n], "access_token": "at-" + n,
+                               "expires_at": time.time() + 999999, "account_id": "acct-" + n}
+                              for n in names])
+        pcodex._st(self.t).pool = None
+
+    def put_state(self, *results):
+        with self.t.lock:
+            for r in results:
+                self.t.state[r["name"]] = r
+        ex.compute_preferred(self.t)
+
+    def listed(self):
+        """Every account name the tenant's next document lists."""
+        doc = ex._preferred_payload(self.t)
+        routes = doc["routes"].values() if isinstance(doc["routes"], dict) else doc["routes"]
+        return (set(doc["accounts"]) | {r["name"] for r in doc["account_health"]["accounts"]}
+                | {a for rt in routes for a in rt.get("accounts") or []}
+                | {a for ps in doc["providers"].values() for a in ps.get("pool") or {}})
+
+    def assert_no_secret(self, *names, store=None):
+        for path, data in tenant_bytes(self.t, store):
+            for n in names:
+                self.assertNotIn(self.SECRETS[n].encode(), data, f"{n}'s credential is in {path}")
+
+
+class TestAuthRemove(AuthRemoveBase):
+    """C11 over a plain store; test_tenancy.TestAuthRemoveSealed is the sealed
+    one (it needs the cryptography package, which this file does not)."""
+
+    def test_refusals(self):
+        self.enroll_api("api-a")
+        self.assertEqual(self.post_t("/auth/anthropic-api/remove", {"account": "api-a"}, key=None)[0], 401)
+        self.assertEqual(self.post_t("/auth/anthropic-api/remove", {})[0], 400)
+        self.assertEqual(self.post_t("/auth/anthropic-api/remove", {"account": "  "})[0], 400)
+        code, d = self.post_t("/auth/anthropic-api/remove", {"account": "nobody"})
+        self.assertEqual(code, 404, d)
+        self.assertEqual(self.post_t("/auth/no-such-provider/remove", {"account": "api-a"})[0], 404)
+        code, d = self.post_t("/auth/kimi/remove", {"account": "api-a"})
+        self.assertEqual(code, 404, "an account is removed only through its own provider")
+        self.assertEqual(papi._load(self.t), {"api-a": self.SECRETS["api-a"]}, "nothing was removed")
+
+    def test_another_tenants_account_is_unknown(self):
+        seed = papi._st(T)
+        ex._store.write_json(seed.file, [{"name": "api-t", "api_key": "test-remove-other-tenant"}])
+        seed.keys = None
+        self.addCleanup(ex._store.remove, seed.file)
+        self.addCleanup(setattr, seed, "keys", None)
+        code, _ = self.post_t("/auth/anthropic-api/remove", {"account": "api-t"})
+        self.assertEqual(code, 404)
+        self.assertEqual(papi._load(T), {"api-t": "test-remove-other-tenant"})
+
+    def test_an_api_key_then_the_last(self):
+        self.enroll_api("api-a")
+        self.enroll_api("api-b")
+        self.put_state(papi.poll(self.t, None, account="api-a"), papi.poll(self.t, None, account="api-b"))
+        self.assertLessEqual({"api-a", "api-b"}, self.listed())
+        code, d = self.post_t("/auth/anthropic-api/remove", {"account": "api-a"})
+        self.assertEqual((code, d), (200, {"account": "api-a", "removed": True}))
+        self.assertEqual(ex._store.read_json(papi._st(self.t).file),
+                         [{"name": "api-b", "api_key": self.SECRETS["api-b"]}])
+        self.assertNotIn("api-a", self.t.state)
+        self.assertNotIn("api-a", self.listed())
+        self.assertIn("api-b", self.listed())
+        self.assert_no_secret("api-a")
+        code, _ = self.post_t("/auth/anthropic-api/remove", {"account": "api-b"})
+        self.assertEqual(code, 200)
+        self.assertFalse(os.path.exists(papi._st(self.t).file), "the file goes with its last key")
+        self.assertFalse(ex.PROVIDERS["anthropic-api"]["enabled"](self.t))
+        self.assertNotIn("api-b", self.listed())
+        self.assert_no_secret("api-a", "api-b")
+
+    def test_a_claude_login(self):
+        self.seed_subscription("sub-a", "sub-b")
+        self.put_state(acct("sub-a", 30), acct("sub-b", 40))
+        with self.t.poll_health_lock:
+            self.t.poll_fails["sub-a"] = 2
+            self.t.poll_schedule["sub-a"] = time.time() + 999
+        self.assertIsNotNone(ex.recheck(self.t, "sub-a", time.time()))
+        gen = psub._st(self.t).cred_generation.get("sub-a", 0)
+        code, d = self.post_t("/auth/anthropic/remove", {"account": "sub-a"})
+        self.assertEqual(code, 200, d)
+        self.assertEqual([a["name"] for a in ex._store.read_json(psub._st(self.t).file)], ["sub-b"])
+        self.assertNotIn("sub-a", psub._st(self.t).creds)
+        self.assertGreater(psub._st(self.t).cred_generation["sub-a"], gen,
+                           "a poll of it in flight is discarded")
+        for d_ in (self.t.state, self.t.poll_fails, self.t.poll_schedule, self.t.recheck_epochs):
+            self.assertNotIn("sub-a", d_)
+        self.assertNotIn("sub-a", ex._store.read_json(self.t.recheck_file) or {})
+        self.assertNotIn("sub-a", self.listed())
+        self.assertEqual(psub._load_creds(self.t), ["sub-b"], "a reload does not bring it back")
+        self.assert_no_secret("sub-a")
+        self.assertEqual(self.post_t("/auth/anthropic/remove", {"account": "sub-b"})[0], 200)
+        self.assertFalse(os.path.exists(psub._st(self.t).file))
+        self.assertEqual(psub._st(self.t).creds, {})
+        self.assert_no_secret("sub-a", "sub-b")
+
+    def test_a_codex_chain(self):
+        self.seed_codex("gpt-a", "gpt-b")
+        self.put_state(gpt_result(name="gpt-a"), gpt_result(name="gpt-b"))
+        code, d = self.post_t("/auth/gpt/remove", {"account": "gpt-a"})
+        self.assertEqual(code, 200, d)
+        self.assertEqual([e["name"] for e in ex._store.read_json(pcodex._st(self.t).file)], ["gpt-b"])
+        self.assertEqual(ex._provider_poll_targets(self.t).get("gpt-a"), None)
+        self.assertNotIn("gpt-a", self.listed())
+        self.assert_no_secret("gpt-a")
+        self.assertEqual(self.post_t("/auth/gpt/remove", {"account": "gpt-b"})[0], 200)
+        self.assertFalse(os.path.exists(pcodex._st(self.t).file))
+        self.assertFalse(ex.PROVIDERS["gpt"]["enabled"](self.t))
+        self.assert_no_secret("gpt-a", "gpt-b")
+
+    def test_the_kimi_key(self):
+        set_kimi_key(self.SECRETS["kimi"], tenant=self.t)
+        self.put_state(kimi_result())
+        self.assertIn("kimi", self.listed())
+        code, d = self.post_t("/auth/kimi/remove", {"account": "kimi"})
+        self.assertEqual(code, 200, d)
+        self.assertFalse(os.path.exists(pkimi._st(self.t).file))
+        self.assertEqual(pkimi._kimi_key(self.t), "")
+        self.assertNotIn("kimi", self.listed())
+        self.assert_no_secret("kimi")
+
+    def test_a_failed_rewrite_removes_nothing(self):
+        self.enroll_api("api-a")
+        self.enroll_api("api-b")
+        self.put_state(papi.poll(self.t, None, account="api-a"))
+        with mock.patch.object(ex._store, "write_json", side_effect=OSError("disk full")):
+            code, d = self.post_t("/auth/anthropic-api/remove", {"account": "api-a"})
+        self.assertEqual(code, 422, d)
+        self.assertIn("could not be stored", d["error"])
+        self.assertIn("api-a", papi._load(self.t))
+        self.assertIn("api-a", self.t.state, "the poll state stays with the account")
+
+    def test_a_remove_during_an_add_stays_removed(self):
+        """An add whose probe is still running when another tab removes a key
+        does not write that key back: the add re-reads under the edit lock."""
+        self.enroll_api("api-a")
+        def probe_while_removed(key):
+            if key == self.SECRETS["api-b"]:
+                self.assertEqual(self.post_t("/auth/anthropic-api/remove", {"account": "api-a"})[0], 200)
+            return {"data": []}
+        papi._get_models = probe_while_removed
+        self.enroll_api("api-b")
+        self.assertEqual(ex._store.read_json(papi._st(self.t).file),
+                         [{"name": "api-b", "api_key": self.SECRETS["api-b"]}])
+        self.assert_no_secret("api-a")
+
+    def test_a_failed_write_never_says_where_credentials_live(self):
+        """A 422 a member sees says what went wrong, never the store's path."""
+        self.enroll_api("api-a")
+        boom = OSError(13, "Permission denied", papi._st(self.t).file)
+        with mock.patch.object(ex._store, "write_json", side_effect=boom), \
+                mock.patch.object(ex._store, "remove", side_effect=boom):
+            _, d = self.post_t("/auth/anthropic-api/begin", {})
+            code, d = self.post_t("/auth/anthropic-api/complete",
+                                  {"state": d["state"], "name": "api-b", "api_key": self.SECRETS["api-b"]})
+            self.assertEqual(code, 422, d)
+            code2, d2 = self.post_t("/auth/anthropic-api/remove", {"account": "api-a"})
+            self.assertEqual(code2, 422, d2)
+        for body in (d, d2):
+            text = json.dumps(body)
+            self.assertNotIn(self.t.id, text)
+            self.assertNotIn("/", text.replace(" / ", ""))
+            self.assertNotIn(".json", text)
+
+    def test_a_poll_in_flight_is_not_published(self):
+        """Removed while its poll was on the wire: the pass discards the result,
+        so the next document does not list it again."""
+        self.enroll_api("api-a")
+        self.enroll_api("api-b")
+
+        def models(key):
+            if key == self.SECRETS["api-a"]:
+                ex.PROVIDERS["anthropic-api"]["auth"]["remove"](self.t, "api-a")
+                ex._forget_account(self.t, "api-a")
+            return {"data": []}
+        papi._get_models = models
+        ex._poll_pass(self.t)
+        self.assertNotIn("api-a", self.t.state)
+        self.assertIn("api-b", self.t.state)
+        self.assertNotIn("api-a", self.listed())
+
+
+class TestReAddIsANewIdentity(AuthRemoveBase):
+    """An enrolment advances the account's recheck_epoch, so the proxy can
+    tell a removed-and-re-added account from the one it cached, even when
+    both happen between two of its pulls."""
+
+    def epoch(self, name):
+        with self.t.poll_health_lock:
+            return self.t.recheck_epochs.get(name)
+
+    def test_a_re_add_publishes_a_newer_epoch(self):
+        clock = [1_000_000.0]
+        orig = ex.time.time
+        self.addCleanup(setattr, ex.time, "time", orig)
+        ex.time.time = lambda: clock[0]
+        self.enroll_api("api-a")
+        first = self.epoch("api-a")
+        self.assertEqual(first, 1_000_000.0)
+        clock[0] += 5
+        self.assertEqual(self.post_t("/auth/anthropic-api/remove", {"account": "api-a"})[0], 200)
+        self.assertIsNone(self.epoch("api-a"), "a removed account keeps no epoch")
+        self.enroll_api("api-a")
+        self.assertGreater(self.epoch("api-a"), first)
+        self.put_state({"name": "api-a", "ok": 1, "kind": "provider", "provider": "anthropic-api",
+                        "reading": {"kind": "api"}, "ts": clock[0]})
+        doc = ex._preferred_payload(self.t)
+        self.assertEqual(doc["accounts"]["api-a"]["recheck_epoch"], self.epoch("api-a"))
+
+    def test_a_re_add_overlapping_a_remove_keeps_its_epoch(self):
+        """Remove and re-add of one account overlap: the driver removes it, the
+        add writes it back and advances its epoch, then the remove's forget
+        runs. The account is enrolled, so it must keep an epoch: the forget
+        lands before the advance, never after it."""
+        self.enroll_api("api-a")
+        real_forget = ex._forget_account
+        added = {}
+
+        def add():
+            _, d = self.post_t("/auth/anthropic-api/begin", {})
+            added["code"], _ = self.post_t(
+                "/auth/anthropic-api/complete",
+                {"state": d["state"], "name": "api-a", "api_key": self.SECRETS["api-a"]})
+
+        adder = threading.Thread(target=add)
+
+        def forget_after_the_add(t, name):
+            # The driver has removed api-a; the re-add runs now and is given
+            # time to finish (its advance waits while the remove is under way).
+            adder.start()
+            adder.join(1.0)
+            real_forget(t, name)
+
+        with mock.patch.object(ex, "_forget_account", forget_after_the_add):
+            self.assertEqual(self.post_t("/auth/anthropic-api/remove", {"account": "api-a"})[0], 200)
+        adder.join(5)
+        self.assertEqual(added.get("code"), 200)
+        self.assertIn("api-a", papi._load(self.t), "the re-add stands")
+        self.assertIsNotNone(self.epoch("api-a"), "an enrolled account has an epoch")
+
+
+class TestKimiKeyPerTenant(AuthRemoveBase):
+    """The proxy signs a tenant's Kimi requests with that tenant's own key,
+    dispensed by its /api-key: no tenant is ever handed another's."""
+
+    def get_t(self, t, path, key="test-switch-key"):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{tp(path, t)}")
+        req.add_header("X-Switch-Key", key)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode() or "null")
+
+    def test_each_tenant_is_dispensed_its_own_kimi_key(self):
+        other = new_tenant("kimi other")
+        self.addCleanup(ex._registry.delete, other.id)
+        empty = new_tenant("kimi none")
+        self.addCleanup(ex._registry.delete, empty.id)
+        pkimi._persist_kimi_key(self.t, "sk-kimi-tenant-a")
+        pkimi._persist_kimi_key(other, "sk-kimi-tenant-b")
+        self.assertEqual(self.get_t(self.t, "/api-key?account=kimi"),
+                         (200, {"account": "kimi", "api_key": "sk-kimi-tenant-a"}))
+        self.assertEqual(self.get_t(other, "/api-key?account=kimi"),
+                         (200, {"account": "kimi", "api_key": "sk-kimi-tenant-b"}))
+        code, d = self.get_t(empty, "/api-key?account=kimi")
+        self.assertEqual((code, d["reason"]), (404, "no_key"))
+        self.assertNotIn("api_key", d)
+        self.assertEqual(self.post_t("/auth/kimi/remove", {"account": "kimi"})[0], 200)
+        self.assertEqual(self.get_t(self.t, "/api-key?account=kimi")[1]["reason"], "no_key")
 
 
 if __name__ == "__main__":

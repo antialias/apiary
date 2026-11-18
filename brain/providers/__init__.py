@@ -23,7 +23,8 @@ Row keys the core reads, each callable taking the tenant first (tenancy.Tenant:
 a driver keeps that tenant's credentials and watchers in
 tenant.store_for(pid, make), never at module level): poll(t, prev, account=),
 enabled(t), accounts(t), auth {kind, label, custody, enroll, status(t, now),
-begin(t, account=), complete(t, grant, fields)}, api_key(t, account), lanes
+begin(t, account=), complete(t, grant, fields), remove(t, account)},
+api_key(t, account), lanes
 (its accounts serve the lanes, as the account loop's do), account_loop
 {start(t), load(t), names(t), poll(t, name, meta), generation(t, name),
 expires_at(t, name)} (the one provider whose accounts the account loop polls),
