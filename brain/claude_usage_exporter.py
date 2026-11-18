@@ -73,6 +73,24 @@ import urllib.request
 # Patch seam for tests: network goes through this name so tests can stub it
 # module-locally without mutating urllib globally (the tests' own HTTP client uses the real one).
 urlopen = urllib.request.urlopen
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuses every redirect: urllib re-sends a request's headers, a secret
+    in them included, to wherever a 3xx points (https to http too). The 3xx
+    is raised as an HTTPError naming only its status: no Location, no
+    header of the request."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ARG002
+        if fp is not None:
+            fp.close()
+        raise urllib.error.HTTPError(urlparse(req.full_url)._replace(query="", fragment="").geturl(), code,
+                                     f"redirect {code} not followed", {}, None)
+
+
+# Every request that carries a provider's key or token in its headers goes
+# through this name: it follows no redirect. A patch seam like urlopen.
+key_urlopen = urllib.request.build_opener(_NoRedirect).open
 from collections import OrderedDict, deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

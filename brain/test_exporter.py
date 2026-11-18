@@ -1724,6 +1724,81 @@ class _LogCapture:
         ex.log = self.logged.append
 
 
+class RedirectPair:
+    """Two local servers for key_urlopen's tests: `origin` answers every
+    request with a 302 to `target`, on another host name, which records the
+    headers it is sent. Started by start(), shut by the caller's cleanup."""
+
+    def __init__(self, test):
+        self.seen = []
+        pair = self
+
+        class Target(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                pair.seen.append(dict(self.headers))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *a):
+                pass
+
+        self.target = ThreadingHTTPServer(("127.0.0.1", 0), Target)
+        where = f"http://localhost:{self.target.server_address[1]}/elsewhere"
+
+        class Origin(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                self.send_response(302)
+                self.send_header("Location", where)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        self.origin = ThreadingHTTPServer(("127.0.0.1", 0), Origin)
+        self.url = f"http://127.0.0.1:{self.origin.server_address[1]}"
+        self.where = where
+        for srv in (self.target, self.origin):
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            test.addCleanup(srv.server_close)
+            test.addCleanup(srv.shutdown)
+
+
+class TestKeyRequestsFollowNoRedirect(unittest.TestCase):
+    """key_urlopen: a request carrying a provider's key follows no redirect,
+    so the key never reaches the 3xx's target; the 3xx is an HTTPError naming
+    its status and nothing of the Location or the request."""
+
+    SECRET = "test-redirect-secret-0123456789"
+
+    def test_a_302_is_refused_and_named(self):
+        rp = RedirectPair(self)
+        req = urllib.request.Request(rp.url + "/read?x=1", headers={"Authorization": f"Bearer {self.SECRET}"})
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            ex.key_urlopen(req, timeout=5)
+        e = cm.exception
+        self.assertEqual(e.code, 302)
+        self.assertEqual(str(e), "HTTP Error 302: redirect 302 not followed")
+        for text in (str(e), e.geturl(), repr(dict(e.headers or {}))):
+            self.assertNotIn(self.SECRET, text)
+            self.assertNotIn("elsewhere", text)
+        self.assertEqual(rp.seen, [], "the target was called")
+
+    def test_the_shared_key_reads_use_it(self):
+        rp = RedirectPair(self)
+        with mock.patch.object(pkimi, "KIMI_USAGES_URL", rp.url + "/usages"):
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                pkimi._get_kimi_usages(self.SECRET)
+            self.assertEqual(cm.exception.code, 302)
+        with mock.patch.object(papi, "ANTHROPIC_API_BASE", rp.url):
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                papi._get_models(self.SECRET)
+            self.assertEqual(cm.exception.code, 302)
+        self.assertEqual(rp.seen, [], "a key followed a redirect")
+
+
 class TestDocRevision(unittest.TestCase):
     def test_content_hash_is_canonical(self):
         self.assertEqual(ex._doc_revision([{"b": 1, "a": 2}]),

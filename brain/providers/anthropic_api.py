@@ -92,7 +92,7 @@ def _get_models(key):
         ANTHROPIC_API_BASE + "/v1/models",
         headers={"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION,
                  "Accept": "application/json"})
-    with core.urlopen(req, timeout=15) as resp:
+    with core.key_urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 

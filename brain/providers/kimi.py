@@ -96,7 +96,7 @@ def _get_kimi_usages(key):
         KIMI_USAGES_URL,
         headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
     )
-    with core.urlopen(req, timeout=15) as resp:
+    with core.key_urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
