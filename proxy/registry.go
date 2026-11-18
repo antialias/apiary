@@ -99,6 +99,18 @@ type registryEntry struct {
 	// and no picker lists. From the brain's class request_kind; persisted with
 	// the last-good rows, so a boot without the brain keeps it.
 	Modality string `json:"modality,omitempty"`
+
+	// LanOnly is the brain's class lan_only: the row is the LAN tenant's
+	// alone, listed to no other tenant (visibleTo). Persisted with the
+	// last-good rows, so a boot without the brain still hides it.
+	LanOnly bool `json:"lan_only,omitempty"`
+}
+
+// visibleTo reports whether tenant tn may see this row in a class list. A
+// lan_only row is the LAN tenant's alone; a nil tenant (nothing stamped)
+// sees only the rows every tenant sees.
+func (e *registryEntry) visibleTo(tn *tenant) bool {
+	return !e.LanOnly || (tn != nil && tn.lan)
 }
 
 const modalityImage = "image"

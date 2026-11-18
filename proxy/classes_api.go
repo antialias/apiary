@@ -22,7 +22,18 @@ type classGuidanceRow struct {
 	DirectModel string `json:"direct_model"`
 }
 
+// classesHandler serves every class row; it is the LAN entry's list.
 func classesHandler(w http.ResponseWriter, r *http.Request) {
+	serveClasses(w, r, nil, true)
+}
+
+// classesHandlerFor serves the class rows tenant tn may see: a lan_only row
+// is listed to the LAN tenant only.
+func classesHandlerFor(w http.ResponseWriter, r *http.Request, tn *tenant) {
+	serveClasses(w, r, tn, false)
+}
+
+func serveClasses(w http.ResponseWriter, r *http.Request, tn *tenant, all bool) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -40,6 +51,9 @@ func classesHandler(w http.ResponseWriter, r *http.Request) {
 	for _, e := range rows {
 		// Keep the same advertise-set as registryClassRows (/v1/models).
 		if e.disabledReason != "" || e.pickerHidden {
+			continue
+		}
+		if !all && !e.visibleTo(tn) {
 			continue
 		}
 		var guidance *string

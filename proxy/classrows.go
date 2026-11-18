@@ -277,7 +277,7 @@ func deriveClassRows(classes map[string]classPref, prev []registryEntry, shapes 
 		}
 		e := registryEntry{Name: name, Type: "class", Class: name,
 			Display: c.Display, ContextWindow: c.ContextWindow, Guidance: c.Guidance,
-			pickerHidden: pickerHiddenFor(c.Consumer, shapes)}
+			pickerHidden: pickerHiddenFor(c.Consumer, shapes), LanOnly: c.LanOnly}
 		if c.RequestKind != "" && c.RequestKind != "chat" {
 			e.Modality = c.RequestKind
 			// An image class is reached through its own door, never a picker:
@@ -375,7 +375,7 @@ func registryClassRows() []advertisedModel {
 		if e.disabledReason == "" && !e.pickerHidden {
 			out = append(out, advertisedModel{pickerID: e.renderedID(), display: e.Display,
 				kind: kindClass, effort: classEffortReaches(e.Class),
-				contextWindow: e.ContextWindow})
+				contextWindow: e.ContextWindow, lanOnly: e.LanOnly})
 		}
 	}
 	return out

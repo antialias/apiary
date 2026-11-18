@@ -541,7 +541,7 @@ _BUDGET_REASON = ("a budget lives in the money document: pots[<pot id>].budget, 
                   "pots[<pot id>].route_budgets[<route id>] for one route")
 # The keys a class and a member may carry (§1.9: nothing is dropped or
 # ignored, so an unknown key, a typo included, is refused at PUT).
-_CLASS_KEYS = frozenset(("class", "display", "guidance", "request_kind", "members"))
+_CLASS_KEYS = frozenset(("class", "display", "guidance", "request_kind", "members", "lan_only"))
 # What a class's requests are (quota-model 50 §2.9): "chat" (the default) or
 # "image", the image door's class. A token window and r_p measure chat bodies,
 # so an image member declares neither, and only a provider makes images.
@@ -622,6 +622,10 @@ def _class_error(c, seen, *, check_guidance=True, strict=False):
         reason = _guidance_error(c.get("guidance"))
         if reason:
             return reason
+    # lan_only: the class is the LAN tenant's alone (a member tenant neither
+    # sees it on /preferred nor binds it). Optional; absent = every tenant.
+    if "lan_only" in c and not isinstance(c["lan_only"], bool):
+        return "lan_only must be a boolean"
     rk = c.get("request_kind", "chat")
     if rk not in _REQUEST_KINDS:
         return f"request_kind must be one of {', '.join(_REQUEST_KINDS)}"
@@ -812,7 +816,8 @@ def _normalize_classes(raw, warnings=None):
         if image:
             out.append({"class": name, "display": str(c.get("display") or name),
                         "guidance": guidance, "request_kind": rk, "context_window": None,
-                        "floor_member": None, "units": None, "members": members})
+                        "floor_member": None, "units": None, "members": members,
+                        "lan_only": c.get("lan_only", False)})
             continue
         # The governing window is min() over ALL members' effective windows —
         # not currently-usable ones, so quota-driven rebinding never moves it
@@ -836,7 +841,8 @@ def _normalize_classes(raw, warnings=None):
                     "context_window": derived,
                     "floor_member": floor_id,
                     "units": units,
-                    "members": members})
+                    "members": members,
+                    "lan_only": c.get("lan_only", False)})
     return out
 
 
@@ -4158,6 +4164,12 @@ def _compute_class_sessions(t, snap, now, ctx, classes, states, record):
     return dirty
 
 
+def _tenant_classes(t):
+    """The classes tenant t may see and bind: all of them for the LAN tenant,
+    every class but the lan_only ones for a member tenant."""
+    return [c for c in _classes if t.lan or not c["lan_only"]]
+
+
 def _bind_class_session(t, cname, sid, now):
     """Create-or-touch one session binding (the /class-bind endpoint's core).
     An existing binding is returned untouched (session-sticky — only last_seen
@@ -4174,10 +4186,13 @@ def _bind_class_session(t, cname, sid, now):
     with t.lock:
         snap = list(t.state.values())
     with t.plock:
-        cls = next((c for c in _classes if c["class"] == cname), None)
+        # A lan_only class is the LAN tenant's alone: to a member tenant it is
+        # an unknown class, and the 404 lists only the classes it may bind.
+        visible = _tenant_classes(t)
+        cls = next((c for c in visible if c["class"] == cname), None)
         if not cls:
             return 404, {"error": f"unknown class {cname!r}",
-                         "classes": [c["class"] for c in _classes]}
+                         "classes": [c["class"] for c in visible]}
         cs = t.preferred["classes"].setdefault(cname, _new_class_state())
         member_ids = [_member_id(m) for m in cls["members"]]
         ctx = _policy_ctx(t, snap, now)
@@ -4241,7 +4256,7 @@ def _classes_payload(t, snap, now, ctx):
     out = {}
     with t.plock:
         claims = _consumer_claims(t.consumers)
-        for c in _classes:
+        for c in _tenant_classes(t):
             verdicts = _class_verdicts(t, c, ctx)
             members = []
             for m in c["members"]:
@@ -4275,6 +4290,10 @@ def _classes_payload(t, snap, now, ctx):
                 # §2.9 (C4): "image" is the image door's class; the proxy
                 # serves it there and nowhere else, so it is no picker row.
                 "request_kind": c["request_kind"],
+                # Only the LAN tenant is ever served a true one: the proxy,
+                # whose class rows come from that tenant's document, hides
+                # these rows from every other tenant.
+                "lan_only": c["lan_only"],
                 "context_window": c["context_window"],
                 # #44: which member's effective window governs, whose tokenizer
                 # units the number is in, and when it last moved (§10).
@@ -9848,10 +9867,11 @@ class Handler(BaseHTTPRequestHandler):
         # deleted class that _save_state() then persists.
         err = msg = None
         with t.plock:
-            cls = next((c for c in _classes if c["class"] == cname), None)
+            visible = _tenant_classes(t)
+            cls = next((c for c in visible if c["class"] == cname), None)
             if not cls:
                 err = {"error": f"unknown class {cname!r}",
-                       "classes": [c["class"] for c in _classes]}
+                       "classes": [c["class"] for c in visible]}
             else:
                 member_ids = [_member_id(m) for m in cls["members"]]
                 if member in ("", "auto", "none", "clear"):

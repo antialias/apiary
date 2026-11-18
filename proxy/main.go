@@ -201,6 +201,9 @@ type advertisedModel struct {
 	kind   string
 	effort bool
 
+	// lanOnly is a class row only the LAN tenant is shown (registryEntry.LanOnly).
+	lanOnly bool
+
 	// family / version say WHAT an anthropic row is, so no consumer has to
 	// parse an id to rank it (§15.3: "latest Opus" is the family-opus row with
 	// the highest version, then the largest contextWindow). Derived from the
@@ -279,6 +282,21 @@ func hostedProviderNamespace(model string) (string, bool) {
 // provider adds a row of its own.
 func advertisedModels() []advertisedModel {
 	return append(registryAnthropicRows(), registryClassRows()...)
+}
+
+// advertisedModelsFor is advertisedModels as tenant tn is shown it: without
+// the lan_only class rows unless tn is the LAN tenant.
+func advertisedModelsFor(tn *tenant) []advertisedModel {
+	lan := tn != nil && tn.lan
+	all := advertisedModels()
+	out := make([]advertisedModel, 0, len(all))
+	for _, m := range all {
+		if m.lanOnly && !lan {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // directProvidersStatus summarizes the provider table for /_switch/status. A
@@ -1415,7 +1433,8 @@ func modelsHandler(w http.ResponseWriter, r *http.Request) {
 		Version       string `json:"version,omitempty"`
 		ContextWindow int    `json:"context_window"`
 	}
-	ams := advertisedModels()
+	// The request's tenant: a lan_only class row is listed to the LAN tenant only.
+	ams := advertisedModelsFor(tenantFrom(r.Context()))
 	data := make([]entry, 0, len(ams))
 	for _, m := range ams {
 		data = append(data, entry{Type: "model", ID: m.pickerID, DisplayName: m.display,

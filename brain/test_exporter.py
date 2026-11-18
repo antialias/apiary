@@ -4651,6 +4651,49 @@ class TestClassPointer(ClassPolicyBase):
         self.assertEqual(self.pointer(), "lane:opus")
 
 
+class TestClassLanOnly(unittest.TestCase):
+    """A class marked lan_only is the LAN tenant's alone: a member tenant's
+    /preferred omits it and its bind is the unknown-class answer."""
+
+    def setUp(self):
+        cfg = frontier_cfg()
+        cfg[0]["lan_only"] = True
+        shared = frontier_cfg()[0]
+        shared["class"] = "shared"
+        self.cfg = cfg + [shared]
+        classes_reset(opus_acct(30, resets=True),
+                      provider_result("gpt", five_hour=8.0),
+                      kimi_result(five_hour=12.0, weekly=2.0), cfg=self.cfg)
+        self.addCleanup(setattr, ex, "_classes", [])
+        self.member = new_tenant("lan-only member")
+        self.addCleanup(ex._registry.delete, self.member.id)
+
+    def test_validation_keeps_a_boolean_and_refuses_anything_else(self):
+        self.assertEqual(ex._validate_classes_doc(self.cfg), [])
+        self.assertEqual([c["lan_only"] for c in ex._classes], [True, False])
+        bad = frontier_cfg()
+        bad[0]["lan_only"] = "yes"
+        errs = ex._validate_classes_doc(bad)
+        self.assertTrue(any("lan_only must be a boolean" in e for e in errs), errs)
+
+    def test_a_member_does_not_see_it_and_the_household_does(self):
+        self.assertTrue(T.lan)
+        mine = ex._preferred_payload(T)["classes"]
+        self.assertEqual(set(mine), {"frontier", "shared"})
+        self.assertIs(mine["frontier"]["lan_only"], True)
+        self.assertIs(mine["shared"]["lan_only"], False)
+        theirs = ex._preferred_payload(self.member)["classes"]
+        self.assertEqual(set(theirs), {"shared"})
+
+    def test_a_members_bind_is_refused_as_unknown_and_the_households_binds(self):
+        code, body = ex._bind_class_session(self.member, "frontier", "s-m", time.time())
+        self.assertEqual(code, 404, body)
+        self.assertEqual(body["classes"], ["shared"])
+        self.assertEqual(ex._bind_class_session(self.member, "nope", "s-m", time.time())[0], 404)
+        code, body = ex._bind_class_session(T, "frontier", "s-h", time.time())
+        self.assertEqual(code, 200, body)
+
+
 class TestClassBind(ClassPolicyBase):
     def test_bind_creates_at_pointer(self):
         code, p = ex._bind_class_session(T, "frontier", "s1", time.time())

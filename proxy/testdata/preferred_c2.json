@@ -552,6 +552,7 @@
     "display": "Frontier (auto)",
     "floor_member": "lane:opus",
     "guidance": null,
+    "lan_only": false,
     "members": [
      {
       "anthropic_token_ratio": 1.0,
@@ -705,6 +706,7 @@
     "display": "Images",
     "floor_member": null,
     "guidance": null,
+    "lan_only": false,
     "members": [
      {
       "anthropic_token_ratio": null,

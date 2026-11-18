@@ -121,6 +121,11 @@ type classPref struct {
 	// RequestKind is what the class serves (§2.9, C4): "chat", or "image" for
 	// the image door's class. A brain before C4 serves none: every class chat.
 	RequestKind string `json:"request_kind"`
+	// LanOnly marks a class only the LAN tenant may see and bind. The
+	// brain serves it on the LAN tenant's document, which is where the
+	// class rows come from; every other tenant's lists omit the row
+	// (registryEntry.visibleTo) and its bind is the brain's unknown class.
+	LanOnly bool `json:"lan_only"`
 }
 
 // classRoute travels on reqInfo for class-routed requests: everything the
