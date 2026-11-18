@@ -250,7 +250,7 @@ func (tn *tenant) unseenSelection(model string) string {
 	if _, ok := matchClassTombstone(model); ok {
 		return ""
 	}
-	if _, _, ok := classShapedRefusalReason(model); ok {
+	if _, _, ok := classShapedRefusalReason(tn, model); ok {
 		return ""
 	}
 	if _, ok := hostedProviderNamespace(model); ok {

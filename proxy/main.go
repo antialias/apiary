@@ -2716,7 +2716,7 @@ func writeClientAuthFailed(w http.ResponseWriter) {
 // the only part of this an automated client can act on without reading prose.
 // A permanent refusal deliberately sends NO Retry-After: a client that retries
 // an unknown model id just burns the same error on a timer.
-func writeModelUnroutable(w http.ResponseWriter, model, reason string, retrySecs int) {
+func writeModelUnroutable(w http.ResponseWriter, tn *tenant, model, reason string, retrySecs int) {
 	w.Header().Set("Content-Type", "application/json")
 	if retrySecs > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(retrySecs))
@@ -2727,15 +2727,22 @@ func writeModelUnroutable(w http.ResponseWriter, model, reason string, retrySecs
 		"error": map[string]any{
 			"type": "api_error",
 			"message": product + ": model " + model + " is not routable — " + reason +
-				". Check: curl " + statusHint(),
+				". " + checkHint(tn, "Check"),
 		},
 	})
 }
 
 // statusHint renders the /_switch/status URL for error-message hints from the
 // client-facing base URL (where the client can actually reach us — on a remote
-// deployment "localhost" would point at the wrong machine).
-func statusHint() string {
+// deployment "localhost" would point at the wrong machine). It is the
+// household's address: only the lan tenant is answered with it. Anyone else —
+// a member through the public door, or a request no entry stamped — gets ""
+// and is pointed at apiary doctor instead, never at an address that is the
+// household's and that a member cannot reach.
+func statusHint(tn *tenant) string {
+	if tn == nil || !tn.lan {
+		return ""
+	}
 	base := clientBaseURL
 	if base == "" {
 		base = "http://localhost:8787"
@@ -2743,15 +2750,25 @@ func statusHint() string {
 	return base + "/_switch/status"
 }
 
+// checkHint is a refusal's closing advice: for the household, lead + ": curl"
+// + the status URL; for anyone else, apiary doctor, the member client's end to
+// end check.
+func checkHint(tn *tenant, lead string) string {
+	if u := statusHint(tn); u != "" {
+		return lead + ": curl " + u
+	}
+	return "Check: apiary doctor"
+}
+
 // writeRouteFailed answers a FAILED account-lane route: HTTP 503 with an Anthropic-shaped
 // error envelope (so Claude Code parses and surfaces it) instead of silently forwarding
 // the client's ambient login onto whatever account it happens to be logged into.
-func writeRouteFailed(w http.ResponseWriter, eff string) {
+func writeRouteFailed(w http.ResponseWriter, tn *tenant, eff string) {
 	msg := product + ": no account has a usable token"
 	if eff != "" {
 		msg += " (last tried " + eff + ")"
 	}
-	msg += " — refusing to forward your ambient login. Check the brain: curl " + statusHint()
+	msg += " — refusing to forward your ambient login. " + checkHint(tn, "Check the brain")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -2988,7 +3005,7 @@ func requestHandler(proxy http.Handler) http.Handler {
 				unroutable, unModel = re.disabledReason, model
 				eff = re.renderedID()
 				tag = " UNROUTABLE[" + model + "] (" + re.disabledReason + ")"
-			} else if reason, retrySecs, ok := classShapedRefusalReason(model); ok {
+			} else if reason, retrySecs, ok := classShapedRefusalReason(tn, model); ok {
 				// The workload-class namespace is fail-closed even when a row is
 				// unknown (typo), removed while proxy state was lost, malformed,
 				// or carrying the wrong [1m] suffix. Generalizes the old
@@ -3003,7 +3020,7 @@ func requestHandler(proxy http.Handler) http.Handler {
 				// Retry-After; the message names the edit.
 				unroutable, unModel = "direct "+prov+" model ids were removed: "+prov+" is reached only as a "+
 					"member of a workload class, where its route and pay list apply. Retrying will not help — "+
-					"pick a class (the classes this proxy serves are listed at "+statusHint()+")", model
+					"pick a class ("+classesHint(tn)+")", model
 				eff = model
 				tag = " UNROUTABLE[" + model + "] (deleted " + prov + " direct id)"
 			} else {
@@ -3096,13 +3113,13 @@ func requestHandler(proxy http.Handler) http.Handler {
 		if failed && failedNotTenant != "" {
 			writeNotTenantAccount(rec, tn, failedNotTenant)
 		} else if failed && failedKind != "" {
-			writeNoActuator(rec, eff, failedKind)
+			writeNoActuator(rec, tn, eff, failedKind)
 		} else if failed {
-			writeRouteFailed(rec, eff)
+			writeRouteFailed(rec, tn, eff)
 		} else if laneRefusal != nil {
 			tn.writeLaneRefused(rec, laneRefusal, r.Header, nowFn())
 		} else if unroutable != "" {
-			writeModelUnroutable(rec, unModel, unroutable, unRetry)
+			writeModelUnroutable(rec, tn, unModel, unroutable, unRetry)
 		} else {
 			// #61 response tap: installed only when the request tap produced an
 			// identity (armed hub, parseable /v1/messages body) AND the operator

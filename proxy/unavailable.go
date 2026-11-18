@@ -781,7 +781,7 @@ func (tn *tenant) writeLaneRefused(w http.ResponseWriter, d *laneDecision, hdr h
 	u := tn.laneUnavailable(lane, d.model, now)
 	if u == nil {
 		// No account serves the lane at all: configuration, not quota.
-		writeModelUnroutable(w, "lane:"+lane, "the brain serves no account on lane "+lane, 0)
+		writeModelUnroutable(w, tn, "lane:"+lane, "the brain serves no account on lane "+lane, 0)
 		return
 	}
 	rw := replyWireFor(hdr, false)

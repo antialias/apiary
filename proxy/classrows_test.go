@@ -192,7 +192,7 @@ func TestClassShapedModel(t *testing.T) {
 		if !classShapedModel(model) {
 			t.Fatalf("classShapedModel(%q) = false, want true (must refuse, never forward)", model)
 		}
-		if reason, _, ok := classShapedRefusalReason(model); !ok || reason == "" {
+		if reason, _, ok := classShapedRefusalReason(nil, model); !ok || reason == "" {
 			t.Fatalf("classShapedRefusalReason(%q) = (%q, %v), want a typed refusal", model, reason, ok)
 		}
 	}
@@ -494,7 +494,7 @@ func TestClassShapedRefusalDistinguishesItsThreeCases(t *testing.T) {
 	// (1) nothing loaded and the brain has never answered — every class id is
 	// unknown right now and may well resolve on its own. The ONLY retryable case.
 	classRowsSet, classRowsSource = nil, ""
-	reason, retry, ok := classShapedRefusalReason("claude-frontier")
+	reason, retry, ok := classShapedRefusalReason(lan, "claude-frontier")
 	if !ok || retry <= 0 {
 		t.Fatalf("pre-load refusal = (%q, %d), want a retryable refusal", reason, retry)
 	}
@@ -507,7 +507,7 @@ func TestClassShapedRefusalDistinguishesItsThreeCases(t *testing.T) {
 	lan.pref.mu.Lock()
 	lan.pref.ok = true
 	lan.pref.mu.Unlock()
-	reason, retry, ok = classShapedRefusalReason("claude-frontier")
+	reason, retry, ok = classShapedRefusalReason(lan, "claude-frontier")
 	if !ok || retry != 0 {
 		t.Fatalf("no-classes refusal = (%q, %d), want a permanent refusal", reason, retry)
 	}
@@ -519,7 +519,7 @@ func TestClassShapedRefusalDistinguishesItsThreeCases(t *testing.T) {
 	// advertised. Retrying is useless — the message must say the edit.
 	classRowsSet = []registryEntry{{Name: "frontier", Type: "class", Class: "frontier", ContextWindow: 200000}}
 	classRowsSource = "preferred"
-	reason, retry, ok = classShapedRefusalReason("claude-frontier[1m]")
+	reason, retry, ok = classShapedRefusalReason(lan, "claude-frontier[1m]")
 	if !ok {
 		t.Fatal("a [1m] form of a 200k class must still be refused")
 	}
@@ -533,7 +533,7 @@ func TestClassShapedRefusalDistinguishesItsThreeCases(t *testing.T) {
 	}
 
 	// (3) genuinely unknown — no retry, and it points at the list.
-	reason, retry, ok = classShapedRefusalReason("claude-nope")
+	reason, retry, ok = classShapedRefusalReason(lan, "claude-nope")
 	if !ok || retry != 0 {
 		t.Fatalf("unknown-class refusal = (%q, %d), want a permanent refusal", reason, retry)
 	}

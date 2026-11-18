@@ -108,7 +108,10 @@ func classShapedModel(model string) bool {
 // for a whole session. retrySecs > 0 marks the one case where trying again
 // actually helps; the other two need the caller to change the request, so the
 // message names the exact edit.
-func classShapedRefusalReason(model string) (reason string, retrySecs int, ok bool) {
+//
+// tn is the request's tenant: only the household's refusal names the status
+// URL (statusHint).
+func classShapedRefusalReason(tn *tenant, model string) (reason string, retrySecs int, ok bool) {
 	if !classShapedModel(model) {
 		return "", 0, false
 	}
@@ -126,8 +129,7 @@ func classShapedRefusalReason(model string) (reason string, retrySecs int, ok bo
 		}
 		return "the workload-class registry has not loaded yet — this proxy has not had a successful read of " +
 			"the brain's /preferred (it just started, or the brain is unreachable), so EVERY class id is " +
-			"unknown right now, not just this one. Retry shortly; if it persists, check brain_reachable at " +
-			statusHint(), 5, true
+			"unknown right now, not just this one. Retry shortly; if it persists, " + brainHint(tn), 5, true
 	}
 
 	// (2) The class exists, but the caller asked for a 1M variant of it that
@@ -151,7 +153,25 @@ func classShapedRefusalReason(model string) (reason string, retrySecs int, ok bo
 	// (3) Genuinely unknown: stale, misspelled, or removed while state was lost.
 	return "class-shaped model id is not registered and enabled (workload-class ids are digit-free; " +
 		"a class this proxy no longer knows is refused rather than forwarded upstream). Retrying will not help — " +
-		"the classes this proxy currently serves are listed at " + statusHint(), 0, true
+		classesHint(tn), 0, true
+}
+
+// classesHint says where the classes on offer are listed: the status URL for
+// the household, apiary doctor for anyone else (statusHint).
+func classesHint(tn *tenant) string {
+	if u := statusHint(tn); u != "" {
+		return "the classes this proxy currently serves are listed at " + u
+	}
+	return "run apiary doctor to check the classes on offer to you"
+}
+
+// brainHint says how to tell whether the brain is reachable, on statusHint's
+// household / everyone-else split.
+func brainHint(tn *tenant) string {
+	if u := statusHint(tn); u != "" {
+		return "check brain_reachable at " + u
+	}
+	return "run apiary doctor"
 }
 
 // brainAnswered reports whether the brain is reachable now for the lan

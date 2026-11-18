@@ -253,9 +253,9 @@ func apiKeyAccount(tn *tenant, key string) string {
 
 // writeNoActuator answers a lane whose account is of a kind this build has no
 // actuator for: HTTP 503 in the Anthropic error envelope, naming the kind.
-func writeNoActuator(w http.ResponseWriter, eff, kind string) {
+func writeNoActuator(w http.ResponseWriter, tn *tenant, eff, kind string) {
 	msg := product + ": account " + eff + " is of kind " + kind +
-		", which this build has no actuator for — refusing to forward your ambient login. Check the brain: curl " + statusHint()
+		", which this build has no actuator for — refusing to forward your ambient login. " + checkHint(tn, "Check the brain")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -272,7 +272,7 @@ func writeNotTenantAccount(w http.ResponseWriter, tn *tenant, account string) {
 	if tn != nil {
 		id = "tenant " + tn.id
 	}
-	msg := product + ": account " + account + " is not " + id + "'s — refusing to draw on it. Check the brain: curl " + statusHint()
+	msg := product + ": account " + account + " is not " + id + "'s — refusing to draw on it. " + checkHint(tn, "Check the brain")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_ = json.NewEncoder(w).Encode(map[string]any{

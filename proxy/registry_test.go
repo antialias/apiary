@@ -218,7 +218,7 @@ func TestAnthropicRowNeitherRefusedNorClaimed(t *testing.T) {
 	if _, ok := matchRegistryClass("claude-fable-5"); ok {
 		t.Fatal("anthropic row must not match as a class row")
 	}
-	if _, _, ok := classShapedRefusalReason("claude-fable-5"); ok {
+	if _, _, ok := classShapedRefusalReason(nil, "claude-fable-5"); ok {
 		t.Fatal("anthropic id must not fall into the class-shaped refusal")
 	}
 	if p, ok := hostedProviderNamespace("claude-fable-5"); ok {
