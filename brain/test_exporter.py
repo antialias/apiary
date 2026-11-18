@@ -3603,6 +3603,18 @@ class TestLocalPoller(unittest.TestCase):
         plocal.LOCAL_UPSTREAM = o.url
         return o
 
+    def test_a_member_is_never_served_by_the_households_machine(self):
+        # Found live on 2026-11-18: a member's claude-local request was answered by the
+        # household's local server.
+        self.serve(dict(LOCAL_HELD))
+        member = new_tenant("local member")
+        self.addCleanup(ex._registry.delete, member.id)
+        self.assertIn("local", ex._provider_poll_targets(T))
+        self.assertFalse(ex.PROVIDERS["local"]["enabled"](member))
+        self.assertNotIn("local", ex._provider_poll_targets(member))
+        code, body = ex._bind_class_session(member, "local", "s-member", time.time())
+        self.assertEqual(code, 503, body)
+
     def test_unset_disabled(self):
         plocal.LOCAL_UPSTREAM = ""
         self.assertFalse(ex.PROVIDERS["local"]["enabled"](T))

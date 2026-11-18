@@ -156,5 +156,7 @@ def poll_local(t, prev=None, account=None):  # noqa: ARG001 — uniform pool dis
 
 
 # No `auth` record: nothing to enroll, LOCAL_UPSTREAM is a LAN address, and the
-# proxy strips every credential on the hop.
-register("local", {"poll": poll_local, "enabled": lambda t: bool(LOCAL_UPSTREAM)})
+# proxy strips every credential on the hop. The machine is the household's, so
+# only the LAN tenant polls it: a member's tenant has no `local` poll target,
+# hence no account a class could bind it to (_provider_poll_targets).
+register("local", {"poll": poll_local, "enabled": lambda t: bool(LOCAL_UPSTREAM) and t.lan})
