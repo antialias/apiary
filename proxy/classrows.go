@@ -256,7 +256,7 @@ func classMemberDisplay(m classMemberPref) string {
 }
 
 // classDirectModel is the model a session that bypasses the proxy runs the class
-// on (`claude-switch run --direct`): the first Anthropic member in priority
+// on (`apiary mode direct`): the first Anthropic member in priority
 // order, since a provider member is only reachable through the proxy. Empty
 // when there is none, and the client then has no direct stand-in for the class.
 func classDirectModel(sorted []classMemberPref) string {

@@ -533,8 +533,8 @@ func (t *failoverTransport) anthropicReauth(req *http.Request, resp *http.Respon
 // account's sign-in and no fresher copy serves: a transport-level 403
 // permission_error, minted like unavailableResponse. Not a 401, which Claude
 // Code reads as its OWN login being bad (precedent: the anonymous-routed 403,
-// https_proxy_tls.go). The message's "switch proxy: " prefix is what
-// claude-switch doctor's probe matches.
+// https_proxy_tls.go). The message's "switch proxy: " prefix marks it as the
+// proxy's own words, which a client's probe matches.
 // reauthSeeWhere ends that message: where the owner re-signs the account. An
 // edition with its own accounts page names it from its init().
 var reauthSeeWhere = defaultReauthSeeWhere

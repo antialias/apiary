@@ -610,6 +610,18 @@ func unitWords(u string) string {
 // sessionHandler serves GET /_switch/session?id=&model=. Behind the client
 // gate, like every /_switch path but healthz.
 func sessionHandler(w http.ResponseWriter, r *http.Request) {
+	serveSessionFacts(w, r, nil)
+}
+
+// sessionHandlerFor serves the same reply from tenant tn's facts: a session
+// id another tenant's request carried is unseen here.
+func sessionHandlerFor(w http.ResponseWriter, r *http.Request, tn *tenant) {
+	serveSessionFacts(w, r, tn)
+}
+
+// serveSessionFacts answers from tn's facts, or the entry's tenant's when tn
+// is nil.
+func serveSessionFacts(w http.ResponseWriter, r *http.Request, tn *tenant) {
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"error":"GET only"}`, http.StatusMethodNotAllowed)
 		return
@@ -628,9 +640,10 @@ func sessionHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// The facts are the entry's tenant's: a session is read from the state
 	// of the tenant whose login asked (MEMBERS-PLAN 1b).
-	tn := mustTenant(w, r)
 	if tn == nil {
-		return
+		if tn = mustTenant(w, r); tn == nil {
+			return
+		}
 	}
 	_ = json.NewEncoder(w).Encode(tn.sessionFactsFor(id, model, nowFn()))
 }
