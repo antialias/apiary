@@ -261,7 +261,7 @@ func lanTenant() *tenant {
 }
 
 // lanTenantID is the lan tenant's id, "" when the index names none: what an
-// entry stamps on a users-file login, a device token without mem, and :8787.
+// entry stamps on a users-file login and on :8787.
 func lanTenantID() string {
 	membersMu.RLock()
 	defer membersMu.RUnlock()
