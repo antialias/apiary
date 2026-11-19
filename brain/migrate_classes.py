@@ -159,6 +159,23 @@ def _rewrite(doc, step):
     return out
 
 
+def _offered(doc, mark):
+    """A classes document's revision with its mark read as "offered" (the
+    LAN tenant's `onboarding: true`, or the previous brain's absent or false
+    `lan_only`), so a document and its rewrite compare equal however each
+    spells the mark. None for a document of another shape."""
+    out = copy.deepcopy(doc)
+    rows = class_rows(out)
+    if rows is None:
+        return None
+    for c in rows:
+        if isinstance(c, dict):
+            v = c.pop(mark, None)
+            c.pop("onboarding" if mark == "lan_only" else "lan_only", None)
+            c["offered"] = (v is True) if mark == "onboarding" else (v is not True)
+    return doc_revision(out)
+
+
 def _read_json(path):
     try:
         with open(path) as f:
@@ -382,6 +399,17 @@ def revert(creds_dir):
         original = _read_json(orig[CLASSES])
         unedited = doc is None or (class_rows(original) is not None
                                    and doc_revision(doc) == doc_revision(_rewrite(original, "migrate")))
+    if at_root and doc is not None:
+        # The root's document is meant to be the truth here (a migrate that never finished), but a
+        # brain may have served and edited the household's copy (a deploy cut off between the
+        # migrate's renames, or an upgrade that never migrated): the operator decides.
+        root_doc = _read_json(root[CLASSES])
+        if _offered(doc, "onboarding") != _offered(root_doc, "lan_only"):
+            newer = (f"{lan}/{CLASSES}" if os.path.getmtime(mine[CLASSES]) > os.path.getmtime(root[CLASSES])
+                     else CLASSES)
+            raise MigrationError(f"the root's {CLASSES} and {lan}/{CLASSES} differ (beyond the key's rewrite), "
+                                 f"so a brain may have edited one; {newer} is the newer. Keep the live one "
+                                 "and remove the other, then revert again; nothing was changed")
     if at_root or unedited:
         for n in ROOT_FILES:  # classes.json first: in place before the tenant's copy goes
             if n in kept and not os.path.exists(root[n]):
