@@ -63,15 +63,15 @@ func TestProxyReadsTheBrainsPreferredAndAgreesOnEveryCheck(t *testing.T) {
 	// fresh decision and put both back after.
 	oldBrain, oldPref := brainBase, lan.pref
 	brainBase, lan.pref = srv.URL, &decision{}
-	classRowsMu.Lock()
-	oldRows, oldSource := classRowsSet, classRowsSource
-	classRowsMu.Unlock()
+	lan.classRowsMu.Lock()
+	oldRows, oldSource := lan.classRows, lan.classRowsSource
+	lan.classRowsMu.Unlock()
 	t.Cleanup(func() {
 		prewarmWG.Wait()
 		brainBase, lan.pref = oldBrain, oldPref
-		classRowsMu.Lock()
-		classRowsSet, classRowsSource = oldRows, oldSource
-		classRowsMu.Unlock()
+		lan.classRowsMu.Lock()
+		lan.classRows, lan.classRowsSource = oldRows, oldSource
+		lan.classRowsMu.Unlock()
 	})
 	fetchPreferred()
 
@@ -148,7 +148,7 @@ func TestProxyReadsTheBrainsPreferredAndAgreesOnEveryCheck(t *testing.T) {
 
 	// The image door's class decodes as one (C4): its row carries the image
 	// modality, so the chat door refuses it and no picker lists it.
-	if e, ok := matchRegistryClassName("images"); !ok || e.Modality != modalityImage {
+	if e, ok := lan.matchRegistryClassName("images"); !ok || e.Modality != modalityImage {
 		t.Errorf("class images decoded as %+v, want an image row", e)
 	}
 

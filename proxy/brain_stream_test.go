@@ -47,9 +47,9 @@ func streamBrainWith(t *testing.T, silence, backoffMin time.Duration, other http
 	oldSilence, oldMin, oldMax := brainSilence, brainBackoffMin, brainBackoffMax
 	brainBase, lan.pref = srv.URL, &decision{}
 	brainSilence, brainBackoffMin, brainBackoffMax = silence, backoffMin, 4*backoffMin
-	classRowsMu.Lock()
-	oldRows, oldSource := classRowsSet, classRowsSource
-	classRowsMu.Unlock()
+	lan.classRowsMu.Lock()
+	oldRows, oldSource := lan.classRows, lan.classRowsSource
+	lan.classRowsMu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); lan.runBrainStream(ctx) }()
@@ -61,9 +61,9 @@ func streamBrainWith(t *testing.T, silence, backoffMin time.Duration, other http
 		stopPrewarmTimers()
 		brainBase, lan.pref = oldBrain, oldPref
 		brainSilence, brainBackoffMin, brainBackoffMax = oldSilence, oldMin, oldMax
-		classRowsMu.Lock()
-		classRowsSet, classRowsSource = oldRows, oldSource
-		classRowsMu.Unlock()
+		lan.classRowsMu.Lock()
+		lan.classRows, lan.classRowsSource = oldRows, oldSource
+		lan.classRowsMu.Unlock()
 	})
 	return &conns
 }

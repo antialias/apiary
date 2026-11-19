@@ -99,18 +99,6 @@ type registryEntry struct {
 	// and no picker lists. From the brain's class request_kind; persisted with
 	// the last-good rows, so a boot without the brain keeps it.
 	Modality string `json:"modality,omitempty"`
-
-	// LanOnly is the brain's class lan_only: the row is the LAN tenant's
-	// alone, listed to no other tenant (visibleTo). Persisted with the
-	// last-good rows, so a boot without the brain still hides it.
-	LanOnly bool `json:"lan_only,omitempty"`
-}
-
-// visibleTo reports whether tenant tn may see this row in a class list. A
-// lan_only row is the LAN tenant's alone; a nil tenant (nothing stamped)
-// sees only the rows every tenant sees.
-func (e *registryEntry) visibleTo(tn *tenant) bool {
-	return !e.LanOnly || (tn != nil && tn.lan)
 }
 
 const modalityImage = "image"
@@ -358,10 +346,13 @@ func advertisableConfigured() bool {
 	if brainBase != "" {
 		return true
 	}
-	classRowsMu.RLock()
-	defer classRowsMu.RUnlock()
-	for i := range classRowsSet {
-		if classRowsSet[i].disabledReason == "" {
+	// This machine's client is the LAN tenant's (the base-URL entry). With no
+	// brain, the index in force is the last-good one main() loaded before
+	// this is asked, and nothing will add a tenant later: no LAN tenant here
+	// means no class rows will ever be served, so removing the cache is true.
+	rows, _ := lanTenant().classRowsSnapshot()
+	for i := range rows {
+		if rows[i].disabledReason == "" {
 			return true
 		}
 	}
@@ -369,29 +360,20 @@ func advertisableConfigured() bool {
 }
 
 // registryStatus is the /_switch/status view: full entries including quarantine
-// reasons, with the brain-derived class rows folded in (#93)
-// so the entries list keeps its pre-B2 shape — status consumers still see class
-// rows as registry entries, tombstones as enabled=false/"removed". The additive
-// class_source key says where those rows came from.
+// reasons, with the LAN tenant's brain-derived class rows folded in (#93, C15)
+// so the entries list keeps its pre-B2 shape — status consumers (the deploy
+// gate among them) still see the household's class rows as registry entries,
+// tombstones as enabled=false/"removed". The additive class_source key says
+// where those rows came from. Every tenant's own rows are under
+// members.<tenant>.classes (classesStatus).
 func registryStatus() map[string]any {
-	classRows, classSource := classRowsSnapshot()
+	classRows, classSource := lanTenant().classRowsSnapshot()
 	entries := make([]map[string]any, 0, len(registry)+len(classRows))
-	add := func(e *registryEntry) {
-		entries = append(entries, map[string]any{
-			"name":            e.Name,
-			"id":              e.renderedID(),
-			"type":            e.Type,
-			"class":           e.Class,
-			"context_window":  e.ContextWindow,
-			"enabled":         e.disabledReason == "",
-			"disabled_reason": e.disabledReason,
-		})
-	}
 	for i := range registry {
-		add(&registry[i])
+		entries = append(entries, registryStatusEntry(&registry[i]))
 	}
 	for i := range classRows {
-		add(&classRows[i])
+		entries = append(entries, registryStatusEntry(&classRows[i]))
 	}
 	if classSource == "" {
 		classSource = "none"
@@ -401,5 +383,32 @@ func registryStatus() map[string]any {
 		"error":        registryErr,
 		"class_source": classSource, // "preferred" (live) | "last-good" (boot snapshot) | "none"
 		"entries":      entries,
+	}
+}
+
+// classesStatus is members.<tenant>.classes: tn's own class rows in the
+// registry's entry shape, and where they came from.
+func (tn *tenant) classesStatus() map[string]any {
+	rows, source := tn.classRowsSnapshot()
+	entries := make([]map[string]any, 0, len(rows))
+	for i := range rows {
+		entries = append(entries, registryStatusEntry(&rows[i]))
+	}
+	if source == "" {
+		source = "none"
+	}
+	return map[string]any{"source": source, "entries": entries}
+}
+
+// registryStatusEntry is one row of a status entries list.
+func registryStatusEntry(e *registryEntry) map[string]any {
+	return map[string]any{
+		"name":            e.Name,
+		"id":              e.renderedID(),
+		"type":            e.Type,
+		"class":           e.Class,
+		"context_window":  e.ContextWindow,
+		"enabled":         e.disabledReason == "",
+		"disabled_reason": e.disabledReason,
 	}
 }

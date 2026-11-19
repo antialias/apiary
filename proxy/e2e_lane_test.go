@@ -691,10 +691,10 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 	lan.bindMu.Unlock()
 	// derived class-row store (#93): global — a prior test's derived rows or
 	// tombstones must not advertise (or refuse) into THIS test's picker
-	classRowsMu.Lock()
-	oldClassRows, oldClassSrc := classRowsSet, classRowsSource
-	classRowsSet, classRowsSource = nil, ""
-	classRowsMu.Unlock()
+	lan.classRowsMu.Lock()
+	oldClassRows, oldClassSrc := lan.classRows, lan.classRowsSource
+	lan.classRows, lan.classRowsSource = nil, ""
+	lan.classRowsMu.Unlock()
 	// codex bearer cache (#33/#71): global — a prior test's dispensed bearer
 	// must not serve THIS test's first request (dispense counting depends on it)
 	lan.codexTokMu.Lock()
@@ -760,9 +760,9 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 		lan.bindMu.Lock()
 		lan.bindCache, lan.sessionFundings = oldBinds, oldFundings
 		lan.bindMu.Unlock()
-		classRowsMu.Lock()
-		classRowsSet, classRowsSource = oldClassRows, oldClassSrc
-		classRowsMu.Unlock()
+		lan.classRowsMu.Lock()
+		lan.classRows, lan.classRowsSource = oldClassRows, oldClassSrc
+		lan.classRowsMu.Unlock()
 		lan.codexTokMu.Lock()
 		lan.codexToks = oldCodexToks
 		lan.codexTokMu.Unlock()

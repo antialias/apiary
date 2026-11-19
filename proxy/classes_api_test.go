@@ -190,17 +190,17 @@ func TestE2EClassesEndpoint(t *testing.T) {
 	if again := get(); again.Revision != got.Revision {
 		t.Fatal("same content changed revision")
 	}
-	setClassRows(slices.Clone(rows), "last-good")
+	lan.setClassRows(slices.Clone(rows), "last-good")
 	if again := get(); again.Revision != got.Revision || again.Source != "last-good" {
 		t.Fatalf("restart/source changed revision: %+v", again)
 	}
 	changed := slices.Clone(rows)
 	changed[1].Guidance = "Updated purpose."
-	setClassRows(changed, "preferred")
+	lan.setClassRows(changed, "preferred")
 	if again := get(); again.Revision == got.Revision {
 		t.Fatal("guidance change did not change revision")
 	}
-	setClassRows(nil, "preferred")
+	lan.setClassRows(nil, "preferred")
 	if empty := get(); len(empty.Classes) != 0 {
 		t.Fatalf("empty load = %+v", empty)
 	}
@@ -215,17 +215,17 @@ func TestClassGuidancePersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "classes.json")
 	withClassStateFile(t, path)
 	rows := []registryEntry{{Name: "fast", Class: "fast", Type: "class", Display: "Fast", ContextWindow: 200000, Guidance: "Small, fast tier.", FirstChoice: "gpt-6-astra"}}
-	persistClassRows(rows)
-	loadClassRowsState()
-	loaded, source := classRowsSnapshot()
+	lan.persistClassRows(rows)
+	lan.loadClassRowsState()
+	loaded, source := lan.classRowsSnapshot()
 	if source != "last-good" || !slices.Equal(loaded, rows) {
 		t.Fatalf("round trip = %+v / %s", loaded, source)
 	}
 	if err := os.WriteFile(path, []byte(`{"savedAt":1,"rows":[{"name":"fast","class":"fast","display":"Fast","context_window":200000}]}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	loadClassRowsState()
-	loaded, source = classRowsSnapshot()
+	lan.loadClassRowsState()
+	loaded, source = lan.classRowsSnapshot()
 	if source != "last-good" || len(loaded) != 1 || loaded[0].Guidance != "" || loaded[0].FirstChoice != "" {
 		t.Fatalf("old snapshot = %+v / %s", loaded, source)
 	}

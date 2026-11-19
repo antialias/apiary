@@ -28,16 +28,16 @@ func brainServing(t *testing.T) (set func(map[string]any)) {
 	t.Cleanup(resetQuotaState())
 	oldBrain, oldPref := brainBase, lan.pref
 	brainBase, lan.pref = srv.URL, &decision{}
-	classRowsMu.Lock()
-	oldRows, oldSource := classRowsSet, classRowsSource
-	classRowsMu.Unlock()
+	lan.classRowsMu.Lock()
+	oldRows, oldSource := lan.classRows, lan.classRowsSource
+	lan.classRowsMu.Unlock()
 	t.Cleanup(func() {
 		prewarmWG.Wait()
 		stopPrewarmTimers()
 		brainBase, lan.pref = oldBrain, oldPref
-		classRowsMu.Lock()
-		classRowsSet, classRowsSource = oldRows, oldSource
-		classRowsMu.Unlock()
+		lan.classRowsMu.Lock()
+		lan.classRows, lan.classRowsSource = oldRows, oldSource
+		lan.classRowsMu.Unlock()
 	})
 	return func(p map[string]any) {
 		b, err := json.Marshal(p)

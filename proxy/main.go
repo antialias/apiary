@@ -201,9 +201,6 @@ type advertisedModel struct {
 	kind   string
 	effort bool
 
-	// lanOnly is a class row only the LAN tenant is shown (registryEntry.LanOnly).
-	lanOnly bool
-
 	// family / version say WHAT an anthropic row is, so no consumer has to
 	// parse an id to rank it (§15.3: "latest Opus" is the family-opus row with
 	// the highest version, then the largest contextWindow). Derived from the
@@ -275,28 +272,14 @@ func hostedProviderNamespace(model string) (string, bool) {
 	return "", false
 }
 
-// advertisedModels is the registry's advertisement-only Anthropic rows (#96 —
-// listed so gateway discovery stops substituting them, routed by lane like any
-// unadvertised id) and the active class rows derived from the brain's /preferred
-// (#93; last-good snapshot when the brain is down — see classrows.go). No
-// provider adds a row of its own.
-func advertisedModels() []advertisedModel {
-	return append(registryAnthropicRows(), registryClassRows()...)
-}
-
-// advertisedModelsFor is advertisedModels as tenant tn is shown it: without
-// the lan_only class rows unless tn is the LAN tenant.
+// advertisedModelsFor is what tenant tn is shown: the registry's
+// advertisement-only Anthropic rows (#96 — listed so gateway discovery stops
+// substituting them, routed by lane like any unadvertised id) and tn's own
+// active class rows, derived from its /preferred (#93; its last-good snapshot
+// when the brain is down — see classrows.go). A nil tenant is shown the
+// Anthropic rows only. No provider adds a row of its own.
 func advertisedModelsFor(tn *tenant) []advertisedModel {
-	lan := tn != nil && tn.lan
-	all := advertisedModels()
-	out := make([]advertisedModel, 0, len(all))
-	for _, m := range all {
-		if m.lanOnly && !lan {
-			continue
-		}
-		out = append(out, m)
-	}
-	return out
+	return append(registryAnthropicRows(), tn.registryClassRows()...)
 }
 
 // directProvidersStatus summarizes the provider table for /_switch/status. A
@@ -595,8 +578,8 @@ var prewarmWG sync.WaitGroup
 // event on the tenant's /t/<tenant>/events stream) and, when it holds
 // everything the proxy reads, makes it the tenant's decision. A document that
 // does not is a decode failure: the view goes not-ok (brainFail) and the last
-// good state stays. The class rows (/_switch/classes, /v1/models) are global
-// and derive from the lan tenant's document alone.
+// good state stays. The tenant's class rows (/_switch/classes, /v1/models)
+// derive from this document, the tenant's own (C15).
 func (tn *tenant) applyPreferred(body io.Reader) {
 	pref := tn.pref
 	var d struct {
@@ -706,18 +689,16 @@ func (tn *tenant) applyPreferred(body io.Reader) {
 	}
 	// #93 (B2): the classes payload is the source of the advertised class picker
 	// rows — derive, tombstone what vanished, persist the last-good snapshot.
-	// The rows are one registry for every tenant, read from the lan tenant's
-	// document (the classes document is the operator's, one for all).
+	// Each tenant's rows are its own, from its own document (C15), which the
+	// brain already scopes to the classes that tenant may see.
 	if d.Classes != nil {
-		if tn.lan {
-			shapes := make(map[string]string, len(d.Consumers))
-			for _, c := range d.Consumers {
-				if c.ID != "" {
-					shapes[c.ID] = c.RequestShape
-				}
+		shapes := make(map[string]string, len(d.Consumers))
+		for _, c := range d.Consumers {
+			if c.ID != "" {
+				shapes[c.ID] = c.RequestShape
 			}
-			updateClassRowsFromPreferred(classes, shapes)
 		}
+		tn.updateClassRowsFromPreferred(classes, shapes)
 		if tn.health != nil {
 			// #115: freeze health keys that left the registry, unfreeze the
 			// returning ones — the union across classes is the present set.
@@ -1433,7 +1414,7 @@ func modelsHandler(w http.ResponseWriter, r *http.Request) {
 		Version       string `json:"version,omitempty"`
 		ContextWindow int    `json:"context_window"`
 	}
-	// The request's tenant: a lan_only class row is listed to the LAN tenant only.
+	// The request's tenant's rows: its own classes, no other tenant's.
 	ams := advertisedModelsFor(tenantFrom(r.Context()))
 	data := make([]entry, 0, len(ams))
 	for _, m := range ams {
@@ -1839,7 +1820,7 @@ func (tn *tenant) noteServedSession(hop *http.Request, info reqInfo, account, mo
 	f := sessionFact{account: account, model: model, route: chk.route, tier: chk.funding(),
 		provider: provider, lane: servedLane(hop, info)}
 	session := hop.Header.Get("x-claude-code-session-id")
-	key := sessionModelKey(info.asked)
+	key := tn.sessionModelKey(info.asked)
 	if cc := info.classCtx; cc != nil {
 		if strings.HasSuffix(cc.inPath, "/count_tokens") {
 			return
@@ -2214,9 +2195,10 @@ func main() {
 			log.Printf("registry: ignoring SWITCH_1M_MARK_FLOOR=%q — want a positive integer", v)
 		}
 	}
-	// Class-row last-good state path (#93). Resolved here ONLY — the package
-	// default "" keeps tests hermetic (no persistence), exactly like
-	// modelsFilePath. The LOAD happens after buildHandler below.
+	// Class-row last-good state path (#93): the LAN tenant's file, and the
+	// pattern of every other tenant's (classStatePath). Resolved here ONLY —
+	// the package default "" keeps tests hermetic (no persistence), exactly
+	// like modelsFilePath. Each tenant loads its own in tenant.start.
 	if home, err := os.UserHomeDir(); err == nil {
 		classStateFilePath = filepath.Join(home, ".claude-switch-proxy", "class-rows.json")
 	}
@@ -2266,17 +2248,13 @@ func main() {
 		log.Printf("🩺 SWITCH_HEALTH=%v (enforced classes: %v, notes enabled: %t)", healthModeV, healthEnforceClasses(), healthNotesEnabled)
 	}
 	gated, core := buildHandlers()
-	// Boot the class-row store (#93) AFTER buildHandler and BEFORE the brain
-	// stream goroutine and the listener start: a live /preferred must replace
-	// the snapshot (never the reverse), and "advertising must work brain-down"
-	// means the rows are in place for the first request. Loading never touches
-	// the network, so startup still never blocks on the brain.
-	loadClassRowsState()
 
 	// The tenants (MEMBERS-PLAN 1b): the last index from beside the class-rows
 	// snapshot first, so a brain outage at boot does not blind the household;
 	// then the brain's own, kept by its /tenants/events. Each tenant's start
-	// opens its own /t/<tenant>/events stream and reporter.
+	// loads its last-good class rows (#93: "advertising must work brain-down",
+	// and loading never touches the network) and then opens its own
+	// /t/<tenant>/events stream and reporter.
 	//
 	// No brain configured -> direct-providers-only: account lanes have nothing to route
 	// to and FAIL loud (there is no ambient passthrough anymore). Production always sets
@@ -2341,11 +2319,17 @@ func main() {
 			log.Printf("client model cache: syncing %s (baseUrl=%s)", clientCachePath, clientBaseURL)
 			go func() {
 				for {
-					models := advertisedModels()
-					if wrote, err := writeClientModelsCache(clientCachePath, clientBaseURL, models); err != nil {
-						log.Printf("client model cache: %v", err)
-					} else if wrote {
-						log.Printf("client model cache: wrote %d direct model(s)", len(models))
+					// This machine's client is the base-URL entry's: the LAN
+					// tenant. With none in the index yet there are no rows to
+					// say, so the cache is left as it is rather than written
+					// without the class rows.
+					if tn := lanTenant(); tn != nil {
+						models := advertisedModelsFor(tn)
+						if wrote, err := writeClientModelsCache(clientCachePath, clientBaseURL, models); err != nil {
+							log.Printf("client model cache: %v", err)
+						} else if wrote {
+							log.Printf("client model cache: wrote %d direct model(s)", len(models))
+						}
 					}
 					time.Sleep(60 * time.Second)
 				}
@@ -2955,7 +2939,7 @@ func requestHandler(proxy http.Handler) http.Handler {
 				tn.sessionLabelsObserve(r.Header.Get("x-claude-code-session-id"), facts, time.Now())
 			}
 			served.request(model, facts, r.Method == http.MethodPost && r.URL.Path == "/v1/messages")
-			ceClass, isClass := matchRegistryClass(model)
+			ceClass, isClass := tn.matchRegistryClass(model)
 			if wireOpenAI && !isClass {
 				// D8: the OpenAI wire is default-deny — workload classes ONLY.
 				// A lane id or garbage must never reach laneForModel from
@@ -3014,7 +2998,7 @@ func requestHandler(proxy http.Handler) http.Handler {
 					}
 					ctx = context.WithValue(ctx, infoKey, out.info)
 				}
-			} else if re, ok := matchClassTombstone(model); ok {
+			} else if re, ok := tn.matchClassTombstone(model); ok {
 				// A removed class (#36, #93 rule 2): recognized, deliberately not
 				// routable — answered below with a typed 503, never the lane path.
 				unroutable, unModel = re.disabledReason, model
@@ -3225,6 +3209,9 @@ func switchHandler(w http.ResponseWriter, r *http.Request) {
 		for _, f := range statusExtras {
 			f(extras)
 		}
+		// The LAN tenant's class rows, read before st.mu: its rows lock is
+		// not taken under st.mu.
+		reg := registryStatus()
 		st.mu.Lock()
 		snap := map[string]any{
 			"service":             "claude-switch-proxy",
@@ -3234,7 +3221,7 @@ func switchHandler(w http.ResponseWriter, r *http.Request) {
 			"members":             members,
 			"lane_parse_failures": atomic.LoadInt64(&laneParseFailures),
 			"direct_providers":    directProvidersStatus(),
-			"registry":            registryStatus(),
+			"registry":            reg,
 			// eventsStatus takes hub.mu, which is a leaf — it must never reach for
 			// st.mu, which is held across this whole literal.
 			"events":       eventsStatus(),
@@ -3376,6 +3363,9 @@ func (tn *tenant) statusSnapshot() map[string]any {
 		// Scry reads it as record<string,string>.
 		"anthropic_tokens": anthTokens,
 		"class_bindings":   classBindings,
+		// C15: this tenant's own class rows, in the registry's entry shape
+		// (classesStatus takes classRowsMu — a leaf here).
+		"classes": tn.classesStatus(),
 		// C6 (§2.11's statusline): per class and session, the tier its last
 		// request was served on, or the class unavailable until a time.
 		"class_funding": classFunding,

@@ -56,8 +56,8 @@ type sessionFact struct {
 // class where classIDMatches says so); any other model by its id without a
 // trailing "[1m]". Recording and reading both key through here, so the two
 // cannot disagree. "" for no model.
-func sessionModelKey(model string) string {
-	if e, ok := matchRegistryClass(model); ok {
+func (tn *tenant) sessionModelKey(model string) string {
+	if e, ok := tn.matchRegistryClass(model); ok {
 		return classModelKey(e.Class)
 	}
 	return strings.TrimSuffix(model, "[1m]")
@@ -244,10 +244,10 @@ func selectionOf(f sessionFact) string {
 // "[1m]" picker mark stripped as the request path strips it. laneForModel
 // alone answers "default" for anything, so it is asked last.
 func (tn *tenant) unseenSelection(model string) string {
-	if e, ok := matchRegistryClass(model); ok {
+	if e, ok := tn.matchRegistryClass(model); ok {
 		return e.Class
 	}
-	if _, ok := matchClassTombstone(model); ok {
+	if _, ok := tn.matchClassTombstone(model); ok {
 		return ""
 	}
 	if _, _, ok := classShapedRefusalReason(tn, model); ok {
@@ -368,7 +368,7 @@ func isoTime(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 // set to, at now: only what served the session for that model.
 func (tn *tenant) sessionFactsFor(session, model string, now time.Time) any {
 	problems := tn.proxyProblems()
-	key := sessionModelKey(model)
+	key := tn.sessionModelKey(model)
 	tn.sessFactsMu.Lock()
 	f, ok := tn.sessFacts[sessionFactKey(key, session)]
 	tn.sessFactsMu.Unlock()
@@ -378,8 +378,8 @@ func (tn *tenant) sessionFactsFor(session, model string, now time.Time) any {
 		// A class model's class is the registry's, served or not: a status line
 		// tells a class from a model named directly from its first answer.
 		out := sfUnseen{V: sessionFactsV, AsOf: isoTime(now), Seen: false}
-		if e, ok := matchRegistryClass(model); ok {
-			out.Class = classPickerID(e.Class)
+		if e, ok := tn.matchRegistryClass(model); ok {
+			out.Class = tn.classPickerID(e.Class)
 		}
 		var why string
 		out.Room, out.Asks, why = tn.roomFor(tn.unseenSelection(model))
@@ -392,7 +392,7 @@ func (tn *tenant) sessionFactsFor(session, model string, now time.Time) any {
 	out := sfSeen{V: sessionFactsV, AsOf: isoTime(now), Seen: true}
 
 	if f.class != "" {
-		out.Class = classPickerID(f.class)
+		out.Class = tn.classPickerID(f.class)
 	}
 	var why string
 	out.Room, out.Asks, why = tn.roomFor(selectionOf(f))
@@ -464,8 +464,8 @@ func (tn *tenant) proxyProblems() []string {
 
 // classPickerID is a brain class as the client names it: its registry row's
 // rendered id without the window mark ("frontier" -> "claude-frontier").
-func classPickerID(class string) string {
-	if e, ok := matchRegistryClassName(class); ok {
+func (tn *tenant) classPickerID(class string) string {
+	if e, ok := tn.matchRegistryClassName(class); ok {
 		return "claude-" + e.Name
 	}
 	return "claude-" + class

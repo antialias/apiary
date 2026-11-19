@@ -212,10 +212,10 @@ func TestAnthropicRowNeitherRefusedNorClaimed(t *testing.T) {
 	})
 	t.Cleanup(func() { registry = oldReg })
 	withClassRows(t, "")
-	if e, ok := matchClassTombstone("claude-fable-5"); ok {
+	if e, ok := lan.matchClassTombstone("claude-fable-5"); ok {
 		t.Fatalf("advertised anthropic id quarantined: %+v", e)
 	}
-	if _, ok := matchRegistryClass("claude-fable-5"); ok {
+	if _, ok := lan.matchRegistryClass("claude-fable-5"); ok {
 		t.Fatal("anthropic row must not match as a class row")
 	}
 	if _, _, ok := classShapedRefusalReason(nil, "claude-fable-5"); ok {
@@ -308,14 +308,14 @@ func TestAdvertisableConfigured(t *testing.T) {
 // withClassRows swaps the derived class-row store for the duration of a test.
 func withClassRows(t *testing.T, source string, rows ...registryEntry) {
 	t.Helper()
-	classRowsMu.Lock()
-	oldRows, oldSrc := classRowsSet, classRowsSource
-	classRowsSet, classRowsSource = rows, source
-	classRowsMu.Unlock()
+	lan.classRowsMu.Lock()
+	oldRows, oldSrc := lan.classRows, lan.classRowsSource
+	lan.classRows, lan.classRowsSource = rows, source
+	lan.classRowsMu.Unlock()
 	t.Cleanup(func() {
-		classRowsMu.Lock()
-		classRowsSet, classRowsSource = oldRows, oldSrc
-		classRowsMu.Unlock()
+		lan.classRowsMu.Lock()
+		lan.classRows, lan.classRowsSource = oldRows, oldSrc
+		lan.classRowsMu.Unlock()
 	})
 }
 
@@ -325,22 +325,22 @@ func TestMatchClassTombstone(t *testing.T) {
 	withClassRows(t, "preferred",
 		registryEntry{Name: "frontier", Type: "class", Class: "frontier", ContextWindow: 200000}, tomb)
 
-	if _, ok := matchClassTombstone("claude-frontier"); ok {
+	if _, ok := lan.matchClassTombstone("claude-frontier"); ok {
 		t.Fatal("active class row must not match as unroutable")
 	}
-	if e, ok := matchClassTombstone("claude-helpdesk"); !ok || e.disabledReason != classRemovedReason {
+	if e, ok := lan.matchClassTombstone("claude-helpdesk"); !ok || e.disabledReason != classRemovedReason {
 		t.Fatalf("tombstoned class row = (%v, %+v), want the removed quarantine (#93 rule 2)", ok, e)
 	}
-	if e, ok := matchRegistryClass("claude-frontier"); !ok || e.Class != "frontier" {
+	if e, ok := lan.matchRegistryClass("claude-frontier"); !ok || e.Class != "frontier" {
 		t.Fatalf("class match = (%v, %+v)", ok, e)
 	}
-	if _, ok := matchRegistryClass("claude-helpdesk"); ok {
+	if _, ok := lan.matchRegistryClass("claude-helpdesk"); ok {
 		t.Fatal("tombstoned class row must not match as an active class")
 	}
-	if _, ok := matchClassTombstone(""); ok {
+	if _, ok := lan.matchClassTombstone(""); ok {
 		t.Fatal("empty model must not match")
 	}
-	if _, ok := matchRegistryClass(""); ok {
+	if _, ok := lan.matchRegistryClass(""); ok {
 		t.Fatal("empty model must not match as class")
 	}
 }

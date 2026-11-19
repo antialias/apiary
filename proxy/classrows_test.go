@@ -16,7 +16,8 @@ import (
 	"testing"
 )
 
-// withClassStateFile points the last-good persistence at a test-owned path.
+// withClassStateFile points the last-good persistence at a test-owned path:
+// the configured file, and the household's (the LAN tenant's own) with it.
 func withClassStateFile(t *testing.T, path string) {
 	t.Helper()
 	old := classStateFilePath
@@ -146,8 +147,8 @@ func TestLoadClassRowsStateAppliesRowGuard(t *testing.T) {
 		{"name":"frontier","class":"frontier","context_window":200000}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	loadClassRowsState()
-	got, src := classRowsSnapshot()
+	lan.loadClassRowsState()
+	got, src := lan.classRowsSnapshot()
 	if src != "last-good" {
 		t.Fatalf("boot source = %q, want last-good", src)
 	}
@@ -165,10 +166,10 @@ func TestClassRowsStateKeepsDirectModel(t *testing.T) {
 	withClassRows(t, "")
 	path := filepath.Join(t.TempDir(), "class-rows.json")
 	withClassStateFile(t, path)
-	persistClassRows([]registryEntry{{Name: "capable", Type: "class", Class: "capable", ContextWindow: 200000,
+	lan.persistClassRows([]registryEntry{{Name: "capable", Type: "class", Class: "capable", ContextWindow: 200000,
 		FirstChoice: "Claude Opus 5.5", DirectModel: "claude-opus-5-5"}})
-	loadClassRowsState()
-	got, _ := classRowsSnapshot()
+	lan.loadClassRowsState()
+	got, _ := lan.classRowsSnapshot()
 	if len(got) != 1 || got[0].DirectModel != "claude-opus-5-5" {
 		t.Fatalf("reloaded %+v, want the direct model kept", got)
 	}
@@ -236,17 +237,17 @@ func TestClassRowsPersistRoundTrip(t *testing.T) {
 		{Name: "frontier", Type: "class", Class: "frontier", Display: "Frontier (auto)", ContextWindow: 1000000},
 		tomb,
 	}
-	setClassRows(rows, "preferred")
+	lan.setClassRows(rows, "preferred")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("live-derived rows must persist: %v", err)
 	}
 
 	// wipe the in-memory store, then boot from the file
-	classRowsMu.Lock()
-	classRowsSet, classRowsSource = nil, ""
-	classRowsMu.Unlock()
-	loadClassRowsState()
-	got, src := classRowsSnapshot()
+	lan.classRowsMu.Lock()
+	lan.classRows, lan.classRowsSource = nil, ""
+	lan.classRowsMu.Unlock()
+	lan.loadClassRowsState()
+	got, src := lan.classRowsSnapshot()
 	if src != "last-good" {
 		t.Fatalf("boot source = %q, want last-good", src)
 	}
@@ -264,13 +265,13 @@ func TestClassRowsPersistRoundTrip(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	setClassRows(got, "last-good")
+	lan.setClassRows(got, "last-good")
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("source last-good must not write the state file")
 	}
 	// the first live refresh after boot serves the SAME rows: no change, no
 	// write — the 30s poll must not grind the disk re-writing identical state
-	setClassRows(got, "preferred")
+	lan.setClassRows(got, "preferred")
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("an unchanged refresh must not rewrite the state file")
 	}
@@ -278,7 +279,7 @@ func TestClassRowsPersistRoundTrip(t *testing.T) {
 	changed := []registryEntry{
 		{Name: "frontier", Type: "class", Class: "frontier", Display: "Frontier (auto)", ContextWindow: 200000},
 	}
-	setClassRows(changed, "preferred")
+	lan.setClassRows(changed, "preferred")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("a changed refresh must persist: %v", err)
 	}
@@ -290,8 +291,8 @@ func TestLoadClassRowsStateTolerant(t *testing.T) {
 
 	// absent file: a normal first boot
 	withClassStateFile(t, filepath.Join(dir, "absent.json"))
-	loadClassRowsState()
-	if got, src := classRowsSnapshot(); len(got) != 0 || src != "" {
+	lan.loadClassRowsState()
+	if got, src := lan.classRowsSnapshot(); len(got) != 0 || src != "" {
 		t.Fatalf("absent file must leave the store empty, got %+v / %q", got, src)
 	}
 
@@ -301,8 +302,8 @@ func TestLoadClassRowsStateTolerant(t *testing.T) {
 		t.Fatal(err)
 	}
 	withClassStateFile(t, bad)
-	loadClassRowsState()
-	if got, _ := classRowsSnapshot(); len(got) != 0 {
+	lan.loadClassRowsState()
+	if got, _ := lan.classRowsSnapshot(); len(got) != 0 {
 		t.Fatalf("corrupt file must leave the store empty, got %+v", got)
 	}
 
@@ -314,8 +315,8 @@ func TestLoadClassRowsStateTolerant(t *testing.T) {
 		t.Fatal(err)
 	}
 	withClassStateFile(t, mixed)
-	loadClassRowsState()
-	got, _ := classRowsSnapshot()
+	lan.loadClassRowsState()
+	got, _ := lan.classRowsSnapshot()
 	if len(got) != 1 || got[0].Name != "frontier" || got[0].ContextWindow != 100000 {
 		t.Fatalf("mixed file load = %+v, want the one sane row with its window as saved", got)
 	}
@@ -336,7 +337,7 @@ func TestE2EClassBootFromLastGoodBrainDown(t *testing.T) {
 	tomb := registryEntry{Name: "helpdesk", Type: "class", Class: "helpdesk", ContextWindow: 200000}
 	tomb.disabledReason = classRemovedReason
 	withClassStateFile(t, path)
-	persistClassRows([]registryEntry{
+	lan.persistClassRows([]registryEntry{
 		{Name: "frontier", Type: "class", Class: "frontier", Display: "Frontier (auto)", ContextWindow: 200000},
 		tomb,
 	})
@@ -352,7 +353,7 @@ func TestE2EClassBootFromLastGoodBrainDown(t *testing.T) {
 	// production boot order: registry first (buildHandler), THEN the snapshot —
 	// loadClassRowsState's named-collision guard consults the built registry.
 	rebuildProxy(env)
-	loadClassRowsState()
+	lan.loadClassRowsState()
 
 	ids := getModels(t, env.proxy.URL)
 	if len(ids) != 1 || ids[0] != "claude-frontier" {
@@ -393,29 +394,29 @@ func TestClassMarkedRowAnswersBareID(t *testing.T) {
 
 	marked := registryEntry{Name: "tutor", Type: "class", Class: "tutor", ContextWindow: 419672}
 	plain := registryEntry{Name: "frontier", Type: "class", Class: "frontier", ContextWindow: 200000}
-	classRowsMu.Lock()
-	oldRows := classRowsSet
-	classRowsSet = []registryEntry{marked, plain}
-	classRowsMu.Unlock()
+	lan.classRowsMu.Lock()
+	oldRows := lan.classRows
+	lan.classRows = []registryEntry{marked, plain}
+	lan.classRowsMu.Unlock()
 	t.Cleanup(func() {
-		classRowsMu.Lock()
-		classRowsSet = oldRows
-		classRowsMu.Unlock()
+		lan.classRowsMu.Lock()
+		lan.classRows = oldRows
+		lan.classRowsMu.Unlock()
 	})
 
 	if got := marked.renderedID(); got != "claude-tutor[1m]" {
 		t.Fatalf("marked.renderedID() = %q", got)
 	}
 	for _, id := range []string{"claude-tutor[1m]", "claude-tutor"} {
-		if _, ok := matchRegistryClass(id); !ok {
+		if _, ok := lan.matchRegistryClass(id); !ok {
 			t.Fatalf("%q did not resolve — a marked class must answer to both its rendered and bare id", id)
 		}
 	}
-	if _, ok := matchRegistryClass("claude-frontier"); !ok {
+	if _, ok := lan.matchRegistryClass("claude-frontier"); !ok {
 		t.Fatalf("an unmarked class must still answer to its own id")
 	}
 	// The reverse is NOT an alias: rule 3 still refuses a suffix the row never had.
-	if _, ok := matchRegistryClass("claude-frontier[1m]"); ok {
+	if _, ok := lan.matchRegistryClass("claude-frontier[1m]"); ok {
 		t.Fatalf("an unmarked class answered to a suffixed id — that must stay a typed refusal")
 	}
 }
@@ -456,23 +457,23 @@ func TestClassRowsHideForeignConsumers(t *testing.T) {
 		t.Fatalf("a claude-code consumer's class must stay advertised")
 	}
 
-	classRowsMu.Lock()
-	old := classRowsSet
-	classRowsSet = rows
-	classRowsMu.Unlock()
+	lan.classRowsMu.Lock()
+	old := lan.classRows
+	lan.classRows = rows
+	lan.classRowsMu.Unlock()
 	t.Cleanup(func() {
-		classRowsMu.Lock()
-		classRowsSet = old
-		classRowsMu.Unlock()
+		lan.classRowsMu.Lock()
+		lan.classRows = old
+		lan.classRowsMu.Unlock()
 	})
 
-	for _, ad := range registryClassRows() {
+	for _, ad := range lan.registryClassRows() {
 		if ad.pickerID == "claude-tutor" {
 			t.Fatalf("hidden row reached /v1/models: %+v", ad)
 		}
 	}
 	// Hidden does NOT mean unroutable: API consumers without a picker must still reach it.
-	if _, ok := matchRegistryClass("claude-tutor"); !ok {
+	if _, ok := lan.matchRegistryClass("claude-tutor"); !ok {
 		t.Fatalf("hidden class stopped routing — that would be an outage for its consumer")
 	}
 }
@@ -482,8 +483,8 @@ func TestClassRowsHideForeignConsumers(t *testing.T) {
 // class" for a session. Each case must name its own remediation, and only the
 // transient one may advertise a retry.
 func TestClassShapedRefusalDistinguishesItsThreeCases(t *testing.T) {
-	oldRows, oldSrc := classRowsSet, classRowsSource
-	t.Cleanup(func() { classRowsSet, classRowsSource = oldRows, oldSrc })
+	oldRows, oldSrc := lan.classRows, lan.classRowsSource
+	t.Cleanup(func() { lan.classRows, lan.classRowsSource = oldRows, oldSrc })
 
 	lan.pref.mu.Lock()
 	oldOK := lan.pref.ok
@@ -493,7 +494,7 @@ func TestClassShapedRefusalDistinguishesItsThreeCases(t *testing.T) {
 
 	// (1) nothing loaded and the brain has never answered — every class id is
 	// unknown right now and may well resolve on its own. The ONLY retryable case.
-	classRowsSet, classRowsSource = nil, ""
+	lan.classRows, lan.classRowsSource = nil, ""
 	reason, retry, ok := classShapedRefusalReason(lan, "claude-frontier")
 	if !ok || retry <= 0 {
 		t.Fatalf("pre-load refusal = (%q, %d), want a retryable refusal", reason, retry)
@@ -517,8 +518,8 @@ func TestClassShapedRefusalDistinguishesItsThreeCases(t *testing.T) {
 
 	// (2) the class exists; the caller asked for a 1M variant that is not
 	// advertised. Retrying is useless — the message must say the edit.
-	classRowsSet = []registryEntry{{Name: "frontier", Type: "class", Class: "frontier", ContextWindow: 200000}}
-	classRowsSource = "preferred"
+	lan.classRows = []registryEntry{{Name: "frontier", Type: "class", Class: "frontier", ContextWindow: 200000}}
+	lan.classRowsSource = "preferred"
 	reason, retry, ok = classShapedRefusalReason(lan, "claude-frontier[1m]")
 	if !ok {
 		t.Fatal("a [1m] form of a 200k class must still be refused")

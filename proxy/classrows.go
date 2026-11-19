@@ -52,6 +52,17 @@ package main
 // an upstream leak; class ROUTING would be equally dead brain-down with a cold
 // bind cache, and clients' no-TTL picker caches keep showing their cached rows
 // anyway. Every later cold boot serves last-good.
+//
+// PER TENANT (C15): every tenant holds its own rows (tenant.classRows), derived
+// from its own /preferred, which the brain already scopes to what that tenant
+// may see. Two tenants may each declare a class of the same id; each request
+// resolves against its own tenant's rows. Each tenant has its own last-good
+// file (classStatePath): the LAN tenant's is SWITCH_CLASS_STATE_FILE itself,
+// every other tenant's sits beside it as <name>.<tenant><ext>, the
+// healthStatePath pattern. tn.start() loads it before the tenant's brain
+// stream starts, so a tenant serves its last-good rows from the moment it
+// exists. A tenant with no file yet (a member's first boot on this binary)
+// serves no class rows until its first /preferred: the window above, per tenant.
 
 import (
 	"encoding/json"
@@ -63,24 +74,43 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
 // classRemovedReason is the tombstone's disabledReason (spec-pinned: "removed").
 const classRemovedReason = "removed"
 
-var (
-	// classStateFilePath is resolved from SWITCH_CLASS_STATE_FILE in main()
-	// ONLY. The package default "" disables persistence, which keeps every test
-	// hermetic (never reading or writing a production class-rows.json) — the
-	// same contract as modelsFilePath.
-	classStateFilePath string
+// classStateFilePath is resolved from SWITCH_CLASS_STATE_FILE in main()
+// ONLY: the LAN tenant's last-good file, and the pattern of every other
+// tenant's (classStatePath). The package default "" disables persistence,
+// which keeps every test hermetic (never reading or writing a production
+// class-rows.json) — the same contract as modelsFilePath.
+var classStateFilePath string
 
-	classRowsMu     sync.RWMutex
-	classRowsSet    []registryEntry // type "class" only; disabledReason==classRemovedReason ⇒ tombstone
-	classRowsSource string          // "" = none yet | "last-good" (boot file) | "preferred" (live brain)
-)
+// classStateFileNow is tn's last-good file as of its current lan flag (read
+// under membersMu, where applyTenantIndex writes it).
+func (tn *tenant) classStateFileNow() string {
+	membersMu.RLock()
+	lan := tn.lan
+	membersMu.RUnlock()
+	return classStatePath(tn.id, lan)
+}
+
+// classStatePath is tenant id's last-good class-rows file: the configured file
+// itself for the LAN tenant, so an old and a new binary read and write the
+// same file in the same shape; for any other tenant one file beside it,
+// <name>.<id><ext> (healthStatePath's pattern). "" when persistence is off.
+func classStatePath(id string, lan bool) string {
+	if classStateFilePath == "" {
+		return ""
+	}
+	if lan {
+		return classStateFilePath
+	}
+	dir, name := filepath.Split(classStateFilePath)
+	ext := filepath.Ext(name)
+	return filepath.Join(dir, strings.TrimSuffix(name, ext)+"."+id+ext)
+}
 
 // classShapedRe is the workload-class namespace: "claude-" + digit-free
 // lowercase hyphenated words, optionally with the renderer-owned "[1m]" suffix.
@@ -122,8 +152,8 @@ func classShapedRefusalReason(tn *tenant, model string) (reason string, retrySec
 	// brain is down) and the id may well resolve on its own; an answer that
 	// carried no classes means this deployment serves none, and no amount of
 	// retrying will change that.
-	if !classRowsLoaded() {
-		if brainAnswered() {
+	if !tn.classRowsLoaded() {
+		if tn.brainAnswered() {
 			return "this proxy currently serves no workload classes at all — the brain's /preferred " +
 				"was read successfully and declared none. Retrying will not help", 0, true
 		}
@@ -139,7 +169,7 @@ func classShapedRefusalReason(tn *tenant, model string) (reason string, retrySec
 	// class anyway would hand back a 200k context to a caller that believes it
 	// holds 1M, so the refusal stands — but it names the edit.
 	if base, cut := strings.CutSuffix(model, "[1m]"); cut {
-		if e, exists := matchRegistryClass(base); exists {
+		if e, exists := tn.matchRegistryClass(base); exists {
 			return "class " + base + " exists but is not offered with a 1M context window, so \"" + base +
 				"[1m]\" is not a model this proxy advertises (\"[1m]\" is picker metadata the proxy appends " +
 				"only when a row's window clears the 1M floor; this class declares " +
@@ -174,14 +204,13 @@ func brainHint(tn *tenant) string {
 	return "run apiary doctor"
 }
 
-// brainAnswered reports whether the brain is reachable now for the lan
-// tenant, whose document the class rows derive from (pref.ok: its /events
-// stream is live and its last document decoded), not whether it ever
-// answered. It is the only thing that separates "we cannot hear the brain"
-// from "we asked and there are none" — and telling a caller to retry the second one is the same species
-// of lie this refusal exists to stop telling.
-func brainAnswered() bool {
-	tn := lanTenant()
+// brainAnswered reports whether the brain is reachable now for tenant tn,
+// whose document its class rows derive from (pref.ok: its /events stream is
+// live and its last document decoded), not whether it ever answered. It is
+// the only thing that separates "we cannot hear the brain" from "we asked and
+// there are none" — and telling a caller to retry the second one is the same
+// species of lie this refusal exists to stop telling. false for a nil tenant.
+func (tn *tenant) brainAnswered() bool {
 	if tn == nil {
 		return false
 	}
@@ -190,13 +219,16 @@ func brainAnswered() bool {
 	return tn.pref.ok
 }
 
-// classRowsLoaded reports whether ANY source has populated the class rows yet
-// (the boot file or a live /preferred). False only in the window between
-// listening and the first load.
-func classRowsLoaded() bool {
-	classRowsMu.RLock()
-	defer classRowsMu.RUnlock()
-	return classRowsSource != ""
+// classRowsLoaded reports whether ANY source has populated tn's class rows yet
+// (its boot file or a live /preferred). False only in the window between the
+// tenant's start and its first load, and for a nil tenant.
+func (tn *tenant) classRowsLoaded() bool {
+	if tn == nil {
+		return false
+	}
+	tn.classRowsMu.RLock()
+	defer tn.classRowsMu.RUnlock()
+	return tn.classRowsSource != ""
 }
 
 // classRowGuard vets a candidate class row before it may enter the store,
@@ -277,7 +309,7 @@ func deriveClassRows(classes map[string]classPref, prev []registryEntry, shapes 
 		}
 		e := registryEntry{Name: name, Type: "class", Class: name,
 			Display: c.Display, ContextWindow: c.ContextWindow, Guidance: c.Guidance,
-			pickerHidden: pickerHiddenFor(c.Consumer, shapes), LanOnly: c.LanOnly}
+			pickerHidden: pickerHiddenFor(c.Consumer, shapes)}
 		if c.RequestKind != "" && c.RequestKind != "chat" {
 			e.Modality = c.RequestKind
 			// An image class is reached through its own door, never a picker:
@@ -320,26 +352,28 @@ func deriveClassRows(classes map[string]classPref, prev []registryEntry, shapes 
 	return out
 }
 
-// updateClassRowsFromPreferred is fetchPreferred's hook: derive against the
-// current snapshot (so vanished ids tombstone) and install the result. Called
-// only when the /preferred payload CARRIED a classes key — an old brain that
-// omits the key entirely says nothing about classes, and tombstoning the world
-// on its silence would turn a brain rollback into an advertising outage.
-func updateClassRowsFromPreferred(classes map[string]classPref, shapes map[string]string) {
-	classRowsMu.RLock()
-	prev := classRowsSet
-	classRowsMu.RUnlock()
-	setClassRows(deriveClassRows(classes, prev, shapes), "preferred")
+// updateClassRowsFromPreferred is applyPreferred's hook: derive tn's rows
+// against its current snapshot (so vanished ids tombstone) and install the
+// result. Called only when the tenant's /preferred payload CARRIED a classes
+// key — an old brain that omits the key entirely says nothing about classes,
+// and tombstoning the world on its silence would turn a brain rollback into an
+// advertising outage.
+func (tn *tenant) updateClassRowsFromPreferred(classes map[string]classPref, shapes map[string]string) {
+	tn.classRowsMu.RLock()
+	prev := tn.classRows
+	tn.classRowsMu.RUnlock()
+	tn.setClassRows(deriveClassRows(classes, prev, shapes), "preferred")
 }
 
-// setClassRows installs rows (an atomic reference swap under the lock) and, on
-// a live-derived CHANGE, persists the new last-good snapshot. Boot-time loads
-// pass source "last-good" and never re-persist what they just read.
-func setClassRows(rows []registryEntry, source string) {
-	classRowsMu.Lock()
-	changed := !slices.Equal(classRowsSet, rows)
-	classRowsSet, classRowsSource = rows, source
-	classRowsMu.Unlock()
+// setClassRows installs tn's rows (an atomic reference swap under the lock)
+// and, on a live-derived CHANGE, persists the tenant's new last-good snapshot.
+// Boot-time loads pass source "last-good" and never re-persist what they just
+// read.
+func (tn *tenant) setClassRows(rows []registryEntry, source string) {
+	tn.classRowsMu.Lock()
+	changed := !slices.Equal(tn.classRows, rows)
+	tn.classRows, tn.classRowsSource = rows, source
+	tn.classRowsMu.Unlock()
 	if !changed || source != "preferred" {
 		return
 	}
@@ -353,29 +387,36 @@ func setClassRows(rows []registryEntry, source string) {
 			dead++
 		}
 	}
-	log.Printf("class rows: derived from /preferred — %d active (%s), %d tombstoned", active, strings.Join(ids, ", "), dead)
-	persistClassRows(rows)
+	log.Printf("class rows: %s derived from /preferred — %d active (%s), %d tombstoned", tn.id, active, strings.Join(ids, ", "), dead)
+	tn.persistClassRows(rows)
 }
 
-// classRowsSnapshot returns the current rows and their source for status views.
-func classRowsSnapshot() ([]registryEntry, string) {
-	classRowsMu.RLock()
-	defer classRowsMu.RUnlock()
-	return classRowsSet, classRowsSource
+// classRowsSnapshot returns tn's current rows and their source for status
+// views; nothing for a nil tenant.
+func (tn *tenant) classRowsSnapshot() ([]registryEntry, string) {
+	if tn == nil {
+		return nil, ""
+	}
+	tn.classRowsMu.RLock()
+	defer tn.classRowsMu.RUnlock()
+	return tn.classRows, tn.classRowsSource
 }
 
-// registryClassRows returns the advertised rows for ACTIVE class entries. A
+// registryClassRows returns tn's advertised rows for ACTIVE class entries. A
 // class row has no fixed upstream — the brain resolves it per-session (#27).
-func registryClassRows() []advertisedModel {
-	classRowsMu.RLock()
-	defer classRowsMu.RUnlock()
+func (tn *tenant) registryClassRows() []advertisedModel {
 	out := []advertisedModel{}
-	for i := range classRowsSet {
-		e := &classRowsSet[i]
+	if tn == nil {
+		return out
+	}
+	tn.classRowsMu.RLock()
+	defer tn.classRowsMu.RUnlock()
+	for i := range tn.classRows {
+		e := &tn.classRows[i]
 		if e.disabledReason == "" && !e.pickerHidden {
 			out = append(out, advertisedModel{pickerID: e.renderedID(), display: e.Display,
-				kind: kindClass, effort: classEffortReaches(e.Class),
-				contextWindow: e.ContextWindow, lanOnly: e.LanOnly})
+				kind: kindClass, effort: tn.classEffortReaches(e.Class),
+				contextWindow: e.ContextWindow})
 		}
 	}
 	return out
@@ -388,16 +429,13 @@ func registryClassRows() []advertisedModel {
 //
 // LOCK ORDER: pref.mu is taken WITHOUT classRowsMu, and never the other way
 // round. registryClassRows holds classRowsMu while it calls
-// classEffortReaches, so this must stay a leaf on pref.mu only; fetchPreferred
+// classEffortReaches, so this must stay a leaf on pref.mu only; applyPreferred
 // releases pref.mu before it touches the class rows at all.
-func classTargetMember(class string) (classMemberPref, bool) {
-	if class == "" {
-		return classMemberPref{}, false
-	}
-	// The rows are the lan tenant's document's (applyPreferred), so the
-	// member view that goes with them is read from the same document.
-	tn := lanTenant()
-	if tn == nil {
+//
+// The rows are tn's own document's (applyPreferred), so the member view that
+// goes with them is read from the same document.
+func (tn *tenant) classTargetMember(class string) (classMemberPref, bool) {
+	if class == "" || tn == nil {
 		return classMemberPref{}, false
 	}
 	tn.pref.mu.RLock()
@@ -427,8 +465,8 @@ func classTargetMember(class string) (classMemberPref, bool) {
 // MEMBER view is not persisted, so we cannot say the setting lands. A consumer
 // hiding the effort control is a smaller lie than offering a control that
 // silently does nothing.
-func classEffortReaches(class string) bool {
-	m, ok := classTargetMember(class)
+func (tn *tenant) classEffortReaches(class string) bool {
+	m, ok := tn.classTargetMember(class)
 	return ok && (m.Kind == kindAnthropic || (m.Kind == "provider" && providerEffortReaches(m.Provider)))
 }
 
@@ -455,46 +493,51 @@ func classIDMatches(e *registryEntry, model string) bool {
 	return strings.HasSuffix(e.renderedID(), "[1m]") && model == "claude-"+e.Name
 }
 
-func matchRegistryClass(model string) (*registryEntry, bool) {
-	if model == "" {
+// matchRegistryClass looks model up among tn's own active class rows: a class
+// another tenant declares is not one of tn's. A nil tenant has none.
+func (tn *tenant) matchRegistryClass(model string) (*registryEntry, bool) {
+	if model == "" || tn == nil {
 		return nil, false
 	}
-	classRowsMu.RLock()
-	defer classRowsMu.RUnlock()
-	for i := range classRowsSet {
-		if classRowsSet[i].disabledReason == "" && classIDMatches(&classRowsSet[i], model) {
-			e := classRowsSet[i]
+	tn.classRowsMu.RLock()
+	defer tn.classRowsMu.RUnlock()
+	for i := range tn.classRows {
+		if tn.classRows[i].disabledReason == "" && classIDMatches(&tn.classRows[i], model) {
+			e := tn.classRows[i]
 			return &e, true
 		}
 	}
 	return nil, false
 }
 
-// matchRegistryClassName is the live class row of brain class name, for a
+// matchRegistryClassName is tn's live class row of brain class name, for a
 // door that routes into one class by name rather than by a picker id.
-func matchRegistryClassName(name string) (*registryEntry, bool) {
-	classRowsMu.RLock()
-	defer classRowsMu.RUnlock()
-	for i := range classRowsSet {
-		if classRowsSet[i].disabledReason == "" && classRowsSet[i].Class == name {
-			e := classRowsSet[i]
+func (tn *tenant) matchRegistryClassName(name string) (*registryEntry, bool) {
+	if tn == nil {
+		return nil, false
+	}
+	tn.classRowsMu.RLock()
+	defer tn.classRowsMu.RUnlock()
+	for i := range tn.classRows {
+		if tn.classRows[i].disabledReason == "" && tn.classRows[i].Class == name {
+			e := tn.classRows[i]
 			return &e, true
 		}
 	}
 	return nil, false
 }
 
-// matchClassTombstone reports whether model is a TOMBSTONED class row's
-// rendered id (rule 2): recognized, answered with the existing typed 503.
-func matchClassTombstone(model string) (*registryEntry, bool) {
-	if model == "" {
+// matchClassTombstone reports whether model is one of tn's TOMBSTONED class
+// rows' rendered id (rule 2): recognized, answered with the existing typed 503.
+func (tn *tenant) matchClassTombstone(model string) (*registryEntry, bool) {
+	if model == "" || tn == nil {
 		return nil, false
 	}
-	classRowsMu.RLock()
-	defer classRowsMu.RUnlock()
-	for i := range classRowsSet {
-		if classRowsSet[i].disabledReason != "" && classIDMatches(&classRowsSet[i], model) {
-			e := classRowsSet[i]
+	tn.classRowsMu.RLock()
+	defer tn.classRowsMu.RUnlock()
+	for i := range tn.classRows {
+		if tn.classRows[i].disabledReason != "" && classIDMatches(&tn.classRows[i], model) {
+			e := tn.classRows[i]
 			return &e, true
 		}
 	}
@@ -526,12 +569,19 @@ type classStateFile struct {
 	Rows    []classStateRow `json:"rows"`
 }
 
-// persistClassRows writes the last-good snapshot with the same atomic
-// tmp+rename pattern as writeClientModelsCache. A write failure is logged and
-// tolerated: persistence is durability, not correctness — the in-memory rows
-// keep serving.
-func persistClassRows(rows []registryEntry) {
-	if classStateFilePath == "" {
+// persistClassRows writes tn's last-good snapshot to its own file
+// (classStateFileNow) with the same atomic tmp+rename pattern as
+// writeClientModelsCache. A write failure is logged and tolerated: persistence
+// is durability, not correctness — the in-memory rows keep serving. After the
+// tenant's stop it writes nothing.
+func (tn *tenant) persistClassRows(rows []registryEntry) {
+	tn.classFileMu.Lock()
+	defer tn.classFileMu.Unlock()
+	if tn.classFileStopped {
+		return
+	}
+	path := tn.classStateFileNow()
+	if path == "" {
 		return
 	}
 	f := classStateFile{SavedAt: time.Now().UnixMilli()}
@@ -547,44 +597,44 @@ func persistClassRows(rows []registryEntry) {
 		log.Printf("class rows: cannot marshal state: %v", err)
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(classStateFilePath), 0o700); err != nil {
-		log.Printf("class rows: cannot create state dir: %v", err)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		log.Printf("class rows: %s: cannot create state dir: %v", tn.id, err)
 		return
 	}
-	tmp := classStateFilePath + ".tmp"
+	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
-		log.Printf("class rows: cannot write state: %v", err)
+		log.Printf("class rows: %s: cannot write state: %v", tn.id, err)
 		return
 	}
-	if err := os.Rename(tmp, classStateFilePath); err != nil {
-		log.Printf("class rows: cannot install state: %v", err)
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("class rows: %s: cannot install state: %v", tn.id, err)
 	}
 }
 
-// loadClassRowsState seeds the store from the last-good snapshot at boot, so
-// advertising works brain-down from the first request. Any failure is logged
-// and non-fatal (a supervisor's restart would crash-loop a fatal here); the store
-// simply starts empty and fills on the first live /preferred.
+// loadClassRowsState seeds tn's rows from its last-good snapshot, so
+// advertising works brain-down from the tenant's first request. Any failure is
+// logged and non-fatal (a supervisor's restart would crash-loop a fatal here);
+// the rows simply start empty and fill on the tenant's first live /preferred.
 //
-// Called in main() AFTER buildHandler (the registry must exist: classRowGuard's
-// named-collision check keeps a stale snapshot row from double-advertising a
-// picker id a named models.json entry now owns) and BEFORE the poll goroutine
-// and the listener start (a live /preferred must replace the snapshot, never
-// the reverse — and the rows must be in place for the first request).
-func loadClassRowsState() {
-	if classStateFilePath == "" {
+// Called by tn.start() BEFORE the tenant's brain stream starts (a live
+// /preferred must replace the snapshot, never the reverse — and the rows must
+// be in place for the tenant's first request). Tenants start from main() after
+// buildHandlers, so the registry exists by then.
+func (tn *tenant) loadClassRowsState() {
+	path := tn.classStateFileNow()
+	if path == "" {
 		return
 	}
-	raw, err := os.ReadFile(classStateFilePath)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) { // absent file is a normal first boot, not an error
-			log.Printf("class rows: cannot read last-good state %s: %v — starting empty", classStateFilePath, err)
+			log.Printf("class rows: %s: cannot read last-good state %s: %v — starting empty", tn.id, path, err)
 		}
 		return
 	}
 	var f classStateFile
 	if err := json.Unmarshal(raw, &f); err != nil {
-		log.Printf("class rows: bad JSON in %s: %v — starting empty", classStateFilePath, err)
+		log.Printf("class rows: %s: bad JSON in %s: %v — starting empty", tn.id, path, err)
 		return
 	}
 	rows := make([]registryEntry, 0, len(f.Rows))
@@ -603,7 +653,7 @@ func loadClassRowsState() {
 			// The same admission rule as the live derive: a snapshot is
 			// last-good state, not an authority — a hand-edited or stale row
 			// must not smuggle in what the derive path would refuse.
-			log.Printf("class rows: dropping last-good row %q — %s", r.Name, why)
+			log.Printf("class rows: %s: dropping last-good row %q — %s", tn.id, r.Name, why)
 			continue
 		}
 		if r.Removed {
@@ -615,7 +665,49 @@ func loadClassRowsState() {
 		rows = append(rows, e)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
-	setClassRows(rows, "last-good")
-	log.Printf("class rows: boot from last-good %s — %d active, %d tombstoned (a live /preferred will replace them)",
-		classStateFilePath, active, dead)
+	tn.setClassRows(rows, "last-good")
+	log.Printf("class rows: %s: boot from last-good %s — %d active, %d tombstoned (a live /preferred will replace them)",
+		tn.id, path, active, dead)
+}
+
+// dropClassRowsState removes a stopped member's last-good file: the tenant
+// left the index, and its rows go with it. SWITCH_CLASS_STATE_FILE itself is
+// never removed: it is the household's, and a household whose id changed
+// starts from it (applyTenantIndex stops before it starts). A removal failure
+// is logged.
+func (tn *tenant) dropClassRowsState() {
+	tn.classFileMu.Lock()
+	defer tn.classFileMu.Unlock()
+	tn.classFileStopped = true
+	tn.removeMemberClassFile(tn.classStateFileNow())
+}
+
+// moveClassRowsState follows a change of tn's lan flag: its rows are written
+// to the file its new flag names, and a member file it no longer uses is
+// removed, so neither tenant's next boot reads the other's rows.
+func (tn *tenant) moveClassRowsState() {
+	rows, source := tn.classRowsSnapshot()
+	if source != "" {
+		tn.persistClassRows(rows)
+	}
+	tn.classFileMu.Lock()
+	defer tn.classFileMu.Unlock()
+	if tn.classFileStopped {
+		return
+	}
+	membersMu.RLock()
+	lan := tn.lan
+	membersMu.RUnlock()
+	tn.removeMemberClassFile(classStatePath(tn.id, !lan))
+}
+
+// removeMemberClassFile removes path unless it is empty or the configured
+// (household's) file. Callers hold classFileMu.
+func (tn *tenant) removeMemberClassFile(path string) {
+	if path == "" || path == classStateFilePath {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.Printf("class rows: %s: cannot remove last-good state %s: %v", tn.id, path, err)
+	}
 }

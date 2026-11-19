@@ -34,7 +34,8 @@ type modelsRow struct {
 func modelsRows(t *testing.T) map[string]modelsRow {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	modelsHandler(rec, httptest.NewRequest("GET", "/v1/models", nil))
+	// The base-URL entry's request: the LAN tenant's rows.
+	modelsHandler(rec, httptest.NewRequest("GET", "/v1/models", nil).WithContext(lanCtx()))
 	if rec.Code != 200 {
 		t.Fatalf("status %d", rec.Code)
 	}

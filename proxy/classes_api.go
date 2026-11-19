@@ -22,18 +22,17 @@ type classGuidanceRow struct {
 	DirectModel string `json:"direct_model"`
 }
 
-// classesHandler serves every class row; it is the LAN entry's list.
+// classesHandler serves the LAN tenant's class rows: the base-URL entry's list.
 func classesHandler(w http.ResponseWriter, r *http.Request) {
-	serveClasses(w, r, nil, true)
+	serveClasses(w, r, lanTenant())
 }
 
-// classesHandlerFor serves the class rows tenant tn may see: a lan_only row
-// is listed to the LAN tenant only.
+// classesHandlerFor serves tenant tn's own class rows (the door's list).
 func classesHandlerFor(w http.ResponseWriter, r *http.Request, tn *tenant) {
-	serveClasses(w, r, tn, false)
+	serveClasses(w, r, tn)
 }
 
-func serveClasses(w http.ResponseWriter, r *http.Request, tn *tenant, all bool) {
+func serveClasses(w http.ResponseWriter, r *http.Request, tn *tenant) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -41,19 +40,16 @@ func serveClasses(w http.ResponseWriter, r *http.Request, tn *tenant, all bool) 
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": "GET required"})
 		return
 	}
-	if !classRowsLoaded() {
+	if !tn.classRowsLoaded() {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": "the workload-class registry has not loaded yet — this proxy has not had a successful read of the brain's /preferred (it just started, or the brain is unreachable). Retry shortly"})
 		return
 	}
-	rows, source := classRowsSnapshot()
+	rows, source := tn.classRowsSnapshot()
 	classes := make([]classGuidanceRow, 0, len(rows))
 	for _, e := range rows {
 		// Keep the same advertise-set as registryClassRows (/v1/models).
 		if e.disabledReason != "" || e.pickerHidden {
-			continue
-		}
-		if !all && !e.visibleTo(tn) {
 			continue
 		}
 		var guidance *string

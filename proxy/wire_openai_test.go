@@ -160,14 +160,14 @@ func TestWireTake(t *testing.T) {
 // normalizer to resolve against, restoring the prior snapshot on cleanup.
 func withWireClassRows(t *testing.T) {
 	t.Helper()
-	oldRows, oldSrc := classRowsSnapshot()
-	setClassRows([]registryEntry{{Name: "frontier", Display: "Frontier", Type: "class", Class: "frontier"}}, "test")
-	t.Cleanup(func() { setClassRows(oldRows, oldSrc) })
+	oldRows, oldSrc := lan.classRowsSnapshot()
+	lan.setClassRows([]registryEntry{{Name: "frontier", Display: "Frontier", Type: "class", Class: "frontier"}}, "test")
+	t.Cleanup(func() { lan.setClassRows(oldRows, oldSrc) })
 }
 
 func TestNormalizeChatRequestHappyPath(t *testing.T) {
 	withWireClassRows(t)
-	norm, werr := normalizeChatRequest([]byte(`{
+	norm, werr := normalizeChatRequest(lan, []byte(`{
 		"model": "frontier",
 		"messages": [
 			{"role":"system","content":"sys one"},
@@ -296,7 +296,7 @@ func TestNormalizeChatRequestRefusals(t *testing.T) {
 		{"bad stop", `{"model":"frontier","stop":7,"messages":` + msgs + `}`, 400, "unsupported_value", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			norm, werr := normalizeChatRequest([]byte(tc.body))
+			norm, werr := normalizeChatRequest(lan, []byte(tc.body))
 			if werr == nil {
 				t.Fatalf("accepted; norm=%+v", norm)
 			}
@@ -317,7 +317,7 @@ func TestNormalizeChatRequestImages(t *testing.T) {
 	withWireClassRows(t)
 	msgContent := func(t *testing.T, body string, want int) []json.RawMessage {
 		t.Helper()
-		norm, werr := normalizeChatRequest([]byte(body))
+		norm, werr := normalizeChatRequest(lan, []byte(body))
 		if werr != nil {
 			t.Fatalf("unexpected refusal: %+v", werr)
 		}

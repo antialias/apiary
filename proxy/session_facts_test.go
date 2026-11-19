@@ -31,15 +31,15 @@ func sfWindow(period string, scope *string, pct float64, resets time.Time) check
 func withSessionFacts(t *testing.T, accounts map[string]acctStanding, routes map[string]routePref) {
 	t.Helper()
 	oldPref, oldBrain, oldNow := lan.pref, brainBase, nowFn
-	classRowsMu.Lock()
-	oldRows := classRowsSet
+	lan.classRowsMu.Lock()
+	oldRows := lan.classRows
 	// frontier's window is marked [1m]; capable's and deep's are not.
-	classRowsSet = []registryEntry{
+	lan.classRows = []registryEntry{
 		{Name: "frontier", Type: "class", Class: "frontier", ContextWindow: oneMegaMarkFloor},
 		{Name: "capable", Type: "class", Class: "capable", ContextWindow: 200000},
 		{Name: "deep", Type: "class", Class: "deep", ContextWindow: 200000},
 	}
-	classRowsMu.Unlock()
+	lan.classRowsMu.Unlock()
 	lan.sessFactsMu.Lock()
 	oldFacts := lan.sessFacts
 	lan.sessFacts = map[string]sessionFact{}
@@ -49,9 +49,9 @@ func withSessionFacts(t *testing.T, accounts map[string]acctStanding, routes map
 	nowFn = func() time.Time { return sfNow }
 	t.Cleanup(func() {
 		lan.pref, brainBase, nowFn = oldPref, oldBrain, oldNow
-		classRowsMu.Lock()
-		classRowsSet = oldRows
-		classRowsMu.Unlock()
+		lan.classRowsMu.Lock()
+		lan.classRows = oldRows
+		lan.classRowsMu.Unlock()
 		lan.sessFactsMu.Lock()
 		lan.sessFacts = oldFacts
 		lan.sessFactsMu.Unlock()
@@ -75,7 +75,7 @@ func sfQuietFleet() *brainFleet {
 // sfServe records a hop that served session for the model the client asked
 // for, keyed as noteServedSession keys it.
 func sfServe(session, asked string, f sessionFact) {
-	lan.noteSessionServed(session, sessionModelKey(asked), f)
+	lan.noteSessionServed(session, lan.sessionModelKey(asked), f)
 }
 
 // sfFixture is the two sessions the contract is shown with: an Anthropic
@@ -238,10 +238,10 @@ func TestSessionFactsUnseen(t *testing.T) {
 // a model named directly before the class first serves the session.
 func TestSessionFactsUnseenNamesTheClassAsked(t *testing.T) {
 	sfFixture(t)
-	classRowsMu.Lock()
-	classRowsSet = append(classRowsSet, registryEntry{Name: "gone", Type: "class", Class: "gone",
+	lan.classRowsMu.Lock()
+	lan.classRows = append(lan.classRows, registryEntry{Name: "gone", Type: "class", Class: "gone",
 		ContextWindow: 200000, disabledReason: "removed"})
-	classRowsMu.Unlock()
+	lan.classRowsMu.Unlock()
 	for _, c := range []struct{ model, class string }{
 		{"claude-frontier[1m]", "claude-frontier"},
 		{"claude-frontier", "claude-frontier"}, // the bare form of a marked row
@@ -413,11 +413,11 @@ func TestSessionModelKey(t *testing.T) {
 		{"claude-frontier", "claude-frontier[1m]"},
 		{"claude-opus-5-5", "claude-opus-5-5[1m]"},
 	} {
-		if sessionModelKey(c.a) != sessionModelKey(c.b) {
+		if lan.sessionModelKey(c.a) != lan.sessionModelKey(c.b) {
 			t.Errorf("%s and %s key apart", c.a, c.b)
 		}
 	}
-	if sessionModelKey("claude-frontier") != classModelKey("frontier") {
+	if lan.sessionModelKey("claude-frontier") != classModelKey("frontier") {
 		t.Errorf("a class model keys by its class")
 	}
 	for _, c := range []struct{ a, b string }{
@@ -425,11 +425,11 @@ func TestSessionModelKey(t *testing.T) {
 		{"claude-frontier", "claude-capable"},
 		{"claude-opus-5-5", "claude-fable-5-1"},
 	} {
-		if sessionModelKey(c.a) == sessionModelKey(c.b) {
+		if lan.sessionModelKey(c.a) == lan.sessionModelKey(c.b) {
 			t.Errorf("%s and %s share a key", c.a, c.b)
 		}
 	}
-	if sessionModelKey("") != "" {
+	if lan.sessionModelKey("") != "" {
 		t.Errorf("no model has no key")
 	}
 }
@@ -558,7 +558,7 @@ func TestSessionFactsNeverCarryAnAddress(t *testing.T) {
 	}
 	asked := func(f sessionFact) string {
 		if f.class != "" {
-			return classPickerID(f.class)
+			return lan.classPickerID(f.class)
 		}
 		return f.model
 	}
@@ -627,7 +627,7 @@ func sfGetVia(t *testing.T, base, id, model string) map[string]any {
 func sfFactOf(session, model string) (sessionFact, bool) {
 	lan.sessFactsMu.Lock()
 	defer lan.sessFactsMu.Unlock()
-	f, ok := lan.sessFacts[sessionFactKey(sessionModelKey(model), session)]
+	f, ok := lan.sessFacts[sessionFactKey(lan.sessionModelKey(model), session)]
 	return f, ok
 }
 

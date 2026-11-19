@@ -156,6 +156,18 @@ type tenant struct {
 	wireMu      sync.Mutex
 	wireBuckets map[string]*wireBucket
 
+	// The class rows derived from this tenant's own /preferred, and where they
+	// came from (classrows.go): "" none yet, "last-good" (its file at start),
+	// "preferred" (its live brain document).
+	classRowsMu     sync.RWMutex
+	classRows       []registryEntry // type "class" only; disabledReason==classRemovedReason ⇒ tombstone
+	classRowsSource string
+	// classFileMu serializes the tenant's last-good file writes and removal;
+	// classFileStopped, set by stop under it, turns every later write into a
+	// no-op, so a write racing the tenant's removal cannot bring its file back.
+	classFileMu      sync.Mutex
+	classFileStopped bool
+
 	// The tenant's background work (start): the brain stream reader, the
 	// health tick loop and the recovery prober run under bg, and bgWG
 	// counts them, so stop can cancel them and wait for them to end.
@@ -236,7 +248,8 @@ var (
 	// "last-good" (the file at boot) or "brain" (GET /tenants or its events).
 	membersSource string
 	// tenantsStateFilePath is where the last index is persisted, beside
-	// SWITCH_CLASS_STATE_FILE; "" keeps nothing (tests).
+	// SWITCH_CLASS_STATE_FILE and the tenants' class-rows files; "" keeps
+	// nothing (tests).
 	tenantsStateFilePath string
 	// membersRefusal is the last index refused since the index in force was
 	// applied (nil: none): what /_switch/status shows as tenants.refused.
@@ -363,7 +376,7 @@ func applyTenantIndex(rows []tenantRow, source string) error {
 	for _, r := range rows {
 		seen[r.Tenant] = true
 	}
-	var started, stopped []*tenant
+	var started, stopped, moved []*tenant
 	membersMu.Lock()
 	for _, r := range rows {
 		tn := members[r.Tenant]
@@ -372,6 +385,9 @@ func applyTenantIndex(rows []tenantRow, source string) error {
 			members[r.Tenant] = tn
 			started = append(started, tn)
 			continue
+		}
+		if tn.lan != r.Lan {
+			moved = append(moved, tn)
 		}
 		tn.name, tn.lan, tn.tap = r.Name, r.Lan, tapOf(r)
 	}
@@ -385,7 +401,11 @@ func applyTenantIndex(rows []tenantRow, source string) error {
 	membersMu.Unlock()
 	for _, tn := range stopped {
 		tn.stop()
+		tn.dropClassRowsState()
 		log.Printf("tenants: %s left the index (%s); its state is dropped", tn.id, source)
+	}
+	for _, tn := range moved {
+		tn.moveClassRowsState()
 	}
 	for _, tn := range started {
 		tn.start()
@@ -396,10 +416,12 @@ func applyTenantIndex(rows []tenantRow, source string) error {
 	return nil
 }
 
-// start begins the tenant's background work: its health store, its reporter
-// and its brain stream. Nothing here waits on the brain.
+// start begins the tenant's background work: its last-good class rows, its
+// health store, its reporter and its brain stream. Nothing here waits on the
+// brain; the class rows are in place before the stream can replace them.
 func (tn *tenant) start() {
 	tn.bg, tn.bgStop = context.WithCancel(withTenant(context.Background(), tn))
+	tn.loadClassRowsState()
 	if healthModeV != healthOff && tn.health == nil {
 		cfg := defaultHealthCfg()
 		cfg.stateFile = healthStatePath(tn.id)
@@ -440,6 +462,9 @@ func (tn *tenant) stop() {
 	if tn.bgStop != nil {
 		tn.bgStop()
 	}
+	tn.classFileMu.Lock()
+	tn.classFileStopped = true
+	tn.classFileMu.Unlock()
 	bound, cancel := context.WithTimeout(context.Background(), tenantStopWait)
 	defer cancel()
 	tn.stopReporterNow(bound)

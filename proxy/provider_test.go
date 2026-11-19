@@ -73,7 +73,7 @@ func TestAdvertisedModelsNoProviderRows(t *testing.T) {
 	t.Cleanup(func() { registry = oldReg })
 	withClassRows(t, "preferred")
 
-	if rows := advertisedModels(); len(rows) != 0 {
+	if rows := advertisedModelsFor(lan); len(rows) != 0 {
 		t.Fatalf("advertised = %+v, want none: no provider advertises an id of its own", rows)
 	}
 }
@@ -95,7 +95,7 @@ func TestAdvertisedModelsUnionIncludesAnthropicRows(t *testing.T) {
 		registryEntry{Name: "frontier", Display: "Frontier (auto)", Type: "class", Class: "frontier", ContextWindow: 200000})
 
 	rows := map[string]string{}
-	for _, m := range advertisedModels() {
+	for _, m := range advertisedModelsFor(lan) {
 		rows[m.pickerID] = m.display
 	}
 	if len(rows) != 3 {

@@ -429,7 +429,7 @@ func present(top map[string]json.RawMessage, key string) (json.RawMessage, bool)
 	return raw, true
 }
 
-func normalizeChatRequest(body []byte) (*wireNorm, *wireError) {
+func normalizeChatRequest(tn *tenant, body []byte) (*wireNorm, *wireError) {
 	bad := func(code, msg string) (*wireNorm, *wireError) {
 		return nil, &wireError{http.StatusBadRequest, "invalid_request_error", code, msg}
 	}
@@ -450,9 +450,9 @@ func normalizeChatRequest(body []byte) (*wireNorm, *wireError) {
 	// D7/D8: workload classes only, with the bare alias ("tutor" for
 	// "claude-tutor") accepted on THIS wire alone. Named providers, lane ids,
 	// and unknown ids all die here — never matchProvider, never laneForModel.
-	ce, ok := matchRegistryClass(model)
+	ce, ok := tn.matchRegistryClass(model)
 	if !ok {
-		ce, ok = matchRegistryClass("claude-" + model)
+		ce, ok = tn.matchRegistryClass("claude-" + model)
 	}
 	if !ok {
 		return nil, &wireError{http.StatusNotFound, "invalid_request_error", "model_not_found",
@@ -765,16 +765,18 @@ func openaiWireHandler(core http.Handler) http.Handler {
 				fmt.Sprintf("request body exceeds %d bytes (SWITCH_MAX_BODY_BYTES)", maxBodyBytes)}, "")
 			return
 		}
-		norm, werr := normalizeChatRequest(body)
-		if werr != nil {
-			wireDeny(w, r, werr, "")
-			return
-		}
 		// The OpenAI wire is the base-URL entry's, so its tenant is the lan
-		// tenant (tenantFrom); the buckets are that tenant's.
+		// tenant (tenantFrom); the classes and the buckets are that tenant's.
+		// No tenant: the typed 503 before anything reads a tenant's classes,
+		// never a model_not_found that blames the caller's model.
 		tn := tenantFrom(r.Context())
 		if tn == nil {
 			writeNoTenant(w, "")
+			return
+		}
+		norm, werr := normalizeChatRequest(tn, body)
+		if werr != nil {
+			wireDeny(w, r, werr, "")
 			return
 		}
 		if !tn.wireTake(norm.class.Class) {
