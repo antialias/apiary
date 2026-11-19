@@ -70,7 +70,7 @@ class _Store:
         # an edit never writes back a copy another edit has since changed.
         self.edit_lock = threading.Lock()
         self.keys = None
-        self.keys_mtime = None
+        self.keys_stamp = None
         self.unreadable = None
 
 
@@ -94,11 +94,11 @@ class Keyring(NamedTuple):
         either way the store records why (unreadable) and the log says so."""
         st = self.store(t)
         with st.keys_lock:
-            mtime = core._store.mtime(st.file)
-            if mtime is None:
-                st.keys, st.keys_mtime, st.unreadable = None, None, None
+            stamp = core._store.stamp(st.file)
+            if stamp is None:
+                st.keys, st.keys_stamp, st.unreadable = None, None, None
                 return {}
-            if st.keys is None or mtime != st.keys_mtime:
+            if st.keys is None or stamp != st.keys_stamp:
                 keys, bad = {}, None
                 try:
                     raw = core._store.read_json(st.file)
@@ -116,7 +116,7 @@ class Keyring(NamedTuple):
                 if bad:
                     core.log(f"WARN {self.pid} keyring cannot be read ({bad}): it is left as it is, "
                              "and no account is enrolled or removed on it until it is fixed")
-                st.keys, st.keys_mtime, st.unreadable = keys, mtime, bad
+                st.keys, st.keys_stamp, st.unreadable = keys, stamp, bad
             return dict(st.keys)
 
     def _refuse_unreadable(self, t, what):
@@ -136,7 +136,7 @@ class Keyring(NamedTuple):
                 core._store.write_json(st.file, doc, indent=1)
             except Exception as e:  # noqa: BLE001
                 raise ValueError(f"the keys could not be stored ({type(e).__name__}) — nothing was changed") from e
-            st.keys, st.keys_mtime = dict(keys), core._store.mtime(st.file)
+            st.keys, st.keys_stamp = dict(keys), core._store.stamp(st.file)
 
     def names(self, t):
         return list(self.load(t))
@@ -260,7 +260,7 @@ class Keyring(NamedTuple):
             else:
                 with st.keys_lock:
                     core._remove_credentials(st.file)
-                    st.keys, st.keys_mtime, st.unreadable = None, None, None
+                    st.keys, st.keys_stamp, st.unreadable = None, None, None
         core.log(f"{self.pid} key removed for {account}")
 
 

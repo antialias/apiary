@@ -160,7 +160,7 @@ class _Store:
         self.file = t.path(OPENAI_CODEX_CREDS_FILE)
         self.pool = None            # {name: creds-dict} or None
         self.pool_shape = "legacy"  # "legacy" | "array" — governs _persist's shape
-        self.pool_mtime = None      # st_mtime of the loaded file (live adoption)
+        self.pool_stamp = None      # the loaded file's credstore stamp (live adoption)
 
 
 def _st(t):
@@ -197,31 +197,31 @@ def _parse_openai_pool(t, raw):
 def _load_openai_creds(t, force=False):
     """Return the codex creds pool {name: creds}, or None when there is no file.
 
-    Cached, with an mtime guard: an out-of-band rewrite (operator re-seeds a
+    Cached, guarded by the file's stamp: an out-of-band rewrite (operator re-seeds a
     dead chain, or converts legacy->array to add an account) is adopted on the
     next call — live, no restart. force=True re-reads unconditionally (the
-    401 escape hatch; also covers mtime-granularity aliasing)."""
+    401 escape hatch)."""
     with t.refresh_lock:
-        mtime = core._store.mtime(_st(t).file)
-        if mtime is None:
+        stamp = core._store.stamp(_st(t).file)
+        if stamp is None:
             _st(t).pool = None
-            _st(t).pool_mtime = None
+            _st(t).pool_stamp = None
             return None
-        if _st(t).pool is not None and not force and mtime == _st(t).pool_mtime:
+        if _st(t).pool is not None and not force and stamp == _st(t).pool_stamp:
             return _st(t).pool
         try:
             raw = core._store.read_json(_st(t).file)
         except (ValueError, core.credstore.CredStoreError) as e:
             core.log(f"WARN openai creds file unreadable: {e}")
             _st(t).pool = None
-            _st(t).pool_mtime = None
+            _st(t).pool_stamp = None
             return None
         if raw is None:
             _st(t).pool = None
-            _st(t).pool_mtime = None
+            _st(t).pool_stamp = None
             return None
         _st(t).pool, _st(t).pool_shape = _parse_openai_pool(t, raw)
-        _st(t).pool_mtime = mtime
+        _st(t).pool_stamp = stamp
         return _st(t).pool
 
 
@@ -239,7 +239,7 @@ def _persist_openai_creds(t):
         else:
             data = list(_st(t).pool.values())
         core._store.write_json(_st(t).file, data)
-        _st(t).pool_mtime = core._store.mtime(_st(t).file)
+        _st(t).pool_stamp = core._store.stamp(_st(t).file)
     except Exception as e:  # noqa: BLE001
         core.log(f"WARN could not persist rotated openai tokens: {e}")
 
@@ -704,10 +704,10 @@ def _codex_auth_remove(t, account):
             if rest:
                 core._store.write_json(_st(t).file, list(rest.values()))
                 _st(t).pool, _st(t).pool_shape = rest, "array"
-                _st(t).pool_mtime = core._store.mtime(_st(t).file)
+                _st(t).pool_stamp = core._store.stamp(_st(t).file)
             else:
                 core._remove_credentials(_st(t).file)
-                _st(t).pool, _st(t).pool_mtime = None, None
+                _st(t).pool, _st(t).pool_stamp = None, None
         except OSError as e:
             raise ValueError(f"the chains could not be updated ({type(e).__name__})") from e
     core.log(f"codex chain {account!r} removed (pool size {len(rest)})")

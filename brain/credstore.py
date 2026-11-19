@@ -147,12 +147,16 @@ class Store:
     def write_json(self, path, doc, **dump):
         self.write_bytes(path, (json.dumps(doc, **dump) + "\n").encode("utf-8"))
 
-    def mtime(self, path):
-        """The file's mtime, or None without one (the drivers' watchers)."""
+    def stamp(self, path):
+        """What tells one version of the file from the next, or None without one
+        (the drivers' watchers): its mtime in ns, its size and its inode. The
+        mtime alone does not: two writes inside one tick of the filesystem's
+        clock share it. Every write_bytes is a new inode (tmp + replace)."""
         try:
-            return os.stat(path).st_mtime
+            s = os.stat(path)
         except OSError:
             return None
+        return (s.st_mtime_ns, s.st_size, s.st_ino)
 
     def remove(self, path):
         for p in (path, path + ".tmp"):

@@ -248,7 +248,7 @@ def set_kimi_key(key, tenant=None, name="kimi"):
             ex._store.remove(st.file)
         else:
             ex._store.write_json(st.file, [{"name": name, "api_key": key}])
-        st.keys, st.keys_mtime = None, None
+        st.keys, st.keys_stamp = None, None
 
 
 def kimi_window(pct, reset_at, limit=100.0):
@@ -4132,7 +4132,7 @@ class TestOpenAITokenEndpoint(HTTPBase):
         pcodex._st(T).pool = {"gpt": {"refresh_token": "rt-dead", "access_token": "at-dead",
                                    "expires_at": 0, "account_id": "acct-uuid-test"}}
         pcodex._st(T).pool_shape = "legacy"
-        pin_openai_cache_mtime()  # defeat the mtime auto-adopt; force the 401 path
+        pin_openai_cache_stamp()  # defeat the mtime auto-adopt; force the 401 path
         orig = pcodex._oauth_refresh
 
         def fake_refresh(creds, url, cid, persist):
@@ -5249,7 +5249,7 @@ def seed_openai_creds(**over):
 
 def clear_openai_creds():
     pcodex._st(T).pool = None
-    pcodex._st(T).pool_mtime = None
+    pcodex._st(T).pool_stamp = None
     pcodex._st(T).pool_shape = "legacy"
     try:
         os.remove(pcodex._st(T).file)
@@ -5270,16 +5270,16 @@ def seed_openai_pool(*entries):
     with open(pcodex._st(T).file, "w") as f:
         json.dump(data, f)
     pcodex._st(T).pool = None
-    pcodex._st(T).pool_mtime = None
+    pcodex._st(T).pool_stamp = None
     return data
 
 
-def pin_openai_cache_mtime():
-    """Record the current creds file's mtime as already-seen, so the next
+def pin_openai_cache_stamp():
+    """Record the current creds file's stamp as already-seen, so the next
     non-force load serves the in-memory pool — the escape-hatch scenario
     (dead in-memory chain, force=True re-read) stays constructible now that
-    the loader adopts out-of-band rewrites via the mtime guard."""
-    pcodex._st(T).pool_mtime = os.stat(pcodex._st(T).file).st_mtime
+    the loader adopts out-of-band rewrites by the stamp."""
+    pcodex._st(T).pool_stamp = ex._store.stamp(pcodex._st(T).file)
 
 
 def gpt_result(weekly=12.0, ok=1, good_age=0, http=0, err="", ts=None, name="gpt",
@@ -5866,7 +5866,7 @@ class TestOAuthMachinery(unittest.TestCase):
         pcodex._st(T).pool = {"gpt": {"refresh_token": "rt-dead", "access_token": "",
                                    "expires_at": 0, "account_id": "acct-old"}}
         pcodex._st(T).pool_shape = "legacy"
-        pin_openai_cache_mtime()  # defeat the mtime auto-adopt; force the 401 path
+        pin_openai_cache_stamp()  # defeat the mtime auto-adopt; force the 401 path
         self._patch_refuse(401)  # the rt-dead refresh 401s
         seen = {}
 
@@ -6843,7 +6843,19 @@ class TestKimiEnrollAndKeySource(AuthHTTP):
         with open(pkimi.KEYS.store(T).file, "w") as f:
             json.dump([{"name": "kimi", "api_key": "sk-kimi-two"}], f)
         os.utime(pkimi.KEYS.store(T).file, (time.time() + 5, time.time() + 5))
-        self.assertEqual(pkimi.KEYS.load(T).get("kimi", ""), "sk-kimi-two", "mtime guard adopts edits")
+        self.assertEqual(pkimi.KEYS.load(T).get("kimi", ""), "sk-kimi-two", "the stamp adopts edits")
+
+    def test_a_rewrite_inside_one_clock_tick_is_still_read(self):
+        """Two writes can share an mtime, the filesystem's clock ticking coarser
+        than they come; the keyring still reads the second."""
+        path = pkimi.KEYS.store(T).file
+        pkimi.KEYS.persist(T, {"kimi": "sk-kimi-one"})
+        self.assertEqual(pkimi.KEYS.load(T).get("kimi", ""), "sk-kimi-one")
+        tick = os.stat(path).st_mtime_ns
+        ex._store.write_json(path, [{"name": "kimi", "api_key": "sk-kimi-two"},
+                                    {"name": "kimi-b", "api_key": "sk-kimi-b"}])
+        os.utime(path, ns=(tick, tick))
+        self.assertEqual(pkimi.KEYS.load(T), {"kimi": "sk-kimi-two", "kimi-b": "sk-kimi-b"})
 
     def test_enroll_validates_then_persists(self):
         probed = []
