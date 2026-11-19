@@ -3782,11 +3782,12 @@ class TestLocalRouterContext(unittest.TestCase):
         self.assertEqual(plocal._local_check({"data": [model]}, {"local": 65536}), "")
 
 
-class TestKeyedPages(HTTPBase):
-    """/auth is keyed like the endpoints it drives. A request with the switch
-    key (a gate in front of the brain injects it) gets the page; one without
-    gets the key shell, which asks once, keeps the key in sessionStorage and
-    loads the page with it. The read-only surfaces stay open."""
+class TestBrainServesNoPage(HTTPBase):
+    """The brain serves no page: provider accounts are managed on Scry's
+    Sources page, or with the brain image's `accounts` command. /auth and
+    /reauth are 404 with or without the switch key, and so are the retired
+    /reauth/* JSON routes; the JSON routes Sources and the command drive
+    still answer."""
 
     def fetch(self, path, key=None):
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}{tp(path)}")
@@ -3798,32 +3799,42 @@ class TestKeyedPages(HTTPBase):
         except urllib.error.HTTPError as e:
             return e.code, e.headers.get("Content-Type", ""), e.read().decode()
 
-    def test_without_the_key_the_shell_asks_for_it(self):
-        for key in (None, "wrong"):
-            with self.subTest(key=key):
-                code, ctype, body = self.fetch("/auth", key)
-                self.assertEqual(code, 401)
-                self.assertIn("text/html", ctype)
-                self.assertIn("This page needs the switch key.", body)
-                self.assertIn("sessionStorage", body)
-                self.assertIn("keyedFetch(location.pathname + location.search)", body)
-                self.assertNotIn("Provider accounts", body)
+    def test_the_account_pages_are_gone(self):
+        for path in ("/auth", "/reauth", "/auth/", "/reauth/", "/reauth/status"):
+            for key in (None, "test-switch-key"):
+                with self.subTest(path=path, key=key):
+                    code, ctype, _ = self.fetch(path, key)
+                    self.assertEqual(code, 404)
+                    self.assertNotIn("text/html", ctype)
 
-    def test_with_the_key_the_page_is_served_and_sends_it_on_every_request(self):
-        code, ctype, body = self.fetch("/auth", "test-switch-key")
-        self.assertEqual(code, 200)
-        self.assertIn("Provider accounts", body)
-        self.assertIn('headers["X-Switch-Key"] = key', body)
-        self.assertIn('keyedFetch("/auth/providers"', body)
-        self.assertNotIn('await fetch("/', body, "every page request goes through keyedFetch")
-        self.assertNotIn("test-switch-key", body)
-        self.assertNotIn("const SWITCH_KEY_SLOT", body, "the page is written into the shell's window")
+    def test_no_page_markup_is_left(self):
+        for name in ("_AUTH_HTML", "_KEY_SHELL_HTML", "_KEY_JS"):
+            self.assertFalse(hasattr(ex, name), name)
+        self.assertFalse(hasattr(ex.Handler, "_keyed_page"))
+        self.assertFalse(hasattr(ex.Handler, "_auth_page"))
+        self.assertFalse(hasattr(psub, "_REAUTH_HTML"))
+        for route in (("GET", "/reauth"), ("GET", "/reauth/status"),
+                      ("POST", "/reauth/begin"), ("POST", "/reauth/complete")):
+            self.assertNotIn(route, ex.ROUTES)
 
-    def test_503_when_no_key_is_mounted(self):
-        orig = ex.SWITCH_KEY
-        ex.SWITCH_KEY = ""
-        self.addCleanup(setattr, ex, "SWITCH_KEY", orig)
-        self.assertEqual(self.fetch("/auth", "test-switch-key")[0], 503)
+    def test_the_reauth_json_routes_are_gone(self):
+        for path in ("/reauth/begin", "/reauth/complete"):
+            with self.subTest(path=path):
+                req = urllib.request.Request(f"http://127.0.0.1:{self.port}{tp(path)}",
+                                             data=b"{}", method="POST")
+                req.add_header("X-Switch-Key", "test-switch-key")
+                with self.assertRaises(urllib.error.HTTPError) as cm:
+                    urllib.request.urlopen(req, timeout=5)
+                self.assertEqual(cm.exception.code, 404)
+
+    def test_the_json_routes_still_answer(self):
+        reset(acct(ACCT_A, 30))
+        for path in ("/auth/providers",):
+            with self.subTest(path=path):
+                self.assertEqual(self.fetch(path)[0], 401)
+                code, ctype, _ = self.fetch(path, "test-switch-key")
+                self.assertEqual(code, 200)
+                self.assertIn("application/json", ctype)
 
     def test_the_read_surfaces_stay_open(self):
         reset(acct(ACCT_A, 30))
@@ -4407,16 +4418,11 @@ class TestReauthFlow(HTTPBase):
             ex._reauth_prune(T, time.time())
         self.assertNotIn(state, T.reauth_pending)
 
-    def test_begin_endpoint_requires_key_and_known_account(self):
-        reset(acct(ACCT_A, 41), acct(ACCT_B, 30))
-        code, _ = self.post("/reauth/begin", {"account": ACCT_A})
-        self.assertEqual(code, 401)
-        code, d = self.post("/reauth/begin", {"account": "nobody@example.com"},
-                            key="test-switch-key")
-        self.assertEqual(code, 404)
-
     def test_complete_consumes_grant_and_writes_creds(self):
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30))
+        with T.poll_health_lock:
+            epochs = dict(T.recheck_epochs)
+        self.addCleanup(restore_recheck_epochs, epochs)  # the complete advances ACCT_A's
         T.poll_fails[ACCT_A] = 5
         T.poll_schedule[ACCT_A] = time.time() + 3600
         # Stub the two Anthropic calls: token exchange + profile verify. Patch the
@@ -4440,7 +4446,7 @@ class TestReauthFlow(HTTPBase):
         ex.urlopen = fake_urlopen
         self.addCleanup(setattr, ex, "urlopen", orig_post)
         _, state = psub._reauth_begin(T, ACCT_A)
-        code, d = self.post("/reauth/complete", {"state": state, "code": "the-code"},
+        code, d = self.post("/auth/anthropic/complete", {"state": state, "code": "the-code"},
                             key="test-switch-key")
         self.assertEqual(code, 200, d)
         self.assertEqual(d["account"], ACCT_A)
@@ -4455,7 +4461,7 @@ class TestReauthFlow(HTTPBase):
         self.assertIsNone(psub._st(T).creds[ACCT_A]["access_token"])
 
     def test_complete_with_unknown_state_422s(self):
-        code, d = self.post("/reauth/complete", {"state": "nope", "code": "c"},
+        code, d = self.post("/auth/anthropic/complete", {"state": "nope", "code": "c"},
                             key="test-switch-key")
         self.assertEqual(code, 422)
         self.assertIn("begin again", d["error"])
@@ -4476,7 +4482,7 @@ class TestReauthFlow(HTTPBase):
         ex.urlopen = lambda req, timeout=0: R()
         self.addCleanup(setattr, ex, "urlopen", orig_post)
         _, state = psub._reauth_begin(T, ACCT_A)
-        code, d = self.post("/reauth/complete", {"state": state, "code": "c"},
+        code, d = self.post("/auth/anthropic/complete", {"state": state, "code": "c"},
                             key="test-switch-key")
         self.assertEqual(code, 422)
         self.assertIn("user:profile", d["error"])
@@ -4484,40 +4490,6 @@ class TestReauthFlow(HTTPBase):
         a = next(x for x in arr if x["name"] == ACCT_A)
         self.assertEqual(a["refresh_token"], "old-rt-a",
                          "a profile-less grant must not touch the creds file")
-
-    def test_status_endpoint_reports_health_with_key(self):
-        reset(acct(ACCT_A, 41), acct(ACCT_B, 30))
-        code, _ = self.get("/reauth/status")
-        self.assertEqual(code, 401)
-        code, d = self.get("/reauth/status", key="test-switch-key")
-        self.assertEqual(code, 200)
-        self.assertIn("accounts", d)
-
-    def test_page_loads_accounts_without_exposing_the_switch_key(self):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{TP}/reauth",
-                                     headers={"X-Switch-Key": "test-switch-key"})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            body = r.read().decode()
-        self.assertIn("Re-authorize", body)
-        self.assertIn("Loading accounts", body)
-        self.assertIn("refresh();", body)
-        self.assertIn("Anthropic/Claude subscription OAuth accounts only", body)
-        self.assertIn("OpenAI/Codex", body)
-        self.assertIn("Moonshot/Kimi", body)
-        self.assertIn("WATCH_UNTIL = Date.now() + 90000", body)
-        self.assertIn("setTimeout(() => refresh(true), 3000)", body)
-        # Success must not strand the user: the consumed grant is cleared, the
-        # form retires, and a route back appears.
-        self.assertIn('document.getElementById("code").value = ""', body)
-        self.assertIn('show("step1", false)', body)
-        self.assertIn('id="done"', body)
-        self.assertIn('href="/">Back</a>', body)
-        self.assertNotIn("a.err", body, "raw operator errors must not reach the page")
-        self.assertNotIn("claude_oauth.py", body)
-        self.assertNotIn("test-switch-key", body)
-        self.assertNotIn('id="key"', body)
-        self.assertIn('keyedFetch("/reauth/status"', body)
-        self.assertNotIn('await fetch("/', body)
 
 
 def local_result(ok=1, good_age=0):
@@ -6409,6 +6381,33 @@ class TestAuthProvidersEndpoint(AuthHTTP):
         self.assertEqual(post_reports(served(2, at=ref["at"] - 30))[0], [("applied", None)])
         self.assertEqual(self.anthropic_row()["served_at"], row["served_at"])
 
+    def test_a_grant_saved_during_the_usage_check_leaves_no_refusal_and_no_wait(self):
+        """The usage check runs between the refusal's record and its forced-
+        refresh mark. A new grant saved there clears the record after it, and
+        the mark is not set: the refused token is no longer the account's."""
+        before = copy.deepcopy(psub._st(T).creds[ACCT_A])
+        self.addCleanup(psub._st(T).creds.__setitem__, ACCT_A, before)
+        self.addCleanup(psub._st(T).forced_refresh_at.pop, ACCT_A, None)
+
+        def grant_meanwhile(path, token):
+            with T.refresh_lock:  # what _splice_refresh_token leaves live
+                psub._st(T).creds[ACCT_A] = {"refresh_token": "new-grant-rt", "access_token": None,
+                                             "expires_at": None}
+            with psub._st(T).proxy_refusals_lock:  # then _reauth_exchange_grant's clear
+                psub._st(T).proxy_refusals.pop(ACCT_A, None)
+                psub._st(T).forced_refresh_at.pop(ACCT_A, None)
+            raise urllib.error.HTTPError(path, 401, "no", {}, None)
+
+        def no_refresh(*a, **k):
+            raise AssertionError("the new grant's token must not be force-refreshed")
+        with mock.patch.object(ex, "log", lambda m: None), \
+                mock.patch.object(psub, "_get", grant_meanwhile), \
+                mock.patch.object(psub, "_refresh", no_refresh), \
+                mock.patch.object(psub, "_ensure_token", lambda t, name, why="": "new-token"):
+            self.assertEqual(psub._proxy_refused(T, ACCT_A, _fp("tok-" + ACCT_A)), "new-token")
+        self.assertNotIn(ACCT_A, psub._st(T).forced_refresh_at)
+        self.assertIsNone(self.anthropic_row()["proxy_refusal"])
+
     def test_a_refusal_changes_no_health_and_nothing_public(self):
         before = {a["name"]: a["health"] for a in psub._anthropic_auth_status(T, time.time())}
         with mock.patch.object(ex, "log", lambda m: None):
@@ -6426,10 +6425,9 @@ class TestAuthProvidersEndpoint(AuthHTTP):
             T.poll_schedule.clear()
 
 
-class TestReauthAliasFrozen(AuthHTTP):
-    """/reauth stays the byte-frozen Anthropic alias over the SAME grant store
-    the /auth surface uses — one store, tagged grants, no drift between the two
-    front doors. (TestReauthFlow pins the alias's own behavior verbatim.)"""
+class TestAnthropicReauthGrant(AuthHTTP):
+    """A re-authorization (begin naming an account) is a tagged grant in the
+    one store every /auth flow uses. (TestReauthFlow pins its behavior.)"""
 
     def test_reauth_begin_mints_an_anthropic_reauth_grant(self):
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30))
@@ -6441,7 +6439,7 @@ class TestReauthAliasFrozen(AuthHTTP):
 
     def test_reauth_complete_refuses_a_foreign_providers_state(self):
         _, state = pkimi.KEYS.begin(T)
-        code, d = self.post("/reauth/complete", {"state": state, "code": "c"},
+        code, d = self.post("/auth/anthropic/complete", {"state": state, "code": "c"},
                             key="test-switch-key")
         self.assertEqual(code, 422)
         self.assertIn("started for kimi", d["error"])
@@ -6516,13 +6514,56 @@ class TestAnthropicEnrollAppends(AuthHTTP):
                             {"state": d["state"], "code": "the-code"},
                             key="test-switch-key")
         self.assertEqual(code, 200, r)
-        self.assertEqual(r, {"account": self.NEW, "enrolled": True, "reauthorized": False})
+        self.assertEqual(dict(r, saved_at=None), {"account": self.NEW, "enrolled": True, "reauthorized": False,
+                                                  "saved_at": None})
         arr = json.load(open(psub._st(T).file))
         self.assertEqual([a["name"] for a in arr], [ACCT_A, ACCT_B, self.NEW])
         self.assertEqual(arr[2]["refresh_token"], "fresh-rt")
         self.assertEqual(psub._st(T).creds[self.NEW]["refresh_token"], "fresh-rt")
         self.assertEqual(psub._st(T).cred_generation[self.NEW], 1)
         self.assertTrue(ex._poll_wakeup.is_set(), "the new account is polled immediately")
+
+    def refusal(self, name):
+        code, d = self.get("/auth/providers", key="test-switch-key")
+        self.assertEqual(code, 200)
+        return next(a for a in d["providers"]["anthropic"]["accounts"] if a["name"] == name)["proxy_refusal"]
+
+    def test_a_new_grant_ends_the_accounts_live_refusal(self):
+        """Sources shows a refusal with no later serve as "sign-in refused": a
+        reconnect ends it at once, and only a refusal after it shows again."""
+        with mock.patch.object(ex, "log", lambda m: None):
+            psub._proxy_refused(T, ACCT_A, psub._token_fp("a-copy-of-the-old-grant"))
+            psub._proxy_refused(T, ACCT_B, psub._token_fp("b-copy"))
+        self.assertIsNotNone(self.refusal(ACCT_A))
+        self._stub_exchange(ACCT_A)
+        code, d = self.post("/auth/anthropic/begin", {"account": ACCT_A}, key="test-switch-key")
+        self.assertEqual((code, d["mode"]), (200, "reauth"))
+        code, r = self.post("/auth/anthropic/complete", {"state": d["state"], "code": "c"},
+                            key="test-switch-key")
+        self.assertEqual((code, r["reauthorized"]), (200, True), r)
+        self.assertIsNone(self.refusal(ACCT_A), "the new grant ended its refusal")
+        self.assertIsNotNone(self.refusal(ACCT_B), "another account's refusal stays")
+        with mock.patch.object(ex, "log", lambda m: None):
+            psub._proxy_refused(T, ACCT_A, psub._token_fp("a-copy-of-the-old-grant"))
+        self.assertIsNotNone(self.refusal(ACCT_A), "a refusal after the grant shows again")
+
+    def test_saved_at_follows_the_splice_and_its_generation(self):
+        self._stub_exchange(ACCT_A)
+        saved = {}
+        watch_complete(self, "anthropic", saved)
+        gen = psub._st(T).cred_generation.get(ACCT_A, 0)
+        code, d = self.post("/auth/anthropic/begin", {"account": ACCT_A}, key="test-switch-key")
+        code, r = self.post("/auth/anthropic/complete", {"state": d["state"], "code": "c"},
+                            key="test-switch-key")
+        self.assertEqual(code, 200, r)
+        self.assertIsInstance(r["saved_at"], float)
+        self.assertGreaterEqual(r["saved_at"], saved["returned_at"])
+        self.assertEqual(saved["generation"], gen + 1, "the generation moved on before complete returned")
+        self.assertEqual(psub._st(T).creds[ACCT_A]["refresh_token"], "fresh-rt")
+        with mock.patch.object(psub, "_get", lambda path, token: {}):
+            ts, read_at = poll_reads_after_ts(self, lambda: psub.poll_account(T, ACCT_A),
+                                              psub, "_ensure_token")
+        self.assertLessEqual(ts, read_at)
 
     def test_add_mode_with_a_configured_email_splices_instead(self):
         # Approving as an already-configured account mid-enrollment must repair
@@ -6532,13 +6573,14 @@ class TestAnthropicEnrollAppends(AuthHTTP):
         code, r = self.post("/auth/anthropic/complete",
                             {"state": d["state"], "code": "c"}, key="test-switch-key")
         self.assertEqual(code, 200, r)
-        self.assertEqual(r, {"account": ACCT_A, "enrolled": False, "reauthorized": True})
+        self.assertEqual(dict(r, saved_at=None), {"account": ACCT_A, "enrolled": False, "reauthorized": True,
+                                                  "saved_at": None})
         arr = json.load(open(psub._st(T).file))
         self.assertEqual(len(arr), 2)
         self.assertEqual(arr[0]["refresh_token"], "fresh-rt")
 
     def test_reauth_mode_still_never_adds(self):
-        # The frozen /reauth policy survives as MODE policy: a reauth-mode grant
+        # The never-add re-authorization policy survives as MODE policy: a reauth-mode grant
         # whose verified email is unknown is refused, nothing persists.
         self._stub_exchange("mallory@example.com")
         _, d = self.post("/auth/anthropic/begin", {"account": ACCT_A},
@@ -6605,6 +6647,37 @@ class TestCodexEnrollBegin(AuthHTTP):
         self.assertEqual(code, 404)
 
 
+
+def watch_complete(test, pid, saved):
+    """Wrap pid's authority complete so `saved` gets what was on record the
+    moment it returned: when, and (for the account loop) the generation."""
+    auth = ex.PROVIDERS[pid]["auth"]
+    orig = auth["complete"]
+
+    def wrapped(t, grant, fields):
+        res = orig(t, grant, fields)
+        saved["returned_at"] = time.time()
+        if pid == "anthropic":
+            saved["generation"] = psub._st(t).cred_generation.get(res["account"], 0)
+        return res
+    auth["complete"] = wrapped
+    test.addCleanup(auth.__setitem__, "complete", orig)
+
+
+def poll_reads_after_ts(test, poll, patch_target, attr):
+    """A driver's poll stamps ts before it reads its credential: -> (ts, the read's time)."""
+    read_at = []
+    orig = getattr(patch_target, attr)
+
+    def spy(*a, **k):
+        read_at.append(time.time())
+        return orig(*a, **k)
+    with mock.patch.object(patch_target, attr, spy):
+        res = poll()
+    test.assertTrue(read_at, "the poll read no credential")
+    return res["ts"], read_at[0]
+
+
 class TestCodexEnrollComplete(AuthHTTP):
     """#72 — the paste-the-redirect-URL exchange: name gate, state match, JSON
     exchange, workspace-id claim, and a usage PROBE before anything persists."""
@@ -6642,7 +6715,8 @@ class TestCodexEnrollComplete(AuthHTTP):
         _, state = pcodex._codex_auth_begin(T)
         code, r = self._complete(state)
         self.assertEqual(code, 200, r)
-        self.assertEqual(r, {"account": "gpt-b", "enrolled": True, "reauthorized": False})
+        self.assertEqual(dict(r, saved_at=None), {"account": "gpt-b", "enrolled": True, "reauthorized": False,
+                                                  "saved_at": None})
         on_disk = json.load(open(pcodex._st(T).file))
         self.assertIsInstance(on_disk, list, "a fresh enrollment persists ARRAY form")
         entry = on_disk[0]
@@ -6653,6 +6727,24 @@ class TestCodexEnrollComplete(AuthHTTP):
         self.assertTrue(ex._poll_wakeup.is_set())
         self.assertIn("gpt-b", ex._provider_poll_targets(T),
                       "the new chain becomes a poll target immediately")
+
+    def test_saved_at_follows_the_persisted_chain_and_the_poll_reads_after_its_ts(self):
+        self._stub({"refresh_token": "rt-new", "access_token": "at-new",
+                    "expires_in": 600, "id_token": fake_id_token("ws-42")},
+                   probe=lambda tok, acct: wham_usage(primary=12.0))
+        saved = {}
+        watch_complete(self, "gpt", saved)
+        _, state = pcodex._codex_auth_begin(T)
+        before = time.time()
+        code, r = self._complete(state)
+        self.assertEqual(code, 200, r)
+        self.assertIsInstance(r["saved_at"], float)
+        self.assertGreaterEqual(r["saved_at"], saved["returned_at"])
+        self.assertGreater(saved["returned_at"], before)
+        self.assertEqual(json.load(open(pcodex._st(T).file))[0]["refresh_token"], "rt-new")
+        ts, read_at = poll_reads_after_ts(self, lambda: pcodex.poll_gpt(T, None, account="gpt-b"),
+                                          pcodex, "_load_openai_creds")
+        self.assertLessEqual(ts, read_at)
 
     def test_probe_is_the_pollers_free_get(self):
         """C1: the probe is GET wham/usage on the new chain's token and workspace
@@ -6910,38 +7002,6 @@ class TestKimiEnrollAndKeySource(AuthHTTP):
                             key="test-switch-key")
         self.assertEqual(code, 422)
         self.assertIn("api_key is required", r["error"])
-
-
-class TestAuthPageServed(AuthHTTP):
-    """GET /auth — the descriptor-driven page, keyed like its endpoints, and
-    the markup never carries the switch key."""
-
-    def test_page_is_served_and_key_free(self):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{TP}/auth",
-                                     headers={"X-Switch-Key": "test-switch-key"})
-        with urllib.request.urlopen(req, timeout=5) as r:
-            self.assertIn("text/html", r.headers.get("Content-Type", ""))
-            body = r.read().decode()
-        self.assertIn("Provider accounts", body)
-        self.assertIn('keyedFetch("/auth/providers"', body)
-        self.assertIn('"/auth/" + PID + "/complete"', body)
-        self.assertIn('href="/">Back</a>', body)
-        self.assertIn("WATCH", body)
-        self.assertNotIn("test-switch-key", body)
-        self.assertNotIn('id="key"', body)
-
-    def test_page_says_when_anthropic_refuses_the_proxy(self):
-        """A refusal after the proxy's last served request is red and says
-        the laptop can't fix it; one before it is a quiet stale-copy line. The
-        token's expiry and last refresh always show."""
-        body = ex._AUTH_HTML
-        self.assertIn("a.served_at && a.served_at > r.at", body)
-        self.assertIn("Anthropic is refusing the switch proxy's requests with this account since ", body)
-        self.assertIn(" — laptop /login can't fix this.", body)
-        self.assertIn('"Last proxy refusal " + when(r.at) + " — stale copy replaced.', body)
-        self.assertIn('"Token expires " + when(a.token_expires_at)', body)
-        self.assertIn("a.last_refresh.why", body)
-        self.assertIn("tokenDetail(a)", body.split("function refresh(")[1])
 
 
 # ---- #92: the runtime document API (/classes + /consumers) --------------------
@@ -13085,6 +13145,18 @@ class TestAnthropicApiProvider(AuthHTTP):
         self.assertEqual((code, d["reauthorized"]), (200, True), "a name enrolled again is re-keyed")
         self.assertEqual(papi.KEYS.load(T), {"team-a": "test-api-key-two"})
 
+    def test_saved_at_follows_the_persisted_key_and_the_poll_reads_after_its_ts(self):
+        saved = {}
+        watch_complete(self, "anthropic-api", saved)
+        code, d = self.enroll("team-a")
+        self.assertEqual(code, 200, d)
+        self.assertIsInstance(d["saved_at"], float)
+        self.assertGreaterEqual(d["saved_at"], saved["returned_at"])
+        self.assertEqual(papi.KEYS.load(T), {"team-a": self.KEY})
+        ts, read_at = poll_reads_after_ts(self, lambda: papi.KEYS.poll(T, None, account="team-a"),
+                                          type(papi.KEYS), "load")
+        self.assertLessEqual(ts, read_at)
+
     def test_a_refused_key_saves_nothing(self):
         def refuse(key):
             raise urllib.error.HTTPError(papi.ANTHROPIC_API_BASE + "/v1/models", 401, "no", {}, None)
@@ -13144,20 +13216,6 @@ class TestAnthropicApiProvider(AuthHTTP):
         self.assertFalse(ex.PROVIDERS["anthropic-api"]["enabled"](T))
         self.assertNotIn("anthropic-api", {pid for pid, _ in ex._provider_poll_targets(T).values()})
         self.assertEqual(ex.PROVIDERS["anthropic-api"]["auth"]["status"](T, time.time()), [])
-
-
-class TestReauthPageKeyed(HTTPBase):
-    """/reauth is keyed like /auth: without the switch key, the key shell."""
-
-    def test_without_the_key_the_shell_asks_for_it(self):
-        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{TP}/reauth")
-        with self.assertRaises(urllib.error.HTTPError) as cm:
-            urllib.request.urlopen(req, timeout=5)
-        body = cm.exception.read().decode()
-        self.assertEqual(cm.exception.code, 401)
-        self.assertIn("This page needs the switch key.", body)
-        self.assertNotIn("Re-authorize", body)
-
 
 
 # ---- the prepaid notices (notices.py) -------------------------------------------
@@ -14054,7 +14112,8 @@ class TestKeyring(AuthRemoveBase):
             with self.subTest(pid):
                 for n in names:
                     code, r = self.enrol(pid, n)
-                    self.assertEqual((code, r), (200, {"account": n, "enrolled": True, "reauthorized": False}))
+                    self.assertEqual((code, dict(r, saved_at=None)),
+                                     (200, {"account": n, "enrolled": True, "reauthorized": False, "saved_at": None}))
                 kr = ex.PROVIDERS[pid]
                 self.assertEqual(kr["accounts"](self.t), list(names))
                 targets = ex._provider_poll_targets(self.t)
@@ -14075,7 +14134,7 @@ class TestKeyring(AuthRemoveBase):
         pkimi.KEYS.poll(self.t, account="kimi")
         self.assertEqual(seen, [self.KEYS["kimi-two"], self.KEYS["kimi"]])
         r = pkimi.KEYS.poll(self.t, account="kimi-three")
-        self.assertEqual((r["ok"], r["err"]), (0, "no kimi key for 'kimi-three' (not configured: enrol one on /auth)"))
+        self.assertEqual((r["ok"], r["err"]), (0, "no kimi key for 'kimi-three' (not configured: add one on Sources, or with `accounts add`)"))
 
     def test_removing_one_keeps_the_other_and_the_file_goes_with_the_last(self):
         self.enrol("kimi", "kimi")
@@ -14241,6 +14300,230 @@ class TestKeyring(AuthRemoveBase):
         code, d = self.get_on(self.t, "/api-key?account=kimi-two")
         self.assertEqual(code, 404, "removed here, it is no account of this tenant's")
         self.assertNotIn("api_key", d)
+
+
+class TestAccountsCommand(AuthRemoveBase):
+    """The brain image's `accounts` command (accounts.py), the self-hosted
+    edition's way to manage accounts now that the brain serves no page, run
+    against this brain's own server on a fresh tenant. It uses only the
+    routes Sources uses, and never prints the switch key or a pasted key."""
+
+    API_KEY = "test-accounts-api-key-zz9y"
+
+    def setUp(self):
+        super().setUp()
+        import accounts
+        self.cmd = accounts
+        for name, v in (("WAIT_S", 3), ("STEP_S", 0.05)):
+            self.addCleanup(setattr, accounts, name, getattr(accounts, name))
+            setattr(accounts, name, v)
+
+    def run_cmd(self, *argv, stdin=""):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "stdin", io.StringIO(stdin)), mock.patch.object(sys, "stderr", err), \
+                mock.patch.dict(os.environ, {"SWITCH_KEY": "test-switch-key"}):
+            code = self.cmd.main(["--brain", f"http://127.0.0.1:{self.port}", "--tenant", self.t.id, *argv], out=out)
+        text = out.getvalue() + err.getvalue()
+        self.assertNotIn("test-switch-key", text)
+        self.assertNotIn(self.API_KEY, text)
+        return code, out.getvalue(), err.getvalue()
+
+    def poll_later(self, name, ok=True, after=0.2):
+        """The poller's part, which this test server does not run: a reading
+        of `name` (or a failed poll) a moment after the command started waiting."""
+        def go():
+            time.sleep(after)
+            if ok:
+                res = papi.KEYS.poll(self.t, None, account=name)
+                res["good_ts"] = res["ts"]
+                with self.t.lock:
+                    self.t.state[name] = res
+            else:
+                with self.t.poll_health_lock:
+                    self.t.poll_fails[name] = self.t.poll_fails.get(name, 0) + 1
+                with self.t.lock:
+                    self.t.state[name] = {"name": name, "ok": 0, "ts": time.time(), "http": 401,
+                                          "err": "anthropic-api HTTP 401", "reading": None}
+        th = threading.Thread(target=go, daemon=True)
+        th.start()
+        self.addCleanup(th.join)
+
+    def test_add_reads_the_key_from_stdin_and_waits_for_the_first_check(self):
+        self.poll_later("team-a")
+        code, out, _ = self.run_cmd("add", "anthropic-api", "team-a", stdin=self.API_KEY + "\n")
+        self.assertEqual(code, 0, out)
+        self.assertIn("added anthropic-api account team-a", out)
+        self.assertIn("team-a serves", out)
+        self.assertEqual(papi.KEYS.load(self.t), {"team-a": self.API_KEY})
+
+    def test_a_reused_name_replaces_that_accounts_key(self):
+        self.enroll_api("api-a")
+        self.poll_later("api-a")
+        code, out, _ = self.run_cmd("add", "anthropic-api", "api-a", stdin=self.API_KEY + "\n")
+        self.assertEqual(code, 0, out)
+        self.assertIn("replaced the key of anthropic-api account api-a", out)
+        self.assertIn("api-a serves", out)
+        self.assertEqual(papi.KEYS.load(self.t), {"api-a": self.API_KEY})
+
+    def test_a_failed_first_check_says_it_does_not_serve(self):
+        self.poll_later("team-a", ok=False)
+        code, out, _ = self.run_cmd("add", "anthropic-api", "team-a", stdin=self.API_KEY + "\n")
+        self.assertEqual(code, 1)
+        self.assertIn("team-a does not serve: anthropic-api HTTP 401", out)
+
+    def test_no_check_in_time_is_said(self):
+        self.cmd.WAIT_S = 0.2
+        code, out, _ = self.run_cmd("add", "anthropic-api", "team-a", stdin=self.API_KEY + "\n")
+        self.assertEqual(code, 1)
+        self.assertIn("was not checked within", out)
+
+    def test_add_refuses_an_empty_key_and_a_signed_in_provider(self):
+        code, _, err = self.run_cmd("add", "anthropic-api", "team-a", stdin="\n")
+        self.assertEqual(code, 1)
+        self.assertIn("no key was given", err)
+        code, _, err = self.run_cmd("add", "claude", "me", stdin=self.API_KEY + "\n")
+        self.assertEqual(code, 1)
+        self.assertIn("accounts sign-in claude", err)
+        self.assertFalse(os.path.exists(papi.KEYS.store(self.t).file))
+
+    def test_there_is_no_order_to_set(self):
+        self.enroll_api("api-a")
+        code, _, err = self.run_cmd("order", "anthropic-api", "api-a")
+        self.assertEqual(code, 2)
+        self.assertNotIn("order", err.split("\n\n")[0])
+
+    def test_list_puts_a_pools_account_in_use_first_under_its_rule(self):
+        for name in ("kimi-b", "kimi-a"):
+            self.enrol_kimi(name)
+        with mock.patch.object(ex, "_preferred_payload",
+                               lambda t: {"providers": {"kimi": {"account": "kimi-b"}}, "accounts": {}}):
+            code, out, _ = self.run_cmd("list")
+        lines = out.splitlines()
+        i = lines.index(next(x for x in lines if x.startswith("kimi ")))
+        self.assertTrue(lines[i + 1].startswith("  The account in use stays in use"), lines[i + 1])
+        self.assertTrue(lines[i + 2].startswith("  1. kimi-b "), lines[i + 2])
+        self.assertTrue(lines[i + 3].startswith("  2. kimi-a "), lines[i + 3])
+
+    def enrol_kimi(self, name):
+        with mock.patch.object(pkimi, "_get_kimi_usages", lambda key: kimi_raw()):
+            _, d = self.post_t("/auth/kimi/begin", {})
+            code, d = self.post_t("/auth/kimi/complete",
+                                  {"state": d["state"], "name": name, "api_key": "test-kimi-key-" + name})
+        self.assertEqual(code, 200, d)
+
+    def test_a_reading_from_before_the_save_is_not_its_check(self):
+        """Only a reading taken after the save is the new key's check."""
+        self.enroll_api("api-a")
+        res = papi.KEYS.poll(self.t, None, account="api-a")
+        res["good_ts"] = res["ts"] = time.time() - 60  # the old key's good reading
+        with self.t.lock:
+            self.t.state["api-a"] = res
+        self.cmd.WAIT_S = 0.3
+        code, out, _ = self.run_cmd("add", "anthropic-api", "api-a", stdin=self.API_KEY + "\n")
+        self.assertEqual(code, 1)
+        self.assertNotIn("serves", out)
+        self.assertIn("api-a was not checked within", out)
+
+    def test_a_switch_key_ending_in_a_newline_is_stripped(self):
+        self.enroll_api("api-a")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "stderr", err), \
+                mock.patch.dict(os.environ, {"SWITCH_KEY": "test-switch-key\n"}):
+            code = self.cmd.main(["--brain", f"http://127.0.0.1:{self.port}", "--tenant", self.t.id, "list"], out=out)
+        self.assertEqual((code, err.getvalue()), (0, ""))
+        self.assertIn("api-a", out.getvalue())
+
+    def test_a_switch_key_with_a_line_break_inside_is_refused_unprinted(self):
+        for key in ("test-switch\nkey", "test-switch\rkey", "test\x07key"):
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.object(sys, "stderr", err), mock.patch.dict(os.environ, {"SWITCH_KEY": key}):
+                code = self.cmd.main(["--brain", f"http://127.0.0.1:{self.port}", "--tenant", self.t.id, "list"], out=out)
+            self.assertEqual(code, 1)
+            self.assertIn("control character or a line break", err.getvalue())
+            for part in ("test-switch", "test\x07"):
+                self.assertNotIn(part, err.getvalue() + out.getvalue())
+
+    def test_no_request_failure_prints_a_header(self):
+        brain = self.cmd.Brain(f"http://127.0.0.1:{self.port}", self.t.id, "test-switch-key")
+        def boom(req, timeout=0):
+            raise ValueError(f"Invalid header value {req.get_header('X-switch-key')!r}")
+        with mock.patch.object(self.cmd.urllib.request, "urlopen", boom):
+            with self.assertRaises(self.cmd.Refused) as cm:
+                brain.call("GET", "/auth/providers")
+        self.assertNotIn("test-switch-key", str(cm.exception))
+        self.assertIsNone(cm.exception.__cause__)
+        self.assertTrue(cm.exception.__suppress_context__)
+
+    def test_an_unreachable_brain_says_why(self):
+        brain = self.cmd.Brain(f"http://127.0.0.1:{self.port}", self.t.id, "test-switch-key")
+        for exc, why in ((urllib.error.URLError(ConnectionRefusedError(61, "Connection refused")), "Connection refused"),
+                         (TimeoutError("timed out"), "timed out")):
+            def boom(req, timeout=0, exc=exc):
+                raise exc
+            with mock.patch.object(self.cmd.urllib.request, "urlopen", boom):
+                with self.assertRaises(self.cmd.Refused) as cm:
+                    brain.call("GET", "/auth/providers")
+            self.assertIn(f"did not answer ({why}); is it up?", str(cm.exception))
+            self.assertNotIn("test-switch-key", str(cm.exception))
+
+    def test_the_key_is_never_an_argument(self):
+        code, _, err = self.run_cmd("add", "anthropic-api", "team-a", self.API_KEY.replace("zz9y", "x"))
+        self.assertEqual(code, 2)
+        self.assertIn("accounts add <provider> <name>", err)
+
+    def test_list_shows_each_account_with_its_status_and_key_end(self):
+        for name in ("api-b", "api-a"):
+            self.enroll_api(name)
+        res = papi.KEYS.poll(self.t, None, account="api-b")
+        res["good_ts"] = res["ts"]
+        with self.t.lock:
+            self.t.state["api-b"] = res
+        code, out, _ = self.run_cmd("list")
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        i = lines.index(next(x for x in lines if x.startswith("anthropic-api ")))
+        self.assertEqual(lines[i + 1], "  Your Claude subscriptions are used first while they have room; "
+                                       "after them, these keys are used in name order.")
+        self.assertEqual(lines[i + 2], "  1. api-a  …aaaa  not checked yet")
+        self.assertEqual(lines[i + 3], "  2. api-b  …bbbb  serving")
+        self.assertTrue(any(x.startswith("anthropic ") for x in lines))
+        self.assertIn("   (no accounts)", out)
+
+    def test_remove(self):
+        self.enroll_api("api-a")
+        code, out, _ = self.run_cmd("remove", "anthropic-api", "api-a")
+        self.assertEqual((code, out), (0, "removed anthropic-api account api-a\n"))
+        self.assertEqual(papi.KEYS.load(self.t), {})
+        code, _, err = self.run_cmd("remove", "anthropic-api", "api-a")
+        self.assertEqual(code, 1)
+        self.assertIn("unknown anthropic-api account 'api-a'", err)
+
+    def test_codex_sign_in_warns_before_the_link(self):
+        code, out, err = self.run_cmd("sign-in", "codex", "gpt-b",
+                                      stdin="http://localhost:1455/auth/callback?code=c&state=wrong\n")
+        self.assertEqual(code, 1)
+        self.assertIn("kills it", out)
+        self.assertLess(out.index("kills it"), out.index("https://auth.openai.com/"))
+        self.assertIn("Paste the full localhost URL: ", out)
+        self.assertIn("different attempt", err)
+
+    def test_claude_sign_in_adds_the_account_its_email_names(self):
+        orig = ex.urlopen
+
+        def fake(req, timeout=0):
+            if "oauth/token" in req.full_url:
+                return _FakeTokenResp({"refresh_token": "fresh-rt", "access_token": "at"})
+            return _FakeTokenResp({"account": {"email": "new@example.com"}, "organization": {}})
+        ex.urlopen = fake
+        self.addCleanup(setattr, ex, "urlopen", orig)
+        self.cmd.WAIT_S = 0.1
+        code, out, _ = self.run_cmd("sign-in", "claude", stdin="the-code#the-state\n")
+        self.assertIn("https://claude.ai/oauth/authorize?", out)
+        self.assertIn("Paste the code: ", out)
+        self.assertIn("added: anthropic account new@example.com", out)
+        code, _, err = self.run_cmd("sign-in", "claude", "nobody@example.com")
+        self.assertEqual(code, 1)
+        self.assertIn("leave the name off", err)
 
 
 if __name__ == "__main__":

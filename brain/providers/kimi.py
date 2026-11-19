@@ -1,7 +1,8 @@
 """The Kimi for Coding driver (shared): a static-key provider whose quota the
 brain polls on GET /coding/v1/usages; its keys are named accounts on the
-keyring (providers/keyring.py), enrolled on the tenant's /auth page into the
-tenant's kimi.json (there is no process-wide key: a key belongs to a tenant)."""
+keyring (providers/keyring.py), enrolled through the tenant's /auth endpoints
+(Scry's Sources page, or the `accounts` command) into the tenant's kimi.json
+(there is no process-wide key: a key belongs to a tenant)."""
 import base64
 import copy
 import hashlib

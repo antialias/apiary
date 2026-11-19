@@ -11,6 +11,9 @@ WORKDIR /creds
 WORKDIR /app
 COPY claude_usage_exporter.py credstore.py tenancy.py notices.py brain.py classes.example.json ./
 COPY providers/ ./providers/
+# `docker compose exec brain accounts …`: the self-hosted edition's way to add, sign in, list,
+# order and remove accounts (accounts.py), since the brain serves no page.
+COPY --chmod=0755 accounts.py /usr/local/bin/accounts
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PORT=9115
 EXPOSE 9115
 CMD ["python3", "/app/brain.py"]

@@ -18,8 +18,10 @@ API, so a transient failure can't churn the label.
 The usage endpoint is rate-limited (429s under fast polling): the profile
 (email/tier labels) is fetched once and cached, halving the request rate.
 
-Owns the account loop (core._account_loop), GET /token, the /reauth page and
-its endpoints, and the anthropic authority on the /auth surface.
+Owns the account loop (core._account_loop), GET /token, and the anthropic
+authority on the /auth surface. Accounts are
+managed on Scry's Sources page, or with the brain image's `accounts` command
+in the self-hosted edition; the brain serves no page.
 """
 import base64
 import copy
@@ -206,14 +208,18 @@ def _proxy_refused(t, name, refused_fp):
     token is checked once against the usage endpoint and refreshed only if
     that also answers 401, at most once a minute: a blind refresh would revoke
     every copy the cloud sessions hold. Either way the quota poll is woken, so
-    a dead grant shows as auth_dead through the poll's own path."""
+    a dead grant shows as auth_dead through the poll's own path.
+
+    The token is read and the refusal recorded under refresh_lock, which a new
+    grant's splice holds: a grant saved meanwhile clears the record after it,
+    never before it (_reauth_exchange_grant)."""
+    now = time.time()
     with t.refresh_lock:
         current = (_st(t).creds.get(name) or {}).get("access_token")
-    current_fp = _token_fp(current)
-    matched = bool(current) and refused_fp == current_fp
-    now = time.time()
-    with _st(t).proxy_refusals_lock:
-        _st(t).proxy_refusals[name] = {"at": now, "fp": refused_fp, "matched_current": matched}
+        current_fp = _token_fp(current)
+        matched = bool(current) and refused_fp == current_fp
+        with _st(t).proxy_refusals_lock:
+            _st(t).proxy_refusals[name] = {"at": now, "fp": refused_fp, "matched_current": matched}
     head = f"{name}: proxy refused fp {refused_fp}"
     if not matched:
         core.log(f"{head} — a stale copy; dispensing the current token, fp {current_fp}")
@@ -226,13 +232,20 @@ def _proxy_refused(t, name, refused_fp):
     except Exception as e:  # noqa: BLE001
         checked = type(e).__name__
     refresh = False
+    replaced = False
     if checked == "HTTP 401":
-        with _st(t).proxy_refusals_lock:
-            last = _st(t).forced_refresh_at.get(name)
-            refresh = last is None or now - last >= FORCED_REFRESH_MIN_S
-            if refresh:
-                _st(t).forced_refresh_at[name] = now
-        outcome = ("refreshing" if refresh
+        # Marked only while the refused token is still the account's: a grant
+        # saved during the usage check replaced it, and its account owes no wait.
+        with t.refresh_lock:
+            replaced = (_st(t).creds.get(name) or {}).get("access_token") != current
+            if not replaced:
+                with _st(t).proxy_refusals_lock:
+                    last = _st(t).forced_refresh_at.get(name)
+                    refresh = last is None or now - last >= FORCED_REFRESH_MIN_S
+                    if refresh:
+                        _st(t).forced_refresh_at[name] = now
+        outcome = ("its token was replaced meanwhile, not refreshing" if replaced
+                   else "refreshing" if refresh
                    else f"refreshed {round(now - last)}s ago, not again yet")
     else:
         outcome = "not refreshing"
@@ -333,11 +346,11 @@ def _load_creds(t):
         return names
 
 
-# ---- self-service authorization (/reauth + /auth, #72) ---------------------------
+# ---- self-service authorization (/auth, #72) -------------------------------------
 # A dead refresh token used to be remediable only by running claude_oauth.py
 # and splicing accounts.json by hand. These
 # endpoints move the whole PKCE flow into the brain behind the same X-Switch-Key
-# guard as /token, so the fix is a browser page, not a terminal. The verifier and
+# guard as /token, so the fix needs no terminal splice. The verifier and
 # the resulting refresh token never leave this process.
 #
 # #72 generalizes this per provider: every PROVIDERS row carries an `auth`
@@ -345,8 +358,8 @@ def _load_creds(t):
 # callables), served through ONE surface — GET /auth/providers plus
 # POST /auth/<pid>/begin|complete — so adding a provider means adding a row,
 # never another bespoke flow. Enrollment (ADDING an account to a pool) is a
-# per-provider, per-mode choice; the legacy /reauth/* endpoints stay byte-frozen
-# as an alias onto the anthropic authority, which still only ever REPLACES.
+# per-provider, per-mode choice; a reauth-mode anthropic grant (begin naming an
+# account) still only ever REPLACES.
 
 OAUTH_AUTHORIZE = "https://claude.ai/oauth/authorize"
 OAUTH_REDIRECT = "https://console.anthropic.com/oauth/code/callback"
@@ -388,7 +401,7 @@ def _verify_profile(access_token):
 
 def _reauth_begin(t, account, mode="reauth"):
     """Mint a PKCE authorize URL for `account`. Returns (url, state). The
-    default mode keeps the frozen /reauth semantics; mode="add" (account=None)
+    default mode is a re-authorization that only ever replaces; mode="add" (account=None)
     is the #72 enrollment path — identity is decided at complete time by the
     VERIFIED profile email, never by operator input."""
     verifier = core._b64url(secrets.token_bytes(32))
@@ -398,15 +411,6 @@ def _reauth_begin(t, account, mode="reauth"):
               "code_challenge": core._b64url(hashlib.sha256(verifier.encode()).digest()),
               "code_challenge_method": "S256", "state": state}
     return OAUTH_AUTHORIZE + "?" + urllib.parse.urlencode(params), state
-
-
-def _reauth_exchange(t, state, code):
-    """The frozen /reauth/complete core: take the grant, exchange, persist.
-    Returns the verified email. (New callers use the /auth surface, which takes
-    the grant itself and calls _reauth_exchange_grant directly.)"""
-    grant = core._auth_grant_take(t, state, "anthropic")
-    email, _ = _reauth_exchange_grant(t, grant, code)
-    return email
 
 
 def _reauth_exchange_grant(t, grant, code):
@@ -435,6 +439,11 @@ def _reauth_exchange_grant(t, grant, code):
     facts = {"scopes": _scope_list(tok.get("scope")), "subscription_type": subscription_type}
     enrolled = _persist_anthropic_grant(t, email, rt, grant.get("mode", "reauth"),
                                         {k: v for k, v in facts.items() if v})
+    # A new grant ends the account's live refusal: the refused token was the
+    # old grant's. A refusal the proxy reports after this is recorded again.
+    with _st(t).proxy_refusals_lock:
+        _st(t).proxy_refusals.pop(email, None)
+        _st(t).forced_refresh_at.pop(email, None)
     with t.poll_health_lock:
         t.poll_fails.pop(email, None)
         t.poll_schedule.pop(email, None)  # due immediately
@@ -447,7 +456,7 @@ def _persist_anthropic_grant(t, email, rt, mode, facts=None):
     always a REPLACE (safe re-auth, even mid-enrollment — approving as an
     existing account must repair that account, not duplicate it). An unknown
     email appends only when the flow was begun as an enrollment; a reauth-mode
-    grant keeps _splice_refresh_token's refusal, so /reauth never adds.
+    grant keeps _splice_refresh_token's refusal, so a re-authorization never adds.
     `facts` is the grant's _GRANT_FACTS (scopes, subscription_type) as far as
     the exchange knew them. Returns True when a new account was enrolled."""
     if mode == "add" and email not in _configured_account_names(t):
@@ -599,224 +608,6 @@ def _anthropic_auth_remove(t, account):
     core.log(f"removed anthropic account {account}")
 
 
-_REAUTH_HTML = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>claude-switch — re-authorize an account</title>
-<style>
-  :root { color-scheme: dark; }
-  body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-         background: #0b0d10; color: #d6dbe1; max-width: 720px; margin: 40px auto; padding: 0 16px; }
-  h1 { font-size: 16px; } h2 { font-size: 13px; margin: 0 0 6px; }
-  .card { border: 1px solid #2a2f36; border-radius: 8px; padding: 14px; margin: 12px 0; }
-  .ok { color: #4cc38a; } .degraded { color: #e5c07b; } .dead { color: #e06c75; }
-  button, a.button { background: #1f6feb; color: #fff; border: 0; border-radius: 6px;
-           padding: 8px 14px; font: inherit; cursor: pointer;
-           display: inline-block; text-decoration: none; }
-  button:disabled { background: #2a2f36; cursor: default; }
-  input, textarea { width: 100%; box-sizing: border-box; background: #11151a; color: #d6dbe1;
-           border: 1px solid #2a2f36; border-radius: 6px; padding: 8px; font: inherit; }
-  .muted { color: #8b949e; font-size: 12px; }
-  #msg { white-space: pre-wrap; margin: 10px 0; }
-  .hidden { display: none; }
-</style></head>
-<body>
-<h1>Re-authorize an Anthropic account</h1>
-<p class="muted">This page repairs Anthropic/Claude subscription OAuth accounts only.
-OpenAI/Codex uses a separately managed refresh-token chain; Moonshot/Kimi uses an API key.</p>
-<p class="muted">A rejected Anthropic authorization freezes that account's quota at its
-last-good reading. Re-authorizing takes about a minute and needs no agent.</p>
-
-<div id="accounts"><div class="card muted">Loading accounts…</div></div>
-
-<div id="flow" class="card hidden">
-  <h2 id="flowname"></h2>
-  <div id="step1">
-    <p>1. Open the authorization link and approve <b>as the account shown</b>:</p>
-    <p><a id="authlink" href="#" target="_blank" rel="noopener">authorize on claude.ai</a></p>
-    <p class="muted">After approving, the page shows a code like <code>abc…#xyz…</code>.</p>
-    <p>2. Paste the whole <code>code#state</code> here:</p>
-    <textarea id="code" rows="2" placeholder="code#state"></textarea>
-    <div style="margin-top:8px"><button onclick="complete()">complete re-authorization</button></div>
-  </div>
-  <div id="msg"></div>
-  <div id="done" class="hidden" style="margin-top:10px">
-    <a class="button" href="/">Back</a>
-  </div>
-</div>
-
-""" + core._KEY_JS + """<script>
-let STATE = "";
-let WATCH_ACCOUNT = "";
-let WATCH_UNTIL = 0;
-let WATCH_TIMER = null;
-function msg(t, cls) { const m = document.getElementById("msg"); m.textContent = t; m.className = cls || ""; }
-function show(id, on) { document.getElementById(id).classList.toggle("hidden", !on); }
-function stopWatch() {
-  if (WATCH_TIMER !== null) clearTimeout(WATCH_TIMER);
-  WATCH_TIMER = null;
-  WATCH_ACCOUNT = "";
-  WATCH_UNTIL = 0;
-}
-function accountDetail(a) {
-  if (a.health === "auth_dead") return "Anthropic rejected this account's authorization. Re-authorize it to resume live quota readings.";
-  if (a.last_error_kind === "rate_limit") return "Anthropic rate-limited the quota check; it is retried automatically.";
-  if (a.health === "degraded") return "The quota check failed temporarily; it is retried automatically.";
-  return "Live Anthropic quota reading.";
-}
-
-async function refresh(watching = false) {
-  const el = document.getElementById("accounts");
-  try {
-    const r = await keyedFetch("/reauth/status", {credentials: "same-origin"});
-    const d = await r.json();
-    if (!r.ok) { el.innerHTML = '<div class="card dead">' + (d.error || "Could not load accounts") + "</div>"; return; }
-    el.innerHTML = "";
-    for (const a of d.accounts) {
-      const cls = a.health === "ok" ? "ok" : (a.health === "auth_dead" ? "dead" : "degraded");
-      const div = document.createElement("div");
-      div.className = "card";
-      const freshness = a.stale
-        ? (a.age_s == null ? "— no successful quota reading yet" : "— quota frozen " + Math.round(a.age_s/60) + "m ago")
-        : "";
-      const retry = a.next_retry_in_s > 1 ? " Next check in about " + Math.ceil(a.next_retry_in_s) + "s." : "";
-      div.innerHTML = "<h2>" + a.name + "</h2>" +
-        '<span class="' + cls + '">' + a.health + "</span>" +
-        (freshness ? ' <span class="muted">' + freshness + "</span>" : "") +
-        '<div class="muted">' + accountDetail(a) + retry + "</div>";
-      if (a.health !== "ok") {
-        const b = document.createElement("button");
-        b.textContent = "Re-authorize";
-        b.style.marginTop = "8px";
-        b.onclick = () => begin(a.name);
-        div.appendChild(b);
-      }
-      el.appendChild(div);
-    }
-    if (watching && WATCH_ACCOUNT) {
-      const watched = d.accounts.find(a => a.name === WATCH_ACCOUNT);
-      if (watched && watched.health === "ok" && watched.poll_ok === 1) {
-        msg("Re-authorized " + WATCH_ACCOUNT + ". Live Anthropic quota is current — you're done here.", "ok");
-        document.getElementById("flowname").textContent = "re-authorized " + WATCH_ACCOUNT;
-        show("done", true);
-        stopWatch();
-      } else if (watched && watched.health === "auth_dead" && watched.consecutive_failures > 0) {
-        msg("Anthropic rejected the new authorization for " + WATCH_ACCOUNT + ". Click Re-authorize on that account above to start again, and confirm you approve as that exact account.", "dead");
-        show("done", true);
-        stopWatch();
-      } else if (Date.now() >= WATCH_UNTIL) {
-        msg("The new authorization was saved, but a live quota check did not finish within 90 seconds. You can leave this page and check again later; do not re-authorize again unless the account still says auth_dead.", "degraded");
-        show("done", true);
-        stopWatch();
-      } else {
-        msg("Re-authorized " + WATCH_ACCOUNT + ". Checking live Anthropic quota…", "ok");
-        WATCH_TIMER = setTimeout(() => refresh(true), 3000);
-      }
-    }
-  } catch {
-    el.innerHTML = '<div class="card dead">The account service did not answer. Try again in a moment.</div>';
-    if (watching && WATCH_ACCOUNT && Date.now() < WATCH_UNTIL) {
-      WATCH_TIMER = setTimeout(() => refresh(true), 3000);
-    }
-  }
-}
-
-async function begin(account) {
-  stopWatch();
-  const r = await keyedFetch("/reauth/begin", {method: "POST", credentials: "same-origin",
-    headers: {"Content-Type": "application/json"}, body: JSON.stringify({account})});
-  const d = await r.json();
-  if (!r.ok) { alert(d.error || "begin failed"); return; }
-  STATE = d.state;
-  show("flow", true);
-  show("step1", true);
-  show("done", false);
-  document.getElementById("flowname").textContent = "re-authorize " + account;
-  document.getElementById("code").value = "";
-  const a = document.getElementById("authlink");
-  a.href = d.authorize_url;
-  msg("");
-  document.getElementById("flow").scrollIntoView();
-}
-
-async function complete() {
-  const raw = document.getElementById("code").value.trim();
-  const code = raw.split("#")[0].split("&")[0];
-  const r = await keyedFetch("/reauth/complete", {method: "POST", credentials: "same-origin",
-    headers: {"Content-Type": "application/json"}, body: JSON.stringify({state: STATE, code})});
-  const d = await r.json();
-  if (!r.ok) { msg("FAILED: " + (d.error || r.status), "dead"); return; }
-  // The grant is consumed either way — clear it and retire the form so the page
-  // reads as a status view, not a half-finished step.
-  STATE = "";
-  document.getElementById("code").value = "";
-  show("step1", false);
-  document.getElementById("flowname").textContent = "re-authorizing " + d.account + "…";
-  WATCH_ACCOUNT = d.account;
-  WATCH_UNTIL = Date.now() + 90000;
-  msg("Re-authorized " + d.account + ". Checking live Anthropic quota…", "ok");
-  await refresh(true);
-}
-refresh();
-</script>
-</body></html>
-"""
-
-
-def _reauth_page(t, self, parsed=None):  # noqa: ARG001
-    """The human-facing re-auth page, keyed like /auth (core._keyed_page)."""
-    self._keyed_page(_REAUTH_HTML)
-
-def _reauth_status(t, self, parsed=None):  # noqa: ARG001
-    """Account health for the page. Key-guarded like /token: account emails +
-    failure detail are not public data."""
-    if not core.SWITCH_KEY:
-        return self._json(503, {"error": "SWITCH_KEY not configured"})
-    if not hmac.compare_digest(self.headers.get("X-Switch-Key", ""), core.SWITCH_KEY):
-        self.send_response(401)
-        self.end_headers()
-        return
-    self._json(200, core._account_health(t, list(_st(t).creds), time.time()))
-
-
-def _reauth_begin_ep(t, self, parsed=None):  # noqa: ARG001
-    if not core.SWITCH_KEY:
-        self._drain_body()
-        return self._json(503, {"error": "SWITCH_KEY not configured"})
-    if not hmac.compare_digest(self.headers.get("X-Switch-Key", ""), core.SWITCH_KEY):
-        self._drain_body()
-        self.send_response(401)
-        self.end_headers()
-        return
-    body = self._read_json_body()
-    account = (body or {}).get("account") or ""
-    if account not in _st(t).creds:
-        return self._json(404, {"error": f"unknown account {account!r}"})
-    url, state = _reauth_begin(t, account)
-    core.log(f"reauth begin for {account}")
-    self._json(200, {"authorize_url": url, "state": state, "expires_in": core.REAUTH_TTL})
-
-def _reauth_complete_ep(t, self, parsed=None):  # noqa: ARG001
-    if not core.SWITCH_KEY:
-        self._drain_body()
-        return self._json(503, {"error": "SWITCH_KEY not configured"})
-    if not hmac.compare_digest(self.headers.get("X-Switch-Key", ""), core.SWITCH_KEY):
-        self._drain_body()
-        self.send_response(401)
-        self.end_headers()
-        return
-    body = self._read_json_body() or {}
-    state, code = str(body.get("state") or ""), str(body.get("code") or "")
-    if not state or not code:
-        return self._json(400, {"error": "state and code are required"})
-    try:
-        email = _reauth_exchange(t, state, code)
-    except ValueError as e:
-        return self._json(422, {"error": str(e)})
-    core.log(f"reauth complete: {email} re-authorized")
-    self._json(200, {"account": email, "reauthorized": True})
-
-
 def _token(t, self, parsed):
     """Dispense a fresh access token for an account. Secret-guarded — this hands
     out an inference bearer, so it must never be reachable without SWITCH_KEY.
@@ -893,7 +684,3 @@ register("anthropic", {
     },
 })
 register_route("GET", "/token", _token)
-register_route("GET", "/reauth", _reauth_page)
-register_route("GET", "/reauth/status", _reauth_status)
-register_route("POST", "/reauth/begin", _reauth_begin_ep)
-register_route("POST", "/reauth/complete", _reauth_complete_ep)

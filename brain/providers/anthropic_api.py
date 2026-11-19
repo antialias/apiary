@@ -1,6 +1,6 @@
 """The Anthropic API driver (shared): accounts that are static API keys, each
-billed per token by its own console organization. A key is enrolled on the
-/auth page (a name and the key) on the keyring (providers/keyring.py), kept in
+billed per token by its own console organization. A key is enrolled through
+the /auth endpoints (a name and the key) on the keyring (providers/keyring.py), kept in
 the tenant's anthropic-api.json, and dispensed to the routing proxy by GET
 /api-key?account=. Its accounts serve the lanes beside the account loop's
 (`lanes`): the proxy sends a lane's request on one with x-api-key.

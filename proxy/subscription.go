@@ -535,11 +535,12 @@ func (t *failoverTransport) anthropicReauth(req *http.Request, resp *http.Respon
 // Code reads as its OWN login being bad (precedent: the anonymous-routed 403,
 // https_proxy_tls.go). The message's "switch proxy: " prefix marks it as the
 // proxy's own words, which a client's probe matches.
-// reauthSeeWhere ends that message: where the owner re-signs the account. An
-// edition with its own accounts page names it from its init().
+// reauthSeeWhere ends that message: how the owner re-signs the account. The
+// shared edition's is the brain image's accounts command (the brain serves no
+// page); an edition with its own accounts page names it from its init().
 var reauthSeeWhere = defaultReauthSeeWhere
 
-const defaultReauthSeeWhere = "See the brain's /auth page."
+const defaultReauthSeeWhere = "Sign it in again: docker compose exec brain accounts sign-in claude <account>."
 
 func reauthRefusedResponse(req *http.Request, acct, msg string) *http.Response {
 	if msg == "" {

@@ -453,10 +453,11 @@ def poll_gpt(t, prev=None, account=None):
 
     Reads GET wham/usage, then GET wham/rate-limit-reset-credits (see the
     section comment), into the §1.5 reading (_codex_reading)."""
+    started = time.time()  # before the creds are read: a reading's ts never postdates its credential
     pool = _load_openai_creds(t)
     name, creds = _openai_pool_entry(pool, account)
     out = {"name": name or account or "gpt", "kind": "provider", "provider": "gpt",
-           "ok": 0, "ts": time.time(), "good_ts": None, "stale": 0,
+           "ok": 0, "ts": started, "good_ts": None, "stale": 0,
            "http": 0, "err": "", "retry_after": None, "reading": None,
            "source": "GET wham/usage + GET wham/rate-limit-reset-credits"}
     if not creds or not creds.get("refresh_token"):

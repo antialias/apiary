@@ -399,8 +399,7 @@ def _account_health(t, names, now):
 
     worst: "auth_dead" if any account's last error was an auth refusal (a human must
     re-authorize — nothing self-clears), else "degraded" if any account is serving
-    stale last-good data, else "ok". This is the building block: the frozen
-    /reauth/status calls it with the anthropic accounts, each provider authority's
+    stale last-good data, else "ok". This is the building block: each provider authority's
     status() calls it with its own roster, and /preferred's `account_health` is the
     cross-provider union via _unified_account_health."""
     order = {"ok": 0, "degraded": 1, "auth_dead": 2}
@@ -9008,304 +9007,6 @@ def _render_tenant(t):
     return lines
 
 
-# The account pages are keyed like the endpoints they drive (/auth, /reauth).
-# Behind a gate that injects the switch key on its own hop, the page is served
-# at once and the browser never holds the key. A browser that reaches the
-# brain directly gets _KEY_SHELL_HTML (401), which asks for the key once, keeps
-# it in sessionStorage for the tab, and loads the page with it; the pages'
-# requests go through keyedFetch, which sends the kept key and asks again on a
-# 401. `var` and `function` only: the page is written into the same window.
-_KEY_JS = """<script>
-var SWITCH_KEY_SLOT = "switch-key";
-async function keyedFetch(url, opts) {
-  opts = opts || {};
-  for (var attempt = 0; ; attempt++) {
-    var key = sessionStorage.getItem(SWITCH_KEY_SLOT);
-    var headers = Object.assign({}, opts.headers || {});
-    if (key) headers["X-Switch-Key"] = key;
-    var r = await fetch(url, Object.assign({}, opts, {headers: headers, credentials: "same-origin"}));
-    if (r.status !== 401 || attempt > 0) return r;
-    var asked = prompt("Switch key");
-    if (!asked) return r;
-    sessionStorage.setItem(SWITCH_KEY_SLOT, asked.trim());
-  }
-}
-</script>
-"""
-
-_KEY_SHELL_HTML = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>switch key required</title>
-<style>
-  :root { color-scheme: dark; }
-  body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-         background: #0b0d10; color: #d6dbe1; max-width: 720px; margin: 40px auto; padding: 0 16px; }
-</style></head>
-<body>
-<p id="keymsg">This page needs the switch key.</p>
-""" + _KEY_JS + """<script>
-(async function () {
-  var r = await keyedFetch(location.pathname + location.search);
-  if (!r.ok) {
-    if (r.status === 401) sessionStorage.removeItem(SWITCH_KEY_SLOT);
-    document.getElementById("keymsg").textContent = r.status === 401
-      ? "The switch key was refused. Reload to try again."
-      : "The page did not load (HTTP " + r.status + ").";
-    return;
-  }
-  var html = await r.text();
-  document.open(); document.write(html); document.close();
-})();
-</script>
-</body></html>
-"""
-
-
-# The /auth page (#72): DESCRIPTOR-DRIVEN — every card, form field, and warning
-# below is rendered from /auth/providers, so a new provider row appears here
-# with zero page changes. Keyed like its endpoints (_KEY_JS).
-_AUTH_HTML = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>claude-switch — provider accounts &amp; authorization</title>
-<style>
-  :root { color-scheme: dark; }
-  body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-         background: #0b0d10; color: #d6dbe1; max-width: 720px; margin: 40px auto; padding: 0 16px; }
-  h1 { font-size: 16px; } h2 { font-size: 13px; margin: 0 0 6px; }
-  h3 { font-size: 12px; margin: 10px 0 2px; }
-  .card { border: 1px solid #2a2f36; border-radius: 8px; padding: 14px; margin: 12px 0; }
-  .acct { border-top: 1px solid #1c2127; padding: 8px 0; }
-  .ok { color: #4cc38a; } .degraded { color: #e5c07b; } .dead { color: #e06c75; }
-  button, a.button { background: #1f6feb; color: #fff; border: 0; border-radius: 6px;
-           padding: 8px 14px; font: inherit; cursor: pointer;
-           display: inline-block; text-decoration: none; }
-  button.small { padding: 4px 10px; font-size: 12px; }
-  button:disabled { background: #2a2f36; cursor: default; }
-  input, textarea { width: 100%; box-sizing: border-box; background: #11151a; color: #d6dbe1;
-           border: 1px solid #2a2f36; border-radius: 6px; padding: 8px; font: inherit; margin: 4px 0; }
-  .muted { color: #8b949e; font-size: 12px; }
-  .warn { color: #e5c07b; font-size: 12px; }
-  #msg { white-space: pre-wrap; margin: 10px 0; }
-  .hidden { display: none; }
-</style></head>
-<body>
-<h1>Provider accounts &amp; authorization</h1>
-<p class="muted">Every provider the routing proxy can route to, with the account pool behind it.
-Adding an account grows that provider's pool — more accounts, more headroom.</p>
-
-<div id="providers"><div class="card muted">Loading providers…</div></div>
-
-<div id="flow" class="card hidden">
-  <h2 id="flowname"></h2>
-  <div id="flowbody"></div>
-  <div id="msg"></div>
-  <div id="done" class="hidden" style="margin-top:10px">
-    <a class="button" href="/">Back</a>
-  </div>
-</div>
-
-""" + _KEY_JS + """<script>
-let STATE = "", PID = "", FIELDS = [], CACHE = {};
-let WATCH = null, WATCH_TIMER = null;  // {pid, account, until}
-function el(id) { return document.getElementById(id); }
-function msg(t, cls) { el("msg").textContent = t; el("msg").className = cls || ""; }
-function show(id, on) { el(id).classList.toggle("hidden", !on); }
-function stopWatch() {
-  if (WATCH_TIMER !== null) clearTimeout(WATCH_TIMER);
-  WATCH_TIMER = null; WATCH = null;
-}
-function healthClass(h) { return h === "ok" ? "ok" : (h === "auth_dead" ? "dead" : "degraded"); }
-function acctDetail(a) {
-  if (a.health === "auth_dead") return "The provider rejected this account's authorization. Re-authorize it to resume live quota readings.";
-  if (a.last_error_kind === "rate_limit") return "The provider rate-limited the quota check; it is retried automatically.";
-  if (a.health === "degraded") return "The quota check failed temporarily; it is retried automatically.";
-  return "Live quota reading.";
-}
-// A unix time in the viewer's own time zone: the time today, else the date too.
-function when(t) {
-  const d = new Date(t * 1000);
-  const hm = d.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
-  return d.toDateString() === new Date().toDateString() ? hm
-    : d.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + hm;
-}
-// The switch proxy's copy of the token, beside the quota poll's: a refusal
-// the proxy reported after its last served request means Anthropic is still
-// refusing it; one before it was a stale copy the proxy replaced.
-function tokenDetail(a) {
-  let out = "";
-  const r = a.proxy_refusal;
-  if (r && r.at) {
-    out += (a.served_at && a.served_at > r.at)
-      ? '<div class="muted">' + "Last proxy refusal " + when(r.at) + " — stale copy replaced.</div>"
-      : '<div class="dead">' + "Anthropic is refusing the switch proxy's requests with this account since " +
-        when(r.at) + " — laptop /login can't fix this.</div>";
-  }
-  const facts = [];
-  if (a.token_expires_at) facts.push("Token expires " + when(a.token_expires_at));
-  if (a.last_refresh) facts.push("last refreshed " + when(a.last_refresh.at) + " (" + a.last_refresh.why + ")");
-  if (facts.length) out += '<div class="muted">' + facts.join("; ") + ".</div>";
-  return out;
-}
-
-async function refresh(watching = false) {
-  const root = el("providers");
-  try {
-    const r = await keyedFetch("/auth/providers", {credentials: "same-origin"});
-    const d = await r.json();
-    if (!r.ok) { root.innerHTML = '<div class="card dead">' + (d.error || "Could not load providers") + "</div>"; return; }
-    CACHE = d.providers;
-    root.innerHTML = "";
-    for (const [pid, p] of Object.entries(d.providers)) {
-      const card = document.createElement("div");
-      card.className = "card";
-      card.innerHTML = "<h2>" + p.label + ' <span class="muted">(' + pid + ")</span></h2>" +
-        '<div class="muted">' + p.custody.note + "</div>";
-      if (!p.accounts.length) {
-        const none = document.createElement("div");
-        none.className = "acct muted";
-        none.textContent = "No accounts enrolled yet.";
-        card.appendChild(none);
-      }
-      for (const a of p.accounts) {
-        const row = document.createElement("div");
-        row.className = "acct";
-        const freshness = a.stale
-          ? (a.age_s == null ? "— no successful quota reading yet" : "— quota frozen " + Math.round(a.age_s/60) + "m ago")
-          : "";
-        const retry = a.next_retry_in_s > 1 ? " Next check in about " + Math.ceil(a.next_retry_in_s) + "s." : "";
-        const src = a.key_fingerprint ? ' <span class="muted">key ' + a.key_fingerprint + " (" + a.source + ")</span>" : "";
-        const harnessReady = a.harness && a.health !== "auth_dead" && !(a.harness_missing || []).length;
-        const harness = !a.harness ? "" : harnessReady
-          ? '<div class="ok">Cloud sessions sign in with this account.</div>'
-          : '<div class="dead">Cloud sessions sign in with this account, and cannot start until it is ' +
-            (a.health === "auth_dead" ? "authorized again." : "signed in again: this sign-in does not let sessions use Remote Control, connectors, file upload and plugins.") +
-            "</div>";
-        row.innerHTML = "<h3>" + a.name + "</h3>" +
-          '<span class="' + healthClass(a.health) + '">' + a.health + "</span>" + src +
-          (freshness ? ' <span class="muted">' + freshness + "</span>" : "") +
-          '<div class="muted">' + acctDetail(a) + retry + "</div>" + tokenDetail(a) + harness;
-        if ((a.health !== "ok" || (a.harness && !harnessReady)) && p.enroll.flow !== "paste-key") {
-          const b = document.createElement("button");
-          b.className = "small";
-          b.textContent = p.enroll.flow === "paste-url" ? "Re-enroll" : "Re-authorize";
-          b.style.marginTop = "6px";
-          b.onclick = () => begin(pid, a.name);
-          row.appendChild(b);
-        }
-        card.appendChild(row);
-      }
-      if (p.enroll.can_add) {
-        const add = document.createElement("button");
-        add.textContent = p.enroll.flow === "paste-key" ? "Set / replace key" : "Add account";
-        add.style.marginTop = "10px";
-        add.onclick = () => begin(pid, null);
-        card.appendChild(add);
-      }
-      root.appendChild(card);
-    }
-    if (watching && WATCH) {
-      const acct = ((CACHE[WATCH.pid] || {}).accounts || []).find(a => a.name === WATCH.account);
-      if (acct && acct.harness && (acct.harness_missing || []).length) {
-        msg("Saved, but this sign-in did not grant what cloud sessions need (" + acct.harness_missing.join(", ") + "), so they still cannot start.", "dead");
-        show("done", true); stopWatch();
-      } else if (acct && acct.health === "ok" && acct.poll_ok === 1) {
-        msg("Done — " + WATCH.account + " is authorized and its live quota reading is current" +
-            (acct.harness ? ", and cloud sessions can sign in with it." : "."), "ok");
-        show("done", true); stopWatch();
-      } else if (acct && acct.health === "auth_dead" && acct.consecutive_failures > 0) {
-        msg("The provider rejected the new authorization for " + WATCH.account + ". Start again from its card above.", "dead");
-        show("done", true); stopWatch();
-      } else if (Date.now() >= WATCH.until) {
-        msg("Saved, but a live quota check did not finish within 90 seconds. You can leave this page; only retry if the account still shows a problem later.", "degraded");
-        show("done", true); stopWatch();
-      } else {
-        WATCH_TIMER = setTimeout(() => refresh(true), 3000);
-      }
-    }
-  } catch {
-    root.innerHTML = '<div class="card dead">The account service did not answer. Try again in a moment.</div>';
-    if (watching && WATCH && Date.now() < WATCH.until) {
-      WATCH_TIMER = setTimeout(() => refresh(true), 3000);
-    }
-  }
-}
-
-async function begin(pid, account) {
-  stopWatch();
-  const r = await keyedFetch("/auth/" + pid + "/begin", {method: "POST", credentials: "same-origin",
-    headers: {"Content-Type": "application/json"}, body: JSON.stringify({account})});
-  const d = await r.json();
-  if (!r.ok) { alert(d.error || "begin failed"); return; }
-  STATE = d.state; PID = pid;
-  const p = CACHE[pid];
-  FIELDS = p.enroll.fields;
-  el("flowname").textContent = (account ? "re-authorize " + account : "add " + pid + " account");
-  const body = el("flowbody");
-  body.innerHTML = "";
-  if (p.custody.rotation === "strict") {
-    const w = document.createElement("div");
-    w.className = "warn";
-    w.textContent = "⚠ " + p.custody.note;
-    body.appendChild(w);
-  }
-  const inst = document.createElement("p");
-  inst.textContent = p.enroll.instructions;
-  body.appendChild(inst);
-  if (d.authorize_url) {
-    const pa = document.createElement("p");
-    const a = document.createElement("a");
-    a.href = d.authorize_url; a.target = "_blank"; a.rel = "noopener";
-    a.textContent = "authorize " + p.label;
-    pa.appendChild(a);
-    body.appendChild(pa);
-  }
-  for (const f of FIELDS) {
-    const lbl = document.createElement("div");
-    lbl.className = "muted";
-    lbl.textContent = f.label || f.name;
-    body.appendChild(lbl);
-    const inp = document.createElement(f.secret ? "input" : "textarea");
-    if (f.secret) inp.type = "password";
-    else inp.rows = 2;
-    inp.id = "field-" + f.name;
-    if (f.name === "name" && account) inp.value = account;
-    body.appendChild(inp);
-  }
-  const go = document.createElement("button");
-  go.textContent = "complete";
-  go.style.marginTop = "8px";
-  go.onclick = complete;
-  body.appendChild(go);
-  msg("");
-  show("flow", true);
-  show("done", false);
-  el("flow").scrollIntoView();
-}
-
-async function complete() {
-  const payload = {state: STATE};
-  for (const f of FIELDS) payload[f.name] = el("field-" + f.name).value.trim();
-  const r = await keyedFetch("/auth/" + PID + "/complete", {method: "POST", credentials: "same-origin",
-    headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)});
-  const d = await r.json();
-  if (!r.ok) { msg("FAILED: " + (d.error || r.status), "dead"); return; }
-  // The grant is consumed either way — retire the form so the page reads as a
-  // status view, not a half-finished step.
-  STATE = "";
-  el("flowbody").innerHTML = "";
-  el("flowname").textContent = "authorizing " + d.account + "…";
-  WATCH = {pid: PID, account: d.account, until: Date.now() + 90000};
-  msg((d.note ? d.note + "\\n" : "") + "Checking live quota for " + d.account + "…", "ok");
-  await refresh(true);
-}
-refresh();
-</script>
-</body></html>
-"""
-
-
 # The requests that cannot change /preferred; every other handled request marks
 # it dirty once answered (quota-model 64 §2). "" is a tenant's root, its /metrics.
 _PURE_READS = ("/preferred", "/metrics", "", "/events", "/sizing", "/tenants", "/tenants/events")
@@ -9402,8 +9103,6 @@ class Handler(BaseHTTPRequestHandler):
             self._class_bind(parsed)
         elif path == "/class-pin":
             self._class_pin(parsed)
-        elif path == "/auth":
-            self._auth_page()
         elif path == "/auth/providers":
             self._auth_providers()
         elif path in ("/consumers", "/money"):
@@ -9681,29 +9380,9 @@ class Handler(BaseHTTPRequestHandler):
         log(f"{account}: owner re-check — polling now, recheck_epoch {epoch:.0f}")
         self._json(200, {"account": account, "recheck_epoch": epoch})
 
-    def _auth_page(self):
-        """The provider-accounts page (#72), keyed (_keyed_page)."""
-        self._keyed_page(_AUTH_HTML)
-
-    def _keyed_page(self, html):
-        """Serve an account page to a request carrying the switch key: a gate
-        in front of the brain injects it, and so does the key shell once it
-        has asked. Without it, the key shell (_KEY_SHELL_HTML) with a 401;
-        503 when no key is mounted."""
-        if not SWITCH_KEY:
-            return self._json(503, {"error": "SWITCH_KEY not configured"})
-        keyed = hmac.compare_digest(self.headers.get("X-Switch-Key", ""), SWITCH_KEY)
-        body = (html if keyed else _KEY_SHELL_HTML).encode("utf-8")
-        self.send_response(200 if keyed else 401)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
-
     def _auth_providers(self):
-        """Per-provider auth status + enrollment descriptors. Key-guarded like
-        /reauth/status: account names and failure detail are not public data."""
+        """Per-provider auth status + enrollment descriptors. Key-guarded:
+        account names and failure detail are not public data."""
         t = self.tenant
         if not self._guard():
             return
@@ -9744,6 +9423,13 @@ class Handler(BaseHTTPRequestHandler):
             res = auth["complete"](t, grant, body)
         except ValueError as e:
             return self._json(422, {"error": str(e)})
+        # saved_at: every driver's complete has persisted the credential (and
+        # the account loop's has moved its generation on) before it returns,
+        # and every driver's poll stamps its ts before it reads a credential,
+        # so a good reading with good_ts > saved_at is the new credential's.
+        # Taken before the epoch advance below makes the account due again, so
+        # a poll the save itself woke is followed by one that counts.
+        res = dict(res, saved_at=time.time())
         if res.get("account"):
             # After any remove of the same account that overlapped this add:
             # its forget can't then drop the epoch this advance writes.

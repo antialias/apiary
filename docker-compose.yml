@@ -5,8 +5,8 @@
 #
 # Everything either service keeps is on the `data` volume, mounted at /creds in both: the brain's
 # files there are sealed with /creds/key (init.sh makes it; credstore.py). Keys for the optional
-# providers are enrolled on the brain's /auth page, or for the proxy come from a .env file beside
-# this one (see the README), never from here.
+# providers are added with `docker compose exec brain accounts …` (the brain serves no page), or
+# for the proxy come from a .env file beside this one (see the README), never from here.
 # Both images are published; `docker compose build` builds them from this checkout instead.
 name: apiary
 

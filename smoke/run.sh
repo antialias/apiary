@@ -9,9 +9,12 @@
 #   2. the proxy's /_switch/healthz and the brain's /t/<tenant>/preferred answer, the tenant the
 #      one init wrote to /creds/tenants.json;
 #   3. GET /v1/models without the client secret is refused, and with it lists the three classes;
-#   4. an anthropic-api key enrolled on the brain's /t/<tenant>/auth flow serves a claude-fast request: 200,
-#      and the stub saw that key as x-api-key and no Authorization header;
-#   5. neither image holds a household path.
+#   4. the brain serves no page: /t/<tenant>/auth is 404;
+#   5. an anthropic-api key added with the accounts command (`accounts add`, the key on stdin) is
+#      checked and serves, `accounts list` shows it with its key's last four characters, and it
+#      serves a claude-fast request: 200, and the stub saw that key as x-api-key and no
+#      Authorization header;
+#   6. neither image holds a household path.
 # Nothing reaches the Anthropic API or any network beyond the compose one. Containers, volumes,
 # networks and the two local images are removed on exit, pass or fail.
 set -euo pipefail
@@ -86,13 +89,24 @@ models_ok() {
 }
 wait_for "the three classes in /v1/models" models_ok
 
-step "enrol a made-up anthropic-api key on /t/<tenant>/auth"
-state=$(curl -fsS -X POST -H "X-Switch-Key: $SWITCH_KEY" -H 'Content-Type: application/json' \
-	-d '{}' "$BRAIN_T/auth/anthropic-api/begin" | json 'd["state"]')
-curl -fsS -X POST -H "X-Switch-Key: $SWITCH_KEY" -H 'Content-Type: application/json' \
-	-d "{\"state\": \"$state\", \"name\": \"$KEY_NAME\", \"api_key\": \"$API_KEY\"}" \
-	"$BRAIN_T/auth/anthropic-api/complete" | json 'd["enrolled"]' | grep -qx True ||
-	fail "the brain did not enrol the key"
+step "the brain serves no page"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "X-Switch-Key: $SWITCH_KEY" "$BRAIN_T/auth")
+[ "$code" = 404 ] || fail "the brain's /t/<tenant>/auth answered $code, not 404: it serves no page"
+
+step "add a made-up anthropic-api key with the accounts command"
+ADDED=$(printf '%s\n' "$API_KEY" | "${DC[@]}" exec -T brain accounts add anthropic-api "$KEY_NAME") ||
+	fail "accounts add did not finish with a key that serves: $ADDED"
+printf '%s\n' "$ADDED"
+printf '%s\n' "$ADDED" | grep -qx "added anthropic-api account $KEY_NAME" || fail "accounts add did not add the key"
+printf '%s\n' "$ADDED" | grep -qx "$KEY_NAME serves" || fail "accounts add did not say the key serves"
+case $ADDED in *"$API_KEY"* | *"$SWITCH_KEY"*) fail "accounts add printed a key" ;; esac
+LISTED=$("${DC[@]}" exec -T brain accounts list) || fail "accounts list failed: $LISTED"
+printf '%s\n' "$LISTED"
+printf '%s\n' "$LISTED" | grep -qx "  Your Claude subscriptions are used first while they have room; after them, these keys are used in name order\." ||
+	fail "accounts list does not say how API keys are picked"
+printf '%s\n' "$LISTED" | grep -qx "  1\. $KEY_NAME  …${API_KEY: -4}  serving" ||
+	fail "accounts list does not show $KEY_NAME serving with its key's last four"
+case $LISTED in *"$API_KEY"* | *"$SWITCH_KEY"*) fail "accounts list printed a key" ;; esac
 # ...and it landed sealed: the file opens only through the brain's store.
 "${DC[@]}" exec -T brain head -c 16 "/creds/$TENANT/anthropic-api.json" | grep -q 'switch-sealed/1' ||
 	fail "the enrolled key was not written sealed"

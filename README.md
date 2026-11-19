@@ -19,21 +19,23 @@ You need Docker with Compose, and an Anthropic API key. From a checkout of this 
 
     docker compose run --rm init
     docker compose up -d
-
-Then open http://127.0.0.1:9115/t/\<tenant\>/auth in a browser, with the tenant id `init` printed.
+    docker compose exec brain accounts add anthropic-api main
 
 1. `init` writes two secrets, the brain's sealing key, the tenant registry and the class
    document onto the `data` volume, then prints both secrets and the tenant id. This is the
    only time it prints the secrets. It refuses to run a second time.
    - The **client secret** is what Claude Code sends the proxy.
-   - The **switch key** unlocks the brain's `/auth` page.
+   - The **switch key** guards the brain's routes. The `accounts` command reads it from the
+     volume itself.
    - The **tenant** is this machine's one (`ten_` and 26 letters, not a secret): every brain
      route that reads or writes its data is under `/t/<tenant>/`.
 2. `up -d` starts the brain on `127.0.0.1:9115` and the proxy on `127.0.0.1:8787`. Both
    listen on loopback only.
-3. On `/t/<tenant>/auth`, paste the switch key when the page asks for it. Under **Anthropic API**, choose
-   **Set / replace key**, name the account and paste your API key. The brain checks the key
-   with a model list before it saves anything.
+3. `accounts add anthropic-api main` asks for your API key and adds it as the account `main`.
+   The key is read from the terminal without being shown, and never printed. The brain checks
+   the key with a model list before it saves anything; the command then waits up to 90 seconds
+   for the account's first check and says whether it serves. Adding the same name again
+   replaces that account's key.
 
 The images come from `ghcr.io/antialias/apiary-proxy` and `apiary-brain`. To build them from
 this checkout instead, run `docker compose build` before `up -d`.
@@ -42,6 +44,27 @@ To read the secrets again:
 
     docker compose exec brain cat /creds/client_secret
     docker compose exec brain cat /creds/switch_key
+
+## Accounts
+
+The brain serves no page. Accounts are managed with the `accounts` command in the brain's
+container. It drives the brain's account routes (`/t/<tenant>/auth/…` and `/t/<tenant>/preferred`)
+with the switch key and the tenant it reads from the volume:
+
+    docker compose exec brain accounts list
+    docker compose exec brain accounts add <provider> <name>
+    docker compose exec brain accounts sign-in claude|codex [name]
+    docker compose exec brain accounts remove <provider> <name>
+
+- `list` shows, for each provider, how it picks among its accounts, then the accounts in the
+  order that rule takes them, each with its status and its key's last four characters. API
+  keys come after the Claude subscriptions, by name; every other provider keeps the account
+  in use until it runs low or can't be used. There is no order to set.
+- `add` is for API keys (`anthropic-api`, `kimi`). Add `-T` to `exec` when you pipe the key in.
+- `sign-in` signs in a Claude or ChatGPT login (below). With a name, it signs that account in
+  again.
+- `add` and `sign-in` wait up to 90 s for the account's first check after the save and say
+  whether it serves.
 
 ## Claude Code
 
@@ -102,7 +125,7 @@ Everything is on the Compose volume `apiary_data`, mounted at `/creds` in both s
 - under `<tenant>/`, the tenant's files, each sealed with `key` (AES-256-GCM; the brain
   refuses a plain one, and without the key refuses a sealed one): the accounts,
   `anthropic-api.json` (API keys), `accounts.json` (Claude-plan sign-ins), `openai-codex.json`
-  (Codex), `kimi.json` (a Kimi key enrolled on `/auth`); the brain's documents, `consumers.json`
+  (Codex), `kimi.json` (a Kimi key, from `accounts add kimi`); the brain's documents, `consumers.json`
   and `money.json`; its routing state, `switch_state.json`; and the ledger, `ledger.jsonl`, plain
 - the proxy's class state, under `proxy/`
 
@@ -113,14 +136,15 @@ whoever can read `key` can open everything. Back the volume up whole.
 
 ## More accounts and providers
 
-**Claude-plan and Codex sign-ins.** The same `/auth` page signs these in, with **Add account**.
-- **Anthropic (Claude subscription)**: open the link the page gives you, approve, and paste
-  back the code the callback page shows. The brain keeps the refresh token and is from then on
-  its only refresher. A plan account serves the same lanes as an API key.
-- **OpenAI codex (ChatGPT subscription)**: open the link the page gives you. The browser ends
-  on a `localhost:1455` page that fails to load. That is expected. Paste the whole
-  address-bar URL back, with a name for the chain. Don't run `codex login` with the same grant
-  anywhere else: the brain is that chain's only refresher, and a second refresher kills it.
+**Claude-plan and Codex sign-ins.** `accounts sign-in` signs these in.
+- **Claude**: `docker compose exec brain accounts sign-in claude`. Open the link it prints,
+  approve, and paste back the code the callback page shows. The account is named by its
+  verified email. The brain keeps the refresh token, and an independent grant never disturbs a
+  laptop's login. A plan account serves the same lanes as an API key.
+- **Codex**: `docker compose exec brain accounts sign-in codex <name>`. Open the link it prints.
+  The browser ends on a `localhost:1455` page that fails to load. That is expected. Paste the
+  whole address-bar URL back. Don't run `codex login` with the same grant anywhere else: the
+  brain is that chain's only refresher, and a second refresher kills it.
 - A Codex account serves a class only through a member that names it. Add one to a class's
   `members` with `"kind": "provider"`, `"provider": "gpt"`, its `model`, `context_window` and
   `anthropic_token_ratio`.
@@ -130,7 +154,7 @@ whoever can read `key` can open everything. Back the volume up whole.
 > against OpenAI's. Read the terms that apply to you. Apiary supports both, but if you sign
 > one in, you do so at your own risk. API keys are the route those terms allow.
 
-**Kimi.** Enrol the key on `/t/<tenant>/auth` (or the dashboard's Sources page). The brain
+**Kimi.** `docker compose exec brain accounts add kimi <name>`, and paste the key. The brain
 keeps it sealed in the tenant's `kimi.json`, polls Kimi's quota with it, and dispenses it to
 the proxy, which signs that tenant's Kimi requests with it; the proxy holds no key of its own.
 Once it is enrolled, the Kimi members of the shipped classes come into use.

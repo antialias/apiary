@@ -1,7 +1,7 @@
 """The keyring (shared): the named-key authority every static-key provider
 declares itself on. A provider's accounts are static API keys, each enrolled
-under a name of its own on the tenant's /auth page (a name and the key) and
-kept in the tenant's dir as one file per provider, `[{"name", "api_key"}]`.
+under a name of its own through the tenant's /auth endpoints (a name and the
+key; Scry's Sources page, or the `accounts` command) and kept in the tenant's dir as one file per provider, `[{"name", "api_key"}]`.
 
 A driver calls register() once at import with what is its own: its id, its
 label, its file's name, its free read and its enrolment's probe, its words for
@@ -156,7 +156,7 @@ class Keyring(NamedTuple):
                "http": 0, "err": "", "retry_after": None, "reading": None}
         key = self.load(t).get(account)
         if not key:
-            out["err"] = f"no {self.pid} key for {account!r} (not configured: enrol one on /auth)"
+            out["err"] = f"no {self.pid} key for {account!r} (not configured: add one on Sources, or with `accounts add`)"
             return out
         try:
             raw = self.fetch(key)
