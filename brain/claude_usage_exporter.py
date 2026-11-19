@@ -34,16 +34,13 @@ Env:
     (each driver documents its own: credentials files, upstream URLs)
     KIMI_USAGES_URL      Override for https://api.kimi.com/coding/v1/usages
     SWITCH_CREDS_DIR     Where the brain's data lives (default /creds): the
-                         registry tenants.json, classes.json, lanes.json, the
-                         switch key, and one dir per tenant, /creds/<tenant>/,
-                         with that tenant's documents and credentials.
+                         registry tenants.json, lanes.json, the switch key, and
+                         one dir per tenant, /creds/<tenant>/, with that
+                         tenant's documents (its classes.json among them; see
+                         classes.example.json) and credentials.
     SWITCH_CREDS_KEY_FILE The sealing key (credstore.py): set, every tenant
                          file is AES-256-GCM sealed and a plain one is refused;
                          unset, files are plain and a sealed one is refused.
-    SWITCH_CLASSES_FILE  Model-class config (#25), default classes.json in
-                         SWITCH_CREDS_DIR; absent = feature dormant. See
-                         classes.example.json. The one operator document, with
-                         lanes.json: every other document is a tenant's.
     SWITCH_BRIDGE_URL    The alert bridge the prepaid notices post to. Unset:
                          the edition's default (none in the shared edition);
                          set but empty: the notices are off.
@@ -61,6 +58,7 @@ import math
 import os
 import re
 import secrets
+import shutil
 import signal
 import sys
 import threading
@@ -197,9 +195,10 @@ SCOPE_ALIASES = {
 # models — that the proxy will advertise as ONE synthetic picker row
 # (claude-<class>, #27) while the brain points sessions at the best member
 # (#26's policy). Named models keep today's account-only switching untouched.
-# Pure deployment config: no compiled-in classes, so no classes.json = feature
-# dormant. Schema (see classes.example.json):
-#   [{"class": "frontier",            # ^[a-z][a-z0-9-]*$ — becomes claude-<class>
+# Each tenant's own document, <tenant dir>/classes.json: no compiled-in
+# classes, so a tenant without one routes no class. Schema (see
+# classes.example.json):
+#   [{"class": "frontier",            # ^[a-z]+(-[a-z]+)*$ — becomes claude-<class>
 #     "display": "Frontier (auto)",   # picker display_name (#27); default = name
 #     "guidance": "Top tier for open design and hard decisions",  # optional, null = none
 #     # Guidance is stripped, non-empty, <=300 chars, with no ASCII controls/DEL.
@@ -231,8 +230,9 @@ SCOPE_ALIASES = {
 # came from). The document may instead be {"classes": [...], "lanes": {"<lane>":
 # {"pay", "stop_at"}}} to give bare lanes the same settings; a bare array still
 # loads. Pot ranking and topup live in the money document (MONEY_FILE).
-CLASSES_FILE = os.environ.get("SWITCH_CLASSES_FILE") or os.path.join(CREDS_DIR, "classes.json")
-DEFAULT_CLASSES = []
+# The LAN tenant's document may mark a class "onboarding": true, offered to new
+# members: a tenant made by PUT /tenants starts with a copy of those classes
+# (_starter), and a member's document may not carry the key.
 
 # The tenants (tenancy.py): every other document is one tenant's, in its dir
 # under CREDS_DIR, read and written through the sealed store (credstore.py).
@@ -316,6 +316,7 @@ def _tenant_fresh(tid, name, lan, tap, dir_):
     read by _tenant_boot, as main() did."""
     t = tenancy.Tenant(tid, name, lan, tap, dir_, _store)
     t.state = {}
+    _load_classes(t)
     t.preferred = {"account": None, "since": 0.0, "reason": "init", "last_switch": 0.0,
                    "pinned": None, "lanes": {}, "classes": {}, "providers": {}}
     t.session_journal = deque(maxlen=256)
@@ -506,7 +507,13 @@ def _load_lanes():
 _lanes = _load_lanes()
 _lane_names = [lc["lane"] for lc in _lanes]
 
-_CLASS_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+_CLASS_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")  # a consumer's id
+# A class's id: letters in hyphenated words, no digit. The proxy advertises
+# claude-<class> only when it could later refuse the id as class-shaped
+# (claude-switch-proxy classShapedRe), and a digit is not class-shaped there, so
+# a class with one would load and never be offered.
+_CLASS_ID_RE = re.compile(r"^[a-z]+(-[a-z]+)*$")
+_CLASS_ID_RULE = "class name must match ^[a-z]+(-[a-z]+)*$, with no digit (it becomes the claude-<class> picker id)"
 
 
 def _guidance_error(guidance):
@@ -542,7 +549,17 @@ _BUDGET_REASON = ("a budget lives in the money document: pots[<pot id>].budget, 
                   "pots[<pot id>].route_budgets[<route id>] for one route")
 # The keys a class and a member may carry (§1.9: nothing is dropped or
 # ignored, so an unknown key, a typo included, is refused at PUT).
-_CLASS_KEYS = frozenset(("class", "display", "guidance", "request_kind", "members", "lan_only"))
+_CLASS_KEYS = frozenset(("class", "display", "guidance", "request_kind", "members", "onboarding"))
+# The LAN tenant's mark on a class it offers to new members (_starter); a
+# member's document cannot offer anything, so it may not carry the key.
+# The previous brain's visibility mark (one classes document for every
+# tenant), retired by migrate_classes.py; a revision from before it carries it.
+_LAN_ONLY_REASON = ("lan_only is retired: each tenant has its own classes, and `onboarding` "
+                    "marks the classes offered to new members (lan_only: true is onboarding: false; "
+                    "migrate_classes.py rewrote the document)")
+_ONBOARDING_MEMBER_REASON = ("onboarding marks a class the operator offers to new members; "
+                             "only the LAN tenant's document carries it")
+
 # What a class's requests are (quota-model 50 §2.9): "chat" (the default) or
 # "image", the image door's class. A token window and r_p measure chat bodies,
 # so an image member declares neither, and only a provider makes images.
@@ -571,31 +588,29 @@ _SPEND_CREDITS_REASON = ("spend_credits is retired: `pay` lists the money pots a
                          "draw (run migrate_pay.py to translate it)")
 
 
-# A class member's pay may name every account of a provider at once (C13):
+# A route's pay may name every account of a provider at once (C13):
 # "<provider>/*" is each of the tenant's accounts of that provider by its
-# money pot, so one global classes document grants pots whose account names
-# differ per tenant. _routes expands it; a route's pay is exact ids.
+# money pot, so a document grants pots by provider, and a starter copied into
+# another tenant (_starter) pays from that tenant's own accounts. _routes
+# expands it; a route's pay is exact ids.
 PAY_ALL = "*"
 
 
-def _route_settings_error(s, where, *, member=False):
+def _route_settings_error(s, where):
     """Shape check of one route's owner settings (§1.9), shared by class members
-    and the `lanes` map: `pay` is a list of distinct pot-id strings, a
-    member's also "<provider>/*" (never "*" for an account), `stop_at` is
+    and the `lanes` map: `pay` is a list of distinct pot-id strings or
+    "<provider>/*" (never "*" for an account), `stop_at` is
     {window, level}. Whether the pots and the window exist depends on the
     accounts, so _settings_problems checks that at PUT, never at load."""
     pay = s.get("pay")
     if pay is not None:
         if (not isinstance(pay, list)
                 or any(not isinstance(p, str) or "/" not in p for p in pay)):
-            return (f"{where}: pay must be an array of pot ids (<account>/<pot>"
-                    f"{' or <provider>/*' if member else ''})")
+            return f"{where}: pay must be an array of pot ids (<account>/<pot> or <provider>/*)"
         for p in pay:
             acct, pot = _split_pot(p)
             if PAY_ALL in acct:
                 return f"{where}: pay {p!r}: '*' stands for a provider's accounts (<provider>/*), never for an account"
-            if pot == PAY_ALL and not member:
-                return f"{where}: pay {p!r}: <provider>/* is a class member's; a lane's pay names its pots"
             if pot == PAY_ALL and (not acct or "/" in acct):
                 return f"{where}: pay {p!r}: <provider>/* names one provider by its id"
         if len(set(pay)) != len(pay):
@@ -614,22 +629,28 @@ def _route_settings_error(s, where, *, member=False):
     return None
 
 
-def _class_error(c, seen, *, check_guidance=True, strict=False):
+def _class_error(c, seen, *, lan, check_guidance=True, strict=False):
     """Why this class config entry is invalid (a reason string), or None if it's
     fine. Validation is per-class so one bad entry never takes out the rest.
     strict (PUT/validate) also refuses keys whose meaning is retired or not yet
     built; the tolerant load warns about those in _normalize_classes instead,
-    so a document written for the previous brain still loads its classes."""
+    so a document written for the previous brain still loads its classes.
+    lan: the document is the LAN tenant's, the only one that may carry
+    onboarding."""
     if not isinstance(c, dict):
         return "not an object"
     name = str(c.get("class") or "")
-    if not _CLASS_NAME_RE.match(name):
-        return "class name must match ^[a-z][a-z0-9-]*$ (it becomes the claude-<class> picker id)"
+    if not _CLASS_ID_RE.match(name):
+        return _CLASS_ID_RULE
     if name in seen:
         return "duplicate class name"
     if name in _lane_names:
         return f"name collides with lane {name!r}"
     if strict:
+        if "lan_only" in c:
+            return _LAN_ONLY_REASON
+        if "onboarding" in c and not lan:
+            return _ONBOARDING_MEMBER_REASON
         for k in c:
             if k in _BUDGET_KEYS:
                 return f"{k} — {_BUDGET_REASON}"
@@ -640,10 +661,10 @@ def _class_error(c, seen, *, check_guidance=True, strict=False):
         reason = _guidance_error(c.get("guidance"))
         if reason:
             return reason
-    # lan_only: the class is the LAN tenant's alone (a member tenant neither
-    # sees it on /preferred nor binds it). Optional; absent = every tenant.
-    if "lan_only" in c and not isinstance(c["lan_only"], bool):
-        return "lan_only must be a boolean"
+    # onboarding: the LAN tenant offers the class to new members (_starter).
+    # Optional; absent = not offered.
+    if "onboarding" in c and not isinstance(c["onboarding"], bool):
+        return "onboarding must be a boolean"
     rk = c.get("request_kind", "chat")
     if rk not in _REQUEST_KINDS:
         return f"request_kind must be one of {', '.join(_REQUEST_KINDS)}"
@@ -686,7 +707,7 @@ def _class_error(c, seen, *, check_guidance=True, strict=False):
                 return f"{where}: reserve_ceiling must be a number or null"
             if not 0 <= rc <= 100:
                 return f"{where}: reserve_ceiling must be a percent in [0, 100], got {rc}"
-        reason = _route_settings_error(m, where, member=True)
+        reason = _route_settings_error(m, where)
         if reason:
             return reason
         if strict:
@@ -751,8 +772,8 @@ def _norm_route_settings(s):
     return list(s.get("pay") or []), stop
 
 
-def _normalize_classes(raw, warnings=None):
-    """Parsed classes JSON (a list) -> the normalized _classes shape. Tolerant
+def _normalize_classes(raw, warnings=None, *, lan):
+    """Parsed classes JSON (a list) -> a tenant's normalized classes. Tolerant
     by contract: an invalid CLASS is dropped with a logged reason while the
     rest load — config errors must never take the brain down. Each message is
     also appended to `warnings` so GET /classes can surface it (#92). Members
@@ -771,11 +792,21 @@ def _normalize_classes(raw, warnings=None):
     out, seen = [], set()
     for c in raw:
         # Routing errors still drop the class; prose errors must not.
-        reason = _class_error(c, seen, check_guidance=False)
+        reason = _class_error(c, seen, lan=lan, check_guidance=False)
         if reason:
             ident = c.get("class") if isinstance(c, dict) else c
             warn(f"dropped {ident!r} — {reason}")
             continue
+        # A key the class does not carry (a retired one, as the previous
+        # brain's per-tenant visibility mark, or a typo) is loaded without,
+        # said out loud; a strict PUT refuses it.
+        for k in c:
+            if k == "lan_only":
+                warn(f"{c['class']}: {_LAN_ONLY_REASON} — ignored")
+            elif k not in _CLASS_KEYS and k not in _BUDGET_KEYS:
+                warn(f"{c['class']}: unknown key {k!r} ignored")
+        if "onboarding" in c and not lan:
+            warn(f"{c['class']}: {_ONBOARDING_MEMBER_REASON} — ignored")
         guidance = c.get("guidance")
         reason = _guidance_error(guidance)
         if reason:
@@ -834,8 +865,7 @@ def _normalize_classes(raw, warnings=None):
         if image:
             out.append({"class": name, "display": str(c.get("display") or name),
                         "guidance": guidance, "request_kind": rk, "context_window": None,
-                        "floor_member": None, "units": None, "members": members,
-                        "lan_only": c.get("lan_only", False)})
+                        "floor_member": None, "units": None, "members": members})
             continue
         # The governing window is min() over ALL members' effective windows —
         # not currently-usable ones, so quota-driven rebinding never moves it
@@ -859,8 +889,7 @@ def _normalize_classes(raw, warnings=None):
                     "context_window": derived,
                     "floor_member": floor_id,
                     "units": units,
-                    "members": members,
-                    "lan_only": c.get("lan_only", False)})
+                    "members": members})
     return out
 
 
@@ -921,19 +950,19 @@ def _normalize_lane_settings(raw, warnings):
     return out
 
 
-def _normalize_classes_doc(doc, warnings):
+def _normalize_classes_doc(doc, warnings, *, lan):
     """A whole classes document -> (classes, lane settings), tolerant."""
     arr, lanes = _split_classes_doc(doc)
-    return _normalize_classes(arr, warnings), _normalize_lane_settings(lanes, warnings)
+    return _normalize_classes(arr, warnings, lan=lan), _normalize_lane_settings(lanes, warnings)
 
 
-def _validate_classes_doc(doc):
-    """STRICT whole-document validation for PUT/validate (#92): every error a
-    tolerant load would merely drop-and-warn on is a rejection here — an editor
-    save must never silently lose a class. The owner settings are checked
-    against the accounts the brain knows (_settings_problems), so a pot or a
-    window that does not exist is refused, never stored and ignored. Returns a
-    list of error strings (empty = valid)."""
+def _validate_classes_doc(t, doc):
+    """STRICT whole-document validation of tenant t's classes document for
+    PUT/validate (#92): every error a tolerant load would merely drop-and-warn
+    on is a rejection here — an editor save must never silently lose a class.
+    The owner settings are checked against t's accounts (_settings_problems),
+    so a pot or a window that does not exist is refused, never stored and
+    ignored. Returns a list of error strings (empty = valid)."""
     split = _split_classes_doc(doc)
     if split is None:
         return ['document must be {"classes": [...], "lanes": {...}} or a JSON array of class objects']
@@ -946,13 +975,13 @@ def _validate_classes_doc(doc):
             elif k not in ("classes", "lanes"):
                 errors.append(f"unknown top-level key {k!r} (a classes document has classes and lanes)")
     for i, c in enumerate(arr):
-        reason = _class_error(c, seen, strict=True)
+        reason = _class_error(c, seen, lan=t.lan, strict=True)
         if reason:
             ident = c.get("class") if isinstance(c, dict) else None
             where = f"classes[{i}]" + (f" ({ident!r})" if ident else "")
             errors.append(f"{where}: {reason}")
         name = c.get("class") if isinstance(c, dict) else None
-        if isinstance(name, str) and _CLASS_NAME_RE.match(name):
+        if isinstance(name, str) and _CLASS_ID_RE.match(name):
             seen.add(name)  # later duplicates must error even if this entry did
     if lanes is not None and not isinstance(lanes, dict):
         errors.append("lanes must be an object {<lane>: {pay, stop_at}}")
@@ -963,34 +992,8 @@ def _validate_classes_doc(doc):
                 errors.append(reason)
     if errors:
         return errors
-    classes, lane_settings = _normalize_classes_doc(doc, [])
-    return _tenants_settings_problems(classes, lane_settings)[0]
-
-
-def _tenants_settings_problems(classes, lane_settings):
-    """(errors, warnings) of a classes document's settings against every
-    tenant's accounts: the classes document is the operator's, one for all,
-    so a setting is checked against each tenant's pool. Errors (structure)
-    are the same from every tenant and listed once; a warning names whose
-    accounts leave the setting dangling. With no tenant there are no accounts
-    to check against, and nothing to say."""
-    errors, warnings = [], []
-    for t in _registry.all() if _registry is not None else []:
-        e, w = _settings_problems(t, classes, lane_settings)
-        errors += [x for x in e if x not in errors]
-        warnings += [f"{t.name}: {x}" for x in w]
-    return errors, warnings
-
-
-# The live raw documents + their load warnings, mutated only under _plock (the
-# swap lock) after import. The RAW doc — not the normalized view — is what the
-# revision hashes and what GET /classes serves, so a hand-edit changes the
-# revision by construction (ui-revamp §6 revision lifecycle).
-_classes_doc = []
-_classes_warnings = []
-# The bare lanes' route settings ({lane: {pay, stop_at}}), from the classes
-# document's `lanes` map; swapped with _classes under _plock.
-_lane_settings = {}
+    classes, lane_settings = _normalize_classes_doc(doc, [], lan=t.lan)
+    return _settings_problems(t, classes, lane_settings)[0]
 
 
 def _drop_non_finite(v, warnings, where="$"):
@@ -1021,49 +1024,66 @@ def _drop_non_finite(v, warnings, where="$"):
     return v
 
 
-def _load_classes():
-    """Load class definitions from CLASSES_FILE (import/startup path).
-    Robustness mirrors _load_lanes: a missing file means no classes (dormant
-    feature), an unreadable file logs and loads none. Side effects: stores the
-    raw document, the lanes' settings and load warnings for the /classes API
-    (#92) and stamps window changes."""
-    global _classes_doc, _classes_warnings, _lane_settings
+def _leftover_root_classes():
+    """The warning for a classes.json left at the creds root, or None. A brain
+    before per-tenant classes read it there; this one never does, so it is a
+    document not moved (an upgrade that skipped the migration) and routing
+    runs on the LAN tenant's own."""
+    path = os.path.join(CREDS_DIR, "classes.json")
+    if not os.path.exists(path):
+        return None
+    return (f"{path} is the previous brain's one classes document, and this brain does not read it: "
+            "stop the brain and run `python3 migrate_classes.py migrate --creds-dir <the creds dir>` "
+            "to move it into the LAN tenant's dir (it refuses while that dir holds a classes.json too: "
+            "keep the one that is live, remove the other)")
+
+
+def _load_classes(t):
+    """Load tenant t's classes document from its dir (its creation, at boot or
+    on PUT /tenants). A missing file means no classes; an unreadable one logs
+    and loads none. Sets t.classes, t.classes_doc (the raw document: what the
+    revision hashes and GET /classes serves, so a hand-edit changes the
+    revision by construction), t.classes_warnings and t.lane_settings, and
+    stamps window changes. Runs once the drivers have registered: a class is
+    checked against their model modalities."""
     warnings = []
     raw = None
+    path = t.classes_file
     try:
-        with open(CLASSES_FILE) as f:
-            raw = json.load(f)
-    except FileNotFoundError:
-        pass
+        raw = _doc_read(t, "classes")
     except Exception as e:  # noqa: BLE001
-        log(f"WARN bad classes file {CLASSES_FILE}: {e} — no classes loaded")
+        log(f"WARN {t.id}: bad classes file {path}: {e} — no classes loaded")
         warnings.append(f"bad classes file: {e} — no classes loaded")
         raw = None
     if raw is not None:
         raw = _drop_non_finite(raw, warnings)
         for w in warnings:
-            log(f"WARN classes file {CLASSES_FILE}: {w}")
+            log(f"WARN {t.id}: classes file {path}: {w}")
     if raw is not None and _split_classes_doc(raw) is None:
         msg = 'top level must be {"classes": [...], "lanes": {...}} or an array — no classes loaded'
-        log(f"WARN classes file {CLASSES_FILE}: {msg}")
+        log(f"WARN {t.id}: classes file {path}: {msg}")
         warnings.append(msg)
         raw = None
+    if t.lan:
+        leftover = _leftover_root_classes()
+        if leftover:
+            log(f"WARN {t.id}: {leftover}")
+            warnings.append(leftover)
     if raw is None:
-        _classes_doc, _classes_warnings, _lane_settings = [], warnings, {}
-        return list(DEFAULT_CLASSES)
-    out, _lane_settings = _normalize_classes_doc(raw, warnings)
-    _stamp_class_window_changes(out)
-    _classes_doc, _classes_warnings = raw, warnings
-    return out
+        t.classes, t.classes_doc, t.classes_warnings, t.lane_settings = [], [], warnings, {}
+        return
+    out, lane_settings = _normalize_classes_doc(raw, warnings, lan=t.lan)
+    _stamp_class_window_changes(t, out)
+    t.classes, t.classes_doc, t.classes_warnings, t.lane_settings = out, raw, warnings, lane_settings
 
 
-def _stamp_class_window_changes(classes):
+def _stamp_class_window_changes(t, classes):
     """#44 §10: make "when did this class's window last change" answerable.
-    Persists {class: {window, previous, changed_at}} beside CLASSES_FILE and
-    stamps previous_context_window / window_changed_at onto each class. Runs at
-    load (import / restart — the only reload the brain has); best-effort on a
-    read-only or missing state dir, never fatal."""
-    state_path = CLASSES_FILE + ".windows"
+    Persists {class: {window, previous, changed_at}} in tenant t's
+    classes.windows.json and stamps previous_context_window / window_changed_at
+    onto each class. Runs at load and at every install of a document;
+    best-effort on a read-only or missing state dir, never fatal."""
+    state_path = t.windows_file
     prev = {}
     try:
         with open(state_path) as f:
@@ -1094,11 +1114,149 @@ def _stamp_class_window_changes(classes):
         log(f"WARN classes: cannot persist window history {state_path}: {e}")
 
 
-# Loaded by boot(), never at import: a class is checked against what the drivers
-# registered (_class_error reads their model modalities), and they register
-# after the core is imported. Loading here dropped every image class and
-# stamped the windows without them.
-_classes = []
+# ---- the starter and the catalogue (CLASSES-PLAN D1, D4) ------------------------
+# Both derive from the LAN tenant's live document: the operator routes what
+# members are offered. A provider is one a member can connect when Sources
+# offers a flow for it, which is exactly a provider with an `auth` record
+# (_auth_providers_payload lists those); a lane rides Claude accounts, so the
+# anthropic provider's record decides it.
+
+def _lan_tenant():
+    """The LAN tenant (the registry holds exactly one)."""
+    return _registry.lan()[0]
+
+
+def _connectable(provider):
+    """Can a member connect an account of this provider on Sources?"""
+    return bool((PROVIDERS.get(provider) or {}).get("auth"))
+
+
+def _starter_pay(pay, provider):
+    """(pay as a member's document carries it, [dropped exact pot ids]): a
+    "<provider>/*" kept; an exact pot that is the provider's money pot becomes
+    "<provider>/*", so the member pays from their own accounts of it; any
+    other exact pot (an allowance, another provider's) is dropped."""
+    out, dropped = [], []
+    for p in pay:
+        _, pot = _split_pot(p)
+        if pot == PAY_ALL:
+            each = p
+        elif pot == _money_pot(provider):
+            each = f"{provider}/{PAY_ALL}"
+        else:
+            dropped.append(p)
+            continue
+        if each not in out:
+            out.append(each)
+    return out, dropped
+
+
+# What a starter copies, and nothing else: a key the strict PUT would refuse
+# (one a load only warned of) never reaches a member's document. onboarding is
+# the LAN tenant's mark and calibration_ref the operator's note.
+_STARTER_CLASS_KEYS = _CLASS_KEYS - {"onboarding", "members"}
+_STARTER_MEMBER_KEYS = _MEMBER_KEYS - {"calibration_ref"}
+_STARTER_LANE_KEYS = frozenset(("stop_at",))  # pay is translated apart
+
+
+def _starter(lan_doc, live):
+    """(starter document, dropped) a new member starts with: a copy of each
+    class of the LAN tenant's document `lan_doc` marked onboarding: true and
+    live there (its name in `live`: a class the LAN tenant's own load dropped
+    is not the operator's to offer). Each copy keeps display, guidance,
+    request_kind and its rungs' windows, ratios, calibrated_at,
+    reserve_ceiling and stop_at; calibration_ref (the operator's note),
+    onboarding and any key a class or rung does not carry are not copied, so
+    every starter passes the strict PUT. Pays translate (_starter_pay); a rung whose
+    provider a member cannot connect is removed; a class left with no rung is
+    not copied. The `lanes` map is copied with the same pay translation.
+    `dropped` names each loss, [{class, member?, pay?, why}], why one of
+    exact_pay, not_connectable, empty; a bare lane's pay names class null and
+    member lane:<lane>. The join, GET /classes/starter and migrate_classes.py
+    all derive it here."""
+    arr, lanes = _split_classes_doc(lan_doc) or ([], {})
+    out, dropped = [], []
+    for c in arr:
+        if not isinstance(c, dict) or c.get("onboarding") is not True or c.get("class") not in live:
+            continue
+        name = c["class"]
+        members = []
+        for m in c.get("members") or []:
+            mid = _member_id(m)
+            provider = "anthropic" if m.get("kind") == "anthropic" else m.get("provider")
+            if not _connectable(provider):
+                dropped.append({"class": name, "member": mid, "why": "not_connectable"})
+                continue
+            rung = {k: copy.deepcopy(v) for k, v in m.items() if k in _STARTER_MEMBER_KEYS}
+            if "pay" in m:
+                rung["pay"], lost = _starter_pay(m["pay"], provider)
+                dropped += [{"class": name, "member": mid, "pay": p, "why": "exact_pay"} for p in lost]
+                if not rung["pay"]:
+                    del rung["pay"]
+            members.append(rung)
+        if not members:
+            dropped.append({"class": name, "why": "empty"})
+            continue
+        out.append(dict({k: copy.deepcopy(v) for k, v in c.items()
+                         if k in _STARTER_CLASS_KEYS}, members=members))
+    lanes_out = {}
+    for lane, st in (lanes if isinstance(lanes, dict) else {}).items():
+        if _lane_settings_error(lane, st, strict=False):
+            continue  # the LAN tenant's load dropped it, with a warning
+        entry = {k: copy.deepcopy(v) for k, v in st.items() if k in _STARTER_LANE_KEYS}
+        if "pay" in st:
+            pay, lost = _starter_pay(st["pay"], "anthropic")
+            dropped += [{"class": None, "member": f"lane:{lane}", "pay": p, "why": "exact_pay"}
+                        for p in lost]
+            if pay:
+                entry["pay"] = pay
+        if entry:
+            lanes_out[lane] = entry
+    return {"classes": out, "lanes": lanes_out}, dropped
+
+
+def _tenant_starter():
+    """(starter document, dropped) from the LAN tenant's live document now."""
+    lan = _lan_tenant()
+    with lan.plock:
+        doc, live = lan.classes_doc, {c["class"] for c in lan.classes}
+    return _starter(doc, live)
+
+
+def _catalog():
+    """GET /classes/catalog: what a member may add to a ladder, derived from
+    the LAN tenant's live classes (CLASSES-PLAN D4). lanes: each lane a rung
+    of those classes rides, with the first such rung's model and
+    context_window in document order (a lane none of them uses is offered to
+    nobody); models: every provider member of them, the first declaration of
+    each in document order, with its context_window, anthropic_token_ratio,
+    calibrated_at and modality (calibration_ref is the operator's note). Only
+    what a member can connect: a lane when Claude accounts can be, a model
+    when its provider can be."""
+    lan = _lan_tenant()
+    with lan.plock:
+        doc, classes = lan.classes_doc, lan.classes
+    live = {c["class"]: {_member_id(m): m for m in c["members"]} for c in classes}
+    arr, _ = _split_classes_doc(doc) or ([], {})
+    lanes, models = {}, {}
+    for c in arr:  # the document's order, not the loader's priority sort
+        rungs = live.get(c.get("class")) if isinstance(c, dict) else None
+        for raw in (c.get("members") or []) if rungs else []:
+            m = rungs.get(_member_id(raw)) if isinstance(raw, dict) else None
+            if m is None:  # a rung the load dropped
+                continue
+            if m["kind"] == "anthropic":
+                if m["lane"] not in lanes and _connectable("anthropic"):
+                    lanes[m["lane"]] = {"model": m["model"], "context_window": m["context_window"]}
+                continue
+            mid = _member_id(m)
+            if mid in models or not _connectable(m["provider"]):
+                continue
+            models[mid] = {"context_window": m["context_window"],
+                           "anthropic_token_ratio": m["anthropic_token_ratio"],
+                           "calibrated_at": m.get("calibrated_at"),
+                           "modality": _model_modality(m["provider"], m["model"])}
+    return {"lanes": lanes, "models": models}
 
 
 def _new_lane_state():
@@ -1868,32 +2026,25 @@ def _doc_revision(doc):
 # Per-document WRITE locks: the If-Match check-and-write must be serialized —
 # the brain is a ThreadingHTTPServer, handlers are concurrent, and an
 # unserialized check-and-write is a lost-update race (§6). Never held while
-# waiting on _plock-holders that need these (nothing does).
-_classes_lock = threading.Lock()  # the one operator document's; the others are a tenant's
-# The live classes config's four globals are replaced together (_swap_classes)
-# and read together under this; a tenant's plock no longer guards them.
-_classes_swap = threading.RLock()
+# waiting on _plock-holders that need these (nothing does). Each is the
+# tenant's own (t.doc_locks).
 _DOC_KINDS = ("classes", "consumers", "money")
 
 
 def _doc_lock(t, kind):
-    """The lock a document's PUT, validate and reload hold: classes is the
-    operator's (global), consumers and money are the tenant's."""
-    return _classes_lock if kind == "classes" else t.doc_locks[kind]
+    """The lock a document's PUT, validate and reload hold: the tenant's."""
+    return t.doc_locks[kind]
 
 
 def _doc_path(t, kind):
-    """The file a document loads from and is written to (read at call time so
-    a test can point the brain elsewhere). classes is CLASSES_FILE for every
-    tenant (t is None on its routes); the others are the tenant's."""
-    if kind == "classes":
-        return CLASSES_FILE
-    return {"consumers": t.consumers_file, "money": t.money_file}[kind]
+    """The file a document loads from and is written to: the tenant's."""
+    return {"classes": t.classes_file, "consumers": t.consumers_file, "money": t.money_file}[kind]
 
 
 def _doc_read(t, kind):
-    """The document's file as parsed JSON, None without one. classes is the
-    operator's plain file; a tenant's documents go through the store."""
+    """The document's file as parsed JSON, None without one. classes is a
+    plain file in every store's mode (tenancy.FILES); the others go through
+    the store."""
     path = _doc_path(t, kind)
     if kind == "classes":
         try:
@@ -1951,46 +2102,42 @@ def _classes_derived(classes):
     } for c in classes}
 
 
-def _classes_live_effect(new_classes):
-    """What installing `new_classes` would do to LIVE routing state (the
-    validate dry-run's live-effect panel, and the PUT response's receipt):
-    deleted/new classes, bindings and pins that would be invalidated (their
-    member vanished — the proxy bind cache rebinds within ~15 s), window
-    changes vs the live config, and consumers left with a dangling class ref
-    (§5: deleting a referenced class SUCCEEDS with a warning). The classes
-    document is every tenant's, so the pins, bindings and consumers are every
-    tenant's, each entry naming its tenant. Takes each tenant's plock in turn."""
+def _classes_live_effect(t, new_classes):
+    """What installing `new_classes` as tenant t's would do to its LIVE routing
+    state (the validate dry-run's live-effect panel, and the PUT response's
+    receipt): deleted/new classes, bindings and pins that would be invalidated
+    (their member vanished — the proxy bind cache rebinds within ~15 s),
+    window changes vs the live config, and consumers left with a dangling
+    class ref (§5: deleting a referenced class SUCCEEDS with a warning). Only
+    t's: its sessions, pins and consumers. Takes t.plock."""
     new_by = {c["class"]: c for c in new_classes}
-    with _classes_swap:
-        old_names = [c["class"] for c in _classes]
-        old_windows = {c["class"]: c["context_window"] for c in _classes}
+    with t.plock:
+        old_names = [c["class"] for c in t.classes]
+        old_windows = {c["class"]: c["context_window"] for c in t.classes}
+        state = {cn: {"pinned": cs.get("pinned"),
+                      "sessions": {sid: s.get("member")
+                                   for sid, s in cs.get("sessions", {}).items()}}
+                 for cn, cs in t.preferred.get("classes", {}).items()}
+        consumers = t.consumers
     deleted = [n for n in old_names if n not in new_by]
     added = [c["class"] for c in new_classes if c["class"] not in old_names]
     window_changes = [{"class": n, "from": old_windows[n], "to": new_by[n]["context_window"]}
                      for n in old_names
                      if n in new_by and new_by[n]["context_window"] != old_windows[n]]
     invalidated_pins, invalidated_bindings, consumer_warnings = [], [], []
-    for t in _registry.all():
-        with t.plock:
-            state = {cn: {"pinned": cs.get("pinned"),
-                          "sessions": {sid: s.get("member")
-                                       for sid, s in cs.get("sessions", {}).items()}}
-                     for cn, cs in t.preferred.get("classes", {}).items()}
-            consumers = t.consumers
-        for cname, cs in state.items():
-            member_ids = ({_member_id(m) for m in new_by[cname]["members"]}
-                          if cname in new_by else set())
-            if cs["pinned"] and cs["pinned"] not in member_ids:
-                invalidated_pins.append({"tenant": t.id, "class": cname, "member": cs["pinned"]})
-            for sid, member in cs["sessions"].items():
-                if member not in member_ids:
-                    invalidated_bindings.append({"tenant": t.id, "class": cname, "session": sid,
-                                                 "member": member})
-        for n in deleted:
-            for c in consumers:
-                if f"class:{n}" in c["members"]:
-                    consumer_warnings.append(f"{t.name}: consumer {c['id']!r} references deleted "
-                                             f"class {n!r} — its ref goes dangling until edited")
+    for cname, cs in state.items():
+        member_ids = ({_member_id(m) for m in new_by[cname]["members"]}
+                      if cname in new_by else set())
+        if cs["pinned"] and cs["pinned"] not in member_ids:
+            invalidated_pins.append({"class": cname, "member": cs["pinned"]})
+        for sid, member in cs["sessions"].items():
+            if member not in member_ids:
+                invalidated_bindings.append({"class": cname, "session": sid, "member": member})
+    for n in deleted:
+        for c in consumers:
+            if f"class:{n}" in c["members"]:
+                consumer_warnings.append(f"consumer {c['id']!r} references deleted "
+                                         f"class {n!r} — its ref goes dangling until edited")
     return {"deleted_classes": deleted, "new_classes": added,
             "window_changes": window_changes,
             "invalidated_pins": invalidated_pins,
@@ -1998,38 +2145,31 @@ def _classes_live_effect(new_classes):
             "consumer_warnings": consumer_warnings}
 
 
-def _swap_classes(new_classes, doc, warnings, lane_settings):
-    """Hot-swap the live class config (§6 hot-swap notes). Caller holds
-    _classes_lock. The swap is an ATOMIC REFERENCE REPLACE of the _classes
-    module global, under _classes_swap; every tenant's read of it is one
-    reference read, so no reader ever sees a half-installed config. Then each
-    tenant's runtime state is reconciled under that tenant's plock: state for
-    deleted classes dropped, fresh state for new classes, pins/bindings to
-    members that vanished invalidated (the proxy bind cache rebinds within
-    ~15 s). Restart never required. Returns {tenant id: that tenant's session
-    journal seq at the swap}: the moves after it are the new config's
-    (_doc_put)."""
-    global _classes, _classes_doc, _classes_warnings, _lane_settings
-    with _classes_swap:
-        _classes = new_classes
-        _classes_doc = doc
-        _classes_warnings = warnings
-        _lane_settings = lane_settings
-    seen = {}
-    for t in _registry.all():
-        with t.plock:
-            _reconcile_class_state(t.preferred.setdefault("classes", {}), new_classes,
-                                   lambda text: log(f"{t.id}: classes swap: {text}"))
-            _save_state(t)
-            seen[t.id] = t.journal_seq
-    return seen
+def _swap_classes(t, new_classes, doc, warnings, lane_settings):
+    """Hot-swap tenant t's live class config (§6 hot-swap notes). Caller holds
+    t.doc_locks["classes"]. Under one t.plock hold the four fields are
+    replaced and t's runtime state reconciled: state for deleted classes
+    dropped, fresh state for new classes, pins/bindings to members that
+    vanished invalidated (the proxy bind cache rebinds within ~15 s); no
+    reader ever sees a half-installed config. Restart never required. Returns
+    t's session journal seq at the swap: the moves after it are the new
+    config's (_doc_put)."""
+    with t.plock:
+        t.classes = new_classes
+        t.classes_doc = doc
+        t.classes_warnings = warnings
+        t.lane_settings = lane_settings
+        _reconcile_class_state(t.preferred.setdefault("classes", {}), new_classes,
+                               lambda text: log(f"{t.id}: classes swap: {text}"))
+        _save_state(t)
+        return t.journal_seq
 
 
 def _reconcile_class_state(cls_state, classes, note):
     """Fit class runtime state to a class config, as a swap installs it: state
     for deleted classes dropped, fresh state for new classes, pins and bindings
     to members that vanished dropped. note(text) is told each. The preview runs
-    it on a copy (_session_preview). Caller holds _plock."""
+    it on a copy (_session_preview). Caller holds the tenant's plock."""
     by_name = {c["class"]: c for c in classes}
     for cname in list(cls_state):
         if cname not in by_name:
@@ -2070,18 +2210,12 @@ def _swap_money(t, new_money, doc, warnings):
 
 
 def _live_doc(t, kind):
-    """The live raw document of a kind. Caller holds t.plock (or, for the
-    classes document, _classes_swap; t is None on its routes)."""
-    if kind == "classes":
-        return _classes_doc
-    return {"consumers": t.consumers_doc, "money": t.money_doc}[kind]
+    """The live raw document of a kind. Caller holds t.plock."""
+    return {"classes": t.classes_doc, "consumers": t.consumers_doc, "money": t.money_doc}[kind]
 
 
 def _live_revision(t, kind):
     """The live document's content-hash revision (If-Match's comparand)."""
-    if kind == "classes":
-        with _classes_swap:
-            return _doc_revision(_classes_doc)
     with t.plock:
         return _doc_revision(_live_doc(t, kind))
 
@@ -2103,16 +2237,15 @@ def _money_derived(t, money):
 def _doc_snapshot(t, kind):
     """The GET /classes|/consumers body: live raw doc + content-hash revision +
     derived state + load warnings."""
-    if kind == "classes":
-        with _classes_swap:
-            doc, warnings = _classes_doc, list(_classes_warnings)
-            derived = _classes_derived(_classes)
-        return {"doc": doc, "revision": _doc_revision(doc),
-                "derived": derived, "warnings": warnings}
     with t.plock:
+        if kind == "classes":
+            doc, warnings = t.classes_doc, list(t.classes_warnings)
+            derived = _classes_derived(t.classes)
+            return {"doc": doc, "revision": _doc_revision(doc),
+                    "derived": derived, "warnings": warnings}
         if kind == "consumers":
             doc, warnings = t.consumers_doc, list(t.consumers_warnings)
-            derived = _consumers_view(t.consumers, _classes)
+            derived = _consumers_view(t.consumers, t.classes)
         else:
             doc, warnings, money = t.money_doc, list(t.money_warnings), t.money
     if kind == "money":
@@ -2121,7 +2254,7 @@ def _doc_snapshot(t, kind):
         with t.lock:
             roster = _account_roster(t, list(t.state.values()))
         with t.plock:
-            routes = _routes(_classes, _lane_settings, roster)
+            routes = _routes(t.classes, t.lane_settings, roster)
         errors, live = _money_problems(money, roster, routes)
         warnings += [f"dangling: {e}" for e in errors] + live
     return {"doc": doc, "revision": _doc_revision(doc),
@@ -2160,12 +2293,12 @@ def _doc_check(t, kind, doc):
     if bad:
         return [f"{bad}: numbers must be finite (no NaN or Infinity)"], [], None, None
     if kind == "classes":
-        errors = _validate_classes_doc(doc)
+        errors = _validate_classes_doc(t, doc)
         if errors:
             return errors, [], None, None
         warnings = []
-        classes, lanes = _normalize_classes_doc(doc, warnings)
-        warnings += _tenants_settings_problems(classes, lanes)[1]
+        classes, lanes = _normalize_classes_doc(doc, warnings, lan=t.lan)
+        warnings += _settings_problems(t, classes, lanes)[1]
         return [], warnings, (classes, lanes), doc
     if kind == "money":
         errors, warnings, normalized = _normalize_money(doc, strict=True)
@@ -2173,7 +2306,7 @@ def _doc_check(t, kind, doc):
             with t.lock:
                 roster = _account_roster(t, list(t.state.values()))
             with t.plock:
-                routes = _routes(_classes, _lane_settings, roster)
+                routes = _routes(t.classes, t.lane_settings, roster)
             errors, warnings = _money_problems(normalized, roster, routes)
         if errors:
             return errors, warnings, None, None
@@ -2191,15 +2324,11 @@ def _doc_live_effect(t, kind, normalized):
     carry none; their live effect is just which refs would be dangling
     against today's config."""
     if kind == "classes":
-        preview = {"session_moves": [], "held_by_pin": []}
-        for tt in _registry.all():
-            for k, evs in _session_preview(tt, kind, normalized).items():
-                preview[k] += [dict(ev, tenant=tt.id) for ev in evs]
-        return {**_classes_live_effect(normalized[0]), **preview}
+        return {**_classes_live_effect(t, normalized[0]), **_session_preview(t, kind, normalized)}
     if kind == "money":
         return _session_preview(t, kind, normalized)
     with t.plock:
-        classes = _classes
+        classes = t.classes
     view = _consumers_view(normalized, classes)
     return {"dangling_refs": [m["ref"] for c in view for m in c["members"]
                               if m["status"] == "dangling"]}
@@ -2224,7 +2353,7 @@ def _session_preview(t, kind, normalized):
         if kind == "classes":
             (classes, lanes), money = normalized, t.money
         else:
-            classes, lanes, money = _classes, _lane_settings, normalized
+            classes, lanes, money = t.classes, t.lane_settings, normalized
         states = copy.deepcopy(t.preferred.get("classes", {}))
         _reconcile_class_state(states, classes, lambda text: None)
         ctx = _settings_ctx(t, snap, now, classes, lanes, money)
@@ -2677,7 +2806,7 @@ def _load_state(t):
         log(f"WARN could not load switch state: {e}")
     with t.plock:
         if isinstance(d, dict):
-            t.preferred.update(_migrate_state(d, _lane_names, [c["class"] for c in _classes],
+            t.preferred.update(_migrate_state(d, _lane_names, [c["class"] for c in t.classes],
                                              _pollable_provider_ids()))
         else:
             t.preferred["lanes"] = {ln: _new_lane_state() for ln in _lane_names}
@@ -3525,9 +3654,9 @@ def _pay_pots(pay, roster):
 
 def _routes(classes, lane_settings, roster):
     """{route id: route} for every class member and every bare lane. A route's
-    pay is exact pot ids (a member's "<provider>/*" expanded against this
-    roster); pay_declared is what the document says, which
-    _route_setting_issues checks."""
+    pay is exact pot ids (a "<provider>/*" expanded against this roster);
+    pay_declared is what the document says, which _route_setting_issues
+    checks."""
     anth = sorted(n for n, pv in roster.items()
                   if pv == "anthropic" or (PROVIDERS.get(pv) or {}).get("lanes"))
     out = {}
@@ -3553,7 +3682,7 @@ def _routes(classes, lane_settings, roster):
         rid = f"lane:{lc['lane']}"
         out[rid] = {"id": rid, "kind": "lane", "class": None, "member": None,
                     "lane": lc["lane"], "provider": "anthropic", "scope": lc["scope_model"],
-                    "accounts": anth, "pay": list(st.get("pay") or []),
+                    "accounts": anth, "pay": _pay_pots(st.get("pay") or [], roster),
                     "pay_declared": list(st.get("pay") or []),
                     "stop_at": st.get("stop_at"), "priority": None, "request_kind": "chat"}
     return out
@@ -3756,9 +3885,9 @@ def _account_effective(res, lane_cfg, model):
 
 
 def _policy_ctx(t, snap, now):
-    """_settings_ctx under the live settings. Caller holds _plock (reads
-    _classes, _lane_settings, _money)."""
-    return _settings_ctx(t, snap, now, _classes, _lane_settings, t.money)
+    """_settings_ctx under the tenant's live settings. Caller holds t.plock
+    (reads t.classes, t.lane_settings, t.money)."""
+    return _settings_ctx(t, snap, now, t.classes, t.lane_settings, t.money)
 
 
 def _settings_ctx(t, snap, now, classes, lane_settings, money):
@@ -4211,12 +4340,6 @@ def _compute_class_sessions(t, snap, now, ctx, classes, states, record):
     return dirty
 
 
-def _tenant_classes(t):
-    """The classes tenant t may see and bind: all of them for the LAN tenant,
-    every class but the lan_only ones for a member tenant."""
-    return [c for c in _classes if t.lan or not c["lan_only"]]
-
-
 def _bind_class_session(t, cname, sid, now):
     """Create-or-touch one session binding (the /class-bind endpoint's core).
     An existing binding is returned untouched (session-sticky — only last_seen
@@ -4233,9 +4356,8 @@ def _bind_class_session(t, cname, sid, now):
     with t.lock:
         snap = list(t.state.values())
     with t.plock:
-        # A lan_only class is the LAN tenant's alone: to a member tenant it is
-        # an unknown class, and the 404 lists only the classes it may bind.
-        visible = _tenant_classes(t)
+        # The tenant's own classes: another tenant's are unknown here.
+        visible = t.classes
         cls = next((c for c in visible if c["class"] == cname), None)
         if not cls:
             return 404, {"error": f"unknown class {cname!r}",
@@ -4303,7 +4425,7 @@ def _classes_payload(t, snap, now, ctx):
     out = {}
     with t.plock:
         claims = _consumer_claims(t.consumers)
-        for c in _tenant_classes(t):
+        for c in t.classes:
             verdicts = _class_verdicts(t, c, ctx)
             members = []
             for m in c["members"]:
@@ -4337,10 +4459,6 @@ def _classes_payload(t, snap, now, ctx):
                 # §2.9 (C4): "image" is the image door's class; the proxy
                 # serves it there and nowhere else, so it is no picker row.
                 "request_kind": c["request_kind"],
-                # Only the LAN tenant is ever served a true one: the proxy,
-                # whose class rows come from that tenant's document, hides
-                # these rows from every other tenant.
-                "lan_only": c["lan_only"],
                 "context_window": c["context_window"],
                 # #44: which member's effective window governs, whose tokenizer
                 # units the number is in, and when it last moved (§10).
@@ -4582,7 +4700,7 @@ def compute_preferred(t):
         # reports through ctx; `snap` (the polls) only marks reset boundaries
         # for drift-up, since a response's reset differs from the poll's by
         # seconds and would read as a crossed boundary twice.
-        if _compute_class_sessions(t, snap, now, ctx, _classes, t.preferred["classes"],
+        if _compute_class_sessions(t, snap, now, ctx, t.classes, t.preferred["classes"],
                                    lambda what, ev: _live_session_event(t, what, ev)):
             dirty = True
         if dirty:
@@ -4820,7 +4938,7 @@ def _preferred_payload(t):
         p = {k: t.preferred[k] for k in ("account", "since", "reason", "last_switch", "pinned")}
         claims = _consumer_claims(t.consumers)
         consumers_snap = t.consumers
-        classes_snap = _classes
+        classes_snap = t.classes
         lanes_out = {}
         for lc in _lanes:
             ls = t.preferred["lanes"].get(lc["lane"])
@@ -4836,7 +4954,7 @@ def _preferred_payload(t):
         # judges its own dial checks by the same number.
         # Each settings document's revision (the GET body's `revision`), so a subscriber re-reads
         # a document only when its own revision moves (quota-model plan 64 §4).
-        settings = {"classes": _doc_revision(_classes_doc),
+        settings = {"classes": _doc_revision(t.classes_doc),
                     "consumers": _doc_revision(t.consumers_doc),
                     "money": _doc_revision(t.money_doc), "stale_max": STALE_MAX}
         money_warnings = list(t.money_warnings)
@@ -9062,8 +9180,8 @@ class Handler(BaseHTTPRequestHandler):
     self.tpath); a handler reads self.tenant and passes it down. A tenant
     route without the prefix, or naming a tenant the registry does not hold,
     is 404: nothing here maps "no tenant" to the household. The routes
-    without a tenant are the operator's: /metrics (every tenant), the classes
-    document, and the registry (/tenants, key-guarded)."""
+    without a tenant are the operator's: /metrics (every tenant) and the
+    registry (/tenants, key-guarded)."""
 
     def _bind(self):
         """-> (tenant or None, the path under the prefix, or the whole path)."""
@@ -9119,10 +9237,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._no_tenant()
             if path == "/metrics":
                 return self._metrics(_registry.all())
-            if path == "/classes":
-                return self._doc_get("classes")
-            if path == "/classes/history":
-                return self._doc_history("classes", parsed)
             if path == "/tenants":
                 return self._tenants_get()
             if path == "/tenants/events":
@@ -9148,10 +9262,14 @@ class Handler(BaseHTTPRequestHandler):
             self._class_pin(parsed)
         elif path == "/auth/providers":
             self._auth_providers()
-        elif path in ("/consumers", "/money"):
+        elif path in ("/classes", "/consumers", "/money"):
             self._doc_get(path[1:])
-        elif path in ("/consumers/history", "/money/history"):
+        elif path in ("/classes/history", "/consumers/history", "/money/history"):
             self._doc_history(path.split("/")[1], parsed)
+        elif path == "/classes/catalog":
+            self._classes_catalog()
+        elif path == "/classes/starter":
+            self._classes_starter(t)
         elif ("GET", path) in ROUTES:
             ROUTES[("GET", path)](t, self, parsed)
         else:
@@ -9173,17 +9291,12 @@ class Handler(BaseHTTPRequestHandler):
         if t is None:
             if parsed.path.startswith("/t/"):
                 return self._no_tenant(drain=True)
-            md = re.match(r"^/classes/(validate|reload)$", path)
-            if md and md.group(1) == "validate":
-                return self._doc_validate("classes")
-            if md:
-                return self._doc_reload("classes")
             self._drain_body()
             self.send_response(404)
             self.end_headers()
             return
         m = re.match(r"^/auth/([a-z0-9-]+)/(begin|complete|remove)$", path)
-        md = re.match(r"^/(consumers|money)/(validate|reload)$", path)
+        md = re.match(r"^/(classes|consumers|money)/(validate|reload)$", path)
         if ("POST", path) in ROUTES:
             ROUTES[("POST", path)](t, self, parsed)
         elif m:
@@ -9211,12 +9324,10 @@ class Handler(BaseHTTPRequestHandler):
         if t is None:
             if parsed.path.startswith("/t/"):
                 return self._no_tenant(drain=True)
-            if path == "/classes":
-                return self._doc_put("classes")
             mt = re.match(r"^/tenants/([^/]+)$", path)
             if mt:
                 return self._tenants_put(mt.group(1))
-        elif path in ("/consumers", "/money"):
+        elif path in ("/classes", "/consumers", "/money"):
             return self._doc_put(path[1:])
         self._drain_body()
         self.send_response(404)
@@ -9245,11 +9356,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _tenants_put(self, tid):
         """PUT /tenants/<t> {name, lan, tap}, the whole record: create the
-        tenant (its dir with empty documents) or update its name and tap. 200
-        {tenant, name, lan, tap, created}; 400 naming the bad id or the
-        missing or invalid field; 409 for a second lan tenant or a change to
-        lan (the household is the migration's, and its notices' bridge is
-        fixed with it)."""
+        tenant (its dir with empty documents, and the starter as its classes
+        document, _join_classes) or update its name and tap, its documents
+        untouched. 200 {tenant, name, lan, tap, created}; 400 naming the bad
+        id or the missing or invalid field; 409 for a second lan tenant or a
+        change to lan (the household is the migration's, and its notices'
+        bridge is fixed with it)."""
         if not self._guard():
             return
         body = self._read_json_body()
@@ -9259,12 +9371,36 @@ class Handler(BaseHTTPRequestHandler):
         why = tenancy.record_problem(rec)
         if why:
             return self._json(400, {"error": why})
+        # A dir already on disk (a tenants.json restored from before it, a DELETE stopped partway)
+        # may hold sealed credentials: a failed join removes only what this PUT made.
+        tdir = os.path.join(_registry.dir, tid)
+        existed = os.path.isdir(tdir)
+        before = set(os.listdir(tdir)) if existed else set()
         try:
             t, created = _registry.put(rec)
         except tenancy.RegistryConflict as e:
             return self._json(409, {"error": str(e), "tenant": tid})
         if created:
-            _tenant_boot(t)
+            try:
+                _join_classes(t)
+                _tenant_boot(t)
+            except Exception as e:  # noqa: BLE001 — the tenant is removed and the caller told
+                log(f"ERROR tenants: {tid}: the join failed ({type(e).__name__}: {e}); "
+                    "the tenant is removed, so a PUT again makes it whole")
+                body = {"error": f"the tenant's join failed ({type(e).__name__}): it was not created; "
+                                 "PUT it again", "tenant": tid}
+                try:
+                    _registry.delete(tid, remove_dir=not existed)
+                    for name in (set(os.listdir(tdir)) - before) if existed else ():
+                        path = os.path.join(tdir, name)
+                        if os.path.isdir(path) and not os.path.islink(path):
+                            shutil.rmtree(path)
+                        else:
+                            os.remove(path)
+                except Exception as ce:  # noqa: BLE001 — said in the reply, which is still JSON
+                    log(f"ERROR tenants: {tid}: removing the failed join: {type(ce).__name__}: {ce}")
+                    body["cleanup"] = f"{type(ce).__name__}: {ce}"
+                return self._json(500, body)
             _poll_wakeup.set()
         _events_mark(t)
         self._json(200, dict(t.record(), created=created))
@@ -9647,7 +9783,7 @@ class Handler(BaseHTTPRequestHandler):
         # deleted class that _save_state() then persists.
         err = msg = None
         with t.plock:
-            visible = _tenant_classes(t)
+            visible = t.classes
             cls = next((c for c in visible if c["class"] == cname), None)
             if not cls:
                 err = {"error": f"unknown class {cname!r}",
@@ -9674,6 +9810,29 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, _preferred_payload(t))
 
     # ---- runtime document config (#92, ui-revamp §6): /classes + /consumers --
+
+    def _classes_catalog(self):
+        """GET /classes/catalog: what this tenant may add to a ladder (_catalog),
+        {lanes: {<lane>: {model, context_window}}, models: {"<provider>/<model>":
+        {context_window, anthropic_token_ratio, calibrated_at, modality}}}, the
+        same for every tenant. Key-guarded like the documents."""
+        if not self._guard():
+            return
+        self._json(200, _catalog())
+
+    def _classes_starter(self, t):
+        """GET /classes/starter: the document a member made now would start
+        with, and what the copy dropped (_starter): {doc, dropped: [{class,
+        member?, pay?, why}]}, as the join derives it; the operator's
+        onboarding view previews it, and a member's page resets to it. A
+        dropped pay is an exact pot of the operator's, named by its account,
+        so only the LAN tenant's reply carries `pay`. Key-guarded."""
+        if not self._guard():
+            return
+        doc, dropped = _tenant_starter()
+        if not t.lan:
+            dropped = [{k: v for k, v in d.items() if k != "pay"} for d in dropped]
+        self._json(200, {"doc": doc, "dropped": dropped})
 
     def _doc_get(self, kind):
         """GET /classes | /consumers — live raw doc + content-hash revision +
@@ -9754,7 +9913,7 @@ class Handler(BaseHTTPRequestHandler):
             derived = _money_derived(t, normalized)
         else:
             with t.plock:
-                classes = _classes
+                classes = t.classes
             derived = _consumers_view(normalized, classes)
         self._json(200, {"ok": True, "errors": [], "warnings": warnings,
                          "revision": live_rev, "would_revision": _doc_revision(canon),
@@ -9804,8 +9963,8 @@ class Handler(BaseHTTPRequestHandler):
             except OSError as e:
                 return self._json(500, {"error": f"cannot write {path}: {e}"})
             if kind == "classes":
-                _stamp_class_window_changes(normalized[0])
-                seen = _swap_classes(normalized[0], canon, doc_warnings, normalized[1])
+                _stamp_class_window_changes(t, normalized[0])
+                seen = _swap_classes(t, normalized[0], canon, doc_warnings, normalized[1])
             elif kind == "money":
                 seen = _swap_money(t, normalized, canon, doc_warnings)
             else:
@@ -9817,16 +9976,7 @@ class Handler(BaseHTTPRequestHandler):
             snap = _doc_snapshot(t, kind)
             snap["warnings"] = doc_warnings + eff.get("consumer_warnings", [])
             snap["live_effect"] = eff
-        if kind == "classes":
-            # pointer/live view reflect the new config immediately, for every tenant
-            moves = []
-            for tt in _registry.all():
-                compute_preferred(tt)
-                with tt.plock:
-                    moves += [dict(ev, tenant=tt.id) for n, ev in tt.session_journal
-                              if n > seen.get(tt.id, 0)]
-            snap["live_effect"]["session_moves"] = moves
-        elif kind == "money":
+        if kind in ("classes", "money"):
             compute_preferred(t)  # pointer/live view reflect the new config immediately
             with t.plock:
                 snap["live_effect"]["session_moves"] = [ev for n, ev in t.session_journal
@@ -9862,9 +10012,9 @@ class Handler(BaseHTTPRequestHandler):
                 if _split_classes_doc(raw) is None:
                     return self._json(422, {"error": 'top level must be {"classes": [...], "lanes": {...}} '
                                                      "or an array — live config kept"})
-                normalized, lanes = _normalize_classes_doc(raw, warnings)
-                _stamp_class_window_changes(normalized)
-                _swap_classes(normalized, raw, warnings, lanes)
+                normalized, lanes = _normalize_classes_doc(raw, warnings, lan=t.lan)
+                _stamp_class_window_changes(t, normalized)
+                _swap_classes(t, normalized, raw, warnings, lanes)
                 canon = raw
             elif kind == "money":
                 raw = {} if raw is None else raw
@@ -9889,10 +10039,7 @@ class Handler(BaseHTTPRequestHandler):
             snap = _doc_snapshot(t, kind)
             snap["reloaded"] = True
             snap["changed"] = old_rev != new_rev
-        if kind == "classes":
-            for tt in _registry.all():  # the operator's document: every tenant's routing
-                compute_preferred(tt)
-        elif kind == "money":
+        if kind in ("classes", "money"):
             compute_preferred(t)
         self._json(200, snap, headers={"X-Doc-Revision": snap["revision"]})
 
@@ -9934,14 +10081,47 @@ def _sigterm(signum, frame):  # noqa: ARG001
     raise SystemExit(0)
 
 
+def _join_classes(t):
+    """A tenant PUT /tenants just made starts with the starter as its classes
+    document, written plain to its dir with a history line, then installed.
+    A tenant that already has a document keeps it; the LAN tenant's own is
+    never derived."""
+    if t.lan or os.path.exists(t.classes_file):
+        return
+    doc, dropped = _tenant_starter()
+    with _doc_lock(t, "classes"):
+        _doc_write(t, "classes", doc)
+        _append_history(t.classes_file, _doc_revision(doc), "join",
+                        "the starter: the operator's onboarding classes", doc)
+        warnings = []
+        classes, lanes = _normalize_classes_doc(doc, warnings, lan=False)
+        _stamp_class_window_changes(t, classes)
+        _swap_classes(t, classes, doc, warnings, lanes)
+    log(f"{t.id}: classes: the starter, {len(classes)} classes"
+        + (f"; dropped {len(dropped)}: " + ", ".join(
+            f"{d['class'] or d['member']}{'/' + d['member'] if d['class'] and d.get('member') else ''}"
+            f" ({d['why']})" for d in dropped) if dropped else ""))
+
+
+def _classes_line(t):
+    """The boot log's line of a tenant's classes: the primary evidence that a
+    hand edit of its classes.json landed. Ceilings are annotated inline
+    (gpt/gpt-5.6-sol>kimi/kimi-k3>opus<=60)."""
+    return f"{t.id}: classes: " + (", ".join(
+        f"{c['class']}(window={c['context_window']}, "
+        + ">".join((m["lane"] if m["kind"] == "anthropic" else f"{m['provider']}/{m['model']}")
+                   + ("" if m.get("reserve_ceiling") is None else f"<={m['reserve_ceiling']:.0f}")
+                   for m in c["members"]) + ")"
+        for c in t.classes) or "none configured")
+
+
 def boot():
     """What reads the driver registry, run once every driver has registered and
-    before anything is served or restored: the class document (validated
-    against the drivers' modalities, its windows stamped), then the registry
-    of tenants, each made with its documents read (_tenant_fresh). main()
-    runs it first; a test runs it with its own CREDS_DIR."""
-    global _classes, _registry
-    _classes = _load_classes()
+    before anything is served or restored: the registry of tenants, each made
+    with its documents read (_tenant_fresh), its classes validated against
+    the drivers' modalities and its windows stamped. main() runs it first; a
+    test runs it with its own CREDS_DIR."""
+    global _registry
     _registry = tenancy.Registry(CREDS_DIR, _tenant_fresh, retire=_tenant_retire, log=log)
     _registry.load()
     return _registry
@@ -9961,21 +10141,13 @@ def main():
     log("lanes: " + ", ".join(
         f"{lc['lane']}(match={'|'.join(lc['match']) or '-'},cap={lc['scope_model'] or '-'})"
         for lc in _lanes))
-    # Ceilings are annotated inline (gpt/gpt-5.6-sol>kimi/kimi-k3>opus<=60) — this
-    # line is the primary evidence that a classes.json edit actually landed,
-    # since the file is deployment config with no CI path behind it.
-    log("classes: " + (", ".join(
-        f"{c['class']}(window={c['context_window']}, "
-        + ">".join((m["lane"] if m["kind"] == "anthropic" else f"{m['provider']}/{m['model']}")
-                   + ("" if m.get("reserve_ceiling") is None else f"<={m['reserve_ceiling']:.0f}")
-                   for m in c["members"]) + ")"
-        for c in _classes) or "none configured"))
     for t in _registry.all():
+        log(_classes_line(t))
         if loop:
             loop["start"](t)  # the configured accounts, so _load_state restores only theirs
         _tenant_boot(t)
         # Consumers (#95): the runtime view logs its own dangling/shape warnings.
-        for c in _consumers_view(t.consumers, _classes):
+        for c in _consumers_view(t.consumers, t.classes):
             for w in c["warnings"]:
                 log(f"{t.id}: WARN consumers[{c['id']}]: {w}")
     url = notices.bridge_url()

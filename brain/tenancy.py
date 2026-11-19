@@ -9,8 +9,7 @@ tenant alone. The core fills the state fields (claude_usage_exporter._tenant_fre
 this module knows only the shape, the files and the registry.
 
 The registry is `<creds dir>/tenants.json`, `[{tenant, name, lan, tap}]`: the
-one file outside a tenant's dir besides classes.json, lanes.json, the key and
-the switch key. It holds no secret and is plain JSON whatever the store's mode.
+one file outside a tenant's dir besides lanes.json, the key and the switch key. It holds no secret and is plain JSON whatever the store's mode.
 It holds exactly one `lan` record, the LAN tenant (the household; Apiary's one
 tenant), whose notices reach the owner's bridge: a brain refuses to start
 without the file or with another count of them, and `lan` is set once, by the
@@ -28,8 +27,12 @@ TAPS = ("content", "metadata")
 NAME_MAX = 64
 
 # The files a tenant's dir holds, by the key the core reads them under. The
-# credentials among them are the drivers' (each names its own file).
+# credentials among them are the drivers' (each names its own file). The
+# classes document and its window stamps are plain in every store's mode: they
+# hold no secret, and the operator hand-edits and reloads them (README).
 FILES = {
+    "classes": "classes.json",
+    "windows": "classes.windows.json",
     "state": "switch_state.json",
     "consumers": "consumers.json",
     "money": "money.json",
@@ -97,7 +100,8 @@ class Tenant:
         self.plock = threading.Lock()
         self.poll_health_lock = threading.Lock()
         self.ledger_lock = threading.Lock()
-        self.doc_locks = {"consumers": threading.Lock(), "money": threading.Lock()}
+        self.doc_locks = {"classes": threading.Lock(), "consumers": threading.Lock(),
+                          "money": threading.Lock()}
         self.reports_lock = threading.Lock()
         self.served_lock = threading.Lock()
         self.sizing_lock = threading.Lock()
@@ -241,10 +245,12 @@ class Registry:
         self.log(f"tenants: {'created' if created else 'updated'} {t.id} ({t.name})")
         return t, created
 
-    def delete(self, tid):
+    def delete(self, tid, remove_dir=True):
         """Retire a tenant: out of the registry, its polling stopped and its
-        state dropped (retire), its dir removed whole. -> the tenant, or None.
-        The lan tenant is never deleted (RegistryConflict)."""
+        state dropped (retire), its dir removed whole (unless remove_dir is
+        false: a dir that was on disk before the tenant's PUT is not the PUT's
+        to remove). -> the tenant, or None. The lan tenant is never deleted
+        (RegistryConflict)."""
         with self._lock:
             t = self._tenants.get(tid)
             if t is None:
@@ -257,9 +263,10 @@ class Registry:
             self._save_locked()
         if self.retire is not None:
             self.retire(t)
-        shutil.rmtree(t.dir, ignore_errors=False)
+        if remove_dir:
+            shutil.rmtree(t.dir, ignore_errors=False)
         self._bump()
-        self.log(f"tenants: deleted {t.id} ({t.name}); {t.dir} removed")
+        self.log(f"tenants: deleted {t.id} ({t.name}); {t.dir} {'removed' if remove_dir else 'left'}")
         return t
 
     def _bump(self):

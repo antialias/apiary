@@ -9,7 +9,9 @@
 #     sealed with it; the brain refuses to start on a plain one), 32 random bytes, hex, 0400;
 #   - writes /creds/tenants.json with this machine's one tenant (tenancy.py: a fresh ten_ id, lan,
 #     content tap), whose data the brain keeps under /creds/<tenant>/ and serves at /t/<tenant>/…;
-#   - seeds /creds/classes.json from the brain's classes.example.json, only when absent;
+#   - seeds the tenant's classes document, /creds/<tenant>/classes.json, from the brain's
+#     classes.example.json (plain: it holds no secret, and you edit it by hand); its classes are
+#     marked onboarding, so a member who joins starts with a copy;
 #   - makes /creds/proxy, where the proxy keeps its class state;
 #   - prints the two secrets and the tenant id, this once (the id is not a secret).
 # It overwrites nothing: if either secret is already there it changes nothing and exits 1.
@@ -64,13 +66,8 @@ chmod 0600 "$DIR/tenants.json"
 mkdir "$DIR/$TENANT"
 chmod 0700 "$DIR/$TENANT"
 
-if [ -e "$DIR/classes.json" ] || [ -L "$DIR/classes.json" ]; then
-	classes="kept the classes.json already there"
-else
-	cat "$EXAMPLE" >"$DIR/classes.json"
-	chmod 0600 "$DIR/classes.json"
-	classes="seeded classes.json from the example: claude-fast, claude-capable, claude-frontier"
-fi
+cat "$EXAMPLE" >"$DIR/$TENANT/classes.json"
+chmod 0600 "$DIR/$TENANT/classes.json"
 
 if [ ! -d "$DIR/proxy" ]; then
 	mkdir "$DIR/proxy"
@@ -78,7 +75,7 @@ fi
 chown "$PROXY_UID" "$DIR/proxy"
 chmod 0700 "$DIR/proxy"
 
-say "Apiary is initialised: wrote switch_key, client_secret, the sealing key and tenants.json, $classes."
+say "Apiary is initialised: wrote switch_key, client_secret, the sealing key and tenants.json, and seeded the tenant's classes.json from the example: claude-fast, claude-capable, claude-frontier."
 say ""
 say "These are printed only now. They stay on the data volume (see the README to read them again)."
 say ""

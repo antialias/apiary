@@ -6,10 +6,10 @@
 FROM python:3.12-slim
 RUN pip install --no-cache-dir --root-user-action=ignore cryptography==45.0.4
 # The brain's data lives under /creds (SWITCH_CREDS_DIR): the registry tenants.json, the sealing
-# key, classes.json, and one dir per tenant; mount a volume there.
+# key, and one dir per tenant (its classes.json among its files); mount a volume there.
 WORKDIR /creds
 WORKDIR /app
-COPY claude_usage_exporter.py credstore.py tenancy.py notices.py brain.py classes.example.json ./
+COPY claude_usage_exporter.py credstore.py tenancy.py notices.py brain.py migrate_classes.py classes.example.json ./
 COPY providers/ ./providers/
 # `docker compose exec brain accounts …`: the self-hosted edition's way to add, sign in, list,
 # order and remove accounts (accounts.py), since the brain serves no page.

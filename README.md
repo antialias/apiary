@@ -100,33 +100,51 @@ The Kimi members do nothing until you set a Kimi key (below). Until then each cl
 its Anthropic lanes alone. Named Anthropic ids such as `claude-opus-5-5` also work. They route
 by lane on the same accounts.
 
-The document is `classes.json` on the volume. `init` seeds it from
-`brain/classes.example.json`. To edit it:
+The document is the tenant's `classes.json`, `<tenant>/classes.json` on the volume, plain.
+`init` seeds it from `brain/classes.example.json`. To edit it, with `T` the tenant id `init`
+printed:
 
-    docker compose cp brain:/creds/classes.json .
+    docker compose cp brain:/creds/$T/classes.json .
     # edit classes.json
-    docker compose cp classes.json brain:/creds/classes.json
+    docker compose cp classes.json brain:/creds/$T/classes.json
     curl -X POST -H "X-Switch-Key: $(docker compose exec -T brain cat /creds/switch_key)" \
-      http://127.0.0.1:9115/classes/reload
+      http://127.0.0.1:9115/t/$T/classes/reload
 
 The reload refuses a document that does not parse, and the brain keeps the one it has.
-`POST /classes/validate` with `{"doc": ...}` reports what is wrong with a draft first. Each
+`POST /t/$T/classes/validate` with `{"doc": ...}` reports what is wrong with a draft first. Each
 member declares its `context_window`. A member from another provider also declares its
 `anthropic_token_ratio`: that provider's token count for a body divided by Anthropic's count
 for the same body.
 
+**Upgrading from one classes document.** A brain from before per-tenant classes kept one
+`classes.json` at the top of the volume; this one reads the tenant's own and ignores that file.
+Move it once, with the brain stopped (a class marked `lan_only` becomes one marked
+`onboarding: false`, every other class `onboarding: true`; the command prints what it did):
+
+    docker compose stop brain
+    docker compose run --rm --no-deps --entrypoint python3 brain migrate_classes.py migrate --creds-dir /creds
+    docker compose up -d
+
+The old files stay beside the moved ones, as `<file>.before-tenants`, until you are content
+with the brain on the moved document; then remove them:
+
+    docker compose run --rm --no-deps --entrypoint python3 brain migrate_classes.py finish --creds-dir /creds
+
+Before then, `migrate_classes.py revert --creds-dir /creds` (brain stopped) puts them back as
+they were. While a `classes.json` is still at the top of the volume, the brain warns of it in
+its log and on the classes page.
 ## Where state lives
 
 Everything is on the Compose volume `apiary_data`, mounted at `/creds` in both services:
 
 - `switch_key` and `client_secret`, from `init`
 - `key`, the brain's sealing key, and `tenants.json`, the tenant registry, both from `init`
-- `classes.json`, the one operator document
 - under `<tenant>/`, the tenant's files, each sealed with `key` (AES-256-GCM; the brain
   refuses a plain one, and without the key refuses a sealed one): the accounts,
   `anthropic-api.json` (API keys), `accounts.json` (Claude-plan sign-ins), `openai-codex.json`
   (Codex), `kimi.json` (a Kimi key, from `accounts add kimi`); the brain's documents, `consumers.json`
-  and `money.json`; its routing state, `switch_state.json`; and the ledger, `ledger.jsonl`, plain
+  and `money.json`; its routing state, `switch_state.json`; and, plain, the ledger, `ledger.jsonl`,
+  and the classes document, `classes.json`, with its window stamps, `classes.windows.json`
 - the proxy's class state, under `proxy/`
 
 The sealing key beside the data defends a backup or a copied volume, not the machine itself:
@@ -165,7 +183,7 @@ Once it is enrolled, the Kimi members of the shipped classes come into use.
 
     LOCAL_UPSTREAM=http://host.docker.internal:8080
 
-Add a class for it to `classes.json`. Each member needs `"kind": "provider"`,
+Add a class for it to the tenant's `classes.json`. Each member needs `"kind": "provider"`,
 `"provider": "local"`, the server's `model` id, its `context_window` and
 `"anthropic_token_ratio": 1.0`. Claude Code assumes a 200k window for any `claude-` id it
 doesn't know, so keep a local class's prompts within the window you declared.

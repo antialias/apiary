@@ -35,10 +35,11 @@ LOCAL_PLAN_LABEL = os.environ.get("LOCAL_PLAN_LABEL", "local model server")
 # poll succeeds (the reading's age is the dial check's, as for every account);
 # it has no windows and no money pot to draw.
 
-def _local_declared():
-    """{model: context_window} of every local member the class document declares."""
+def _local_declared(t):
+    """{model: context_window} of every local member tenant t's classes declare (only the
+    LAN tenant polls the local server)."""
     out = {}
-    for c in core._classes:
+    for c in t.classes:
         for m in c.get("members") or []:
             if m.get("kind") == "provider" and m.get("provider") == "local":
                 out[m["model"]] = m.get("context_window")
@@ -131,7 +132,7 @@ def poll_local(t, prev=None, account=None):  # noqa: ARG001 — uniform pool dis
     if not upstream:
         out["err"] = "LOCAL_UPSTREAM is not set"
         return out
-    declared = _local_declared()
+    declared = _local_declared(t)
     try:
         err = _local_check(_local_models(upstream), declared)
     except urllib.error.HTTPError as e:

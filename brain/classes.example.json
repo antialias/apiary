@@ -2,6 +2,7 @@
   {
     "class": "fast",
     "display": "Fast",
+    "onboarding": true,
     "members": [
       {
         "priority": 1,
@@ -33,6 +34,7 @@
   {
     "class": "capable",
     "display": "Capable",
+    "onboarding": true,
     "members": [
       {
         "priority": 1,
@@ -57,6 +59,7 @@
   {
     "class": "frontier",
     "display": "Frontier",
+    "onboarding": true,
     "members": [
       {
         "priority": 1,

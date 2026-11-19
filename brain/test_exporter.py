@@ -80,12 +80,12 @@ with open(os.path.join(_TMP, "tenants.json"), "w") as _f:
 ex.boot()
 T = ex._registry.get(TEST_TENANT)
 TP = f"/t/{T.id}"
-_GLOBAL_ROUTES = ("/classes", "/tenants")
+_GLOBAL_ROUTES = ("/tenants",)
 
 
 def tp(path, tenant=None):
     """A route's path as the proxy must call it: tenant routes under
-    /t/<tenant>/, the operator's (/classes, /tenants) as they are."""
+    /t/<tenant>/, the operator's (/tenants) as it is."""
     if path.startswith(_GLOBAL_ROUTES):
         return path
     return f"/t/{(tenant or T).id}{path}"
@@ -1268,20 +1268,18 @@ class TestPreferredHasNoTargets(HTTPBase):
             self.assertNotIn("kimi", s["effective"])
 
 
-def load_classes(data):
-    """Round-trip class config through the real loader (file + _load_classes)."""
-    path = os.path.join(_TMP, "classes-test.json")
-    with open(path, "w") as f:
+def load_classes(data, t=None):
+    """Round-trip class config through the real loader: written as tenant t's
+    (T's by default) classes.json, read by _load_classes, which installs it as
+    t's (classes, document, warnings, lane settings). -> t.classes."""
+    t = t or T
+    with open(t.classes_file, "w") as f:
         if isinstance(data, str):
             f.write(data)
         else:
             json.dump(data, f)
-    old = ex.CLASSES_FILE
-    ex.CLASSES_FILE = path
-    try:
-        return ex._load_classes()
-    finally:
-        ex.CLASSES_FILE = old
+    ex._load_classes(t)
+    return t.classes
 
 
 def frontier_cfg():
@@ -1330,7 +1328,7 @@ class TestClassGuidance(unittest.TestCase):
             with self.subTest(guidance=guidance):
                 doc = frontier_cfg()
                 doc[0]["guidance"] = guidance
-                errors = ex._validate_classes_doc(doc)
+                errors = ex._validate_classes_doc(T, doc)
                 self.assertTrue(errors)
                 self.assertTrue(any("frontier" in e and "guidance" in e for e in errors))
 
@@ -1339,12 +1337,12 @@ class TestClassGuidance(unittest.TestCase):
             with self.subTest(guidance=guidance):
                 doc = frontier_cfg()
                 doc[0]["guidance"] = guidance
-                self.assertEqual(ex._validate_classes_doc(doc), [])
+                self.assertEqual(ex._validate_classes_doc(T, doc), [])
                 warnings = []
-                out = ex._normalize_classes(doc, warnings)
+                out = ex._normalize_classes(doc, warnings, lan=True)
                 self.assertEqual(out[0]["guidance"], guidance.strip() if guidance else None)
                 self.assertEqual(warnings, [])
-        self.assertIsNone(ex._normalize_classes(frontier_cfg())[0]["guidance"])
+        self.assertIsNone(ex._normalize_classes(frontier_cfg(), lan=True)[0]["guidance"])
 
     def test_tolerant_load_keeps_class_and_warns_for_bad_guidance(self):
         for guidance in self.BAD_GUIDANCE:
@@ -1352,7 +1350,7 @@ class TestClassGuidance(unittest.TestCase):
                 doc = frontier_cfg()
                 doc[0]["guidance"] = guidance
                 warnings = []
-                out = ex._normalize_classes(doc, warnings)
+                out = ex._normalize_classes(doc, warnings, lan=True)
                 self.assertEqual([c["class"] for c in out], ["frontier"])
                 self.assertIsNone(out[0]["guidance"])
                 self.assertEqual(len(out[0]["members"]), 3)
@@ -1364,12 +1362,11 @@ class TestClassConfig(unittest.TestCase):
     """#25 — classes.json loader: per-class drop-don't-crash validation."""
 
     def test_absent_file_means_no_classes(self):
-        old = ex.CLASSES_FILE
-        ex.CLASSES_FILE = os.path.join(_TMP, "no-such-classes.json")
-        try:
-            self.assertEqual(ex._load_classes(), [])
-        finally:
-            ex.CLASSES_FILE = old
+        load_classes(frontier_cfg())
+        os.remove(T.classes_file)
+        ex._load_classes(T)
+        self.assertEqual(T.classes, [])
+        self.assertEqual((T.classes_doc, T.classes_warnings, T.lane_settings), ([], [], {}))
 
     def test_bad_json_and_non_array_load_nothing(self):
         self.assertEqual(load_classes("{not json"), [])
@@ -1494,15 +1491,15 @@ class TestClassConfig(unittest.TestCase):
     def test_sub_200k_member_accepted(self):
         # The local class's shape: members declaring 64k/128k load and validate.
         cfg = [local_class_cfg()]
-        self.assertEqual(ex._validate_classes_doc(cfg), [])
+        self.assertEqual(ex._validate_classes_doc(T, cfg), [])
         out = load_classes(cfg)
         self.assertEqual(out[0]["context_window"], 65536)
         self.assertEqual(out[0]["floor_member"], "local/local-gemma4-12b")
 
     def test_window_change_history_stamped_and_persisted(self):
-        # load_classes swaps CLASSES_FILE to one shared tmp path, so the .windows
-        # sidecar accumulates across tests — start this one from a clean slate.
-        state = os.path.join(_TMP, "classes-test.json.windows")
+        # load_classes writes T's classes.json, so its windows file accumulates
+        # across tests — start this one from a clean slate.
+        state = T.windows_file
         if os.path.exists(state):
             os.remove(state)
         self.addCleanup(lambda: os.path.exists(state) and os.remove(state))
@@ -1600,14 +1597,14 @@ class TestPreferredClassesPayload(HTTPBase):
     view. The frozen legacy shape and the #24 `targets` key must be untouched."""
 
     def setUp(self):
-        ex._classes = load_classes(frontier_cfg())
+        T.classes = load_classes(frontier_cfg())
         reset(acct(ACCT_A, 41, caps={"Opus": 55}),
               acct(ACCT_B, 30, caps={"Opus": 20}),
               kimi_result(five_hour=8.0, weekly=2.0))
         ex.compute_preferred(T)
 
     def tearDown(self):
-        ex._classes = []
+        T.classes = []
 
     def test_classes_shape_and_derived_window(self):
         _, p = self.get("/preferred")
@@ -1663,7 +1660,7 @@ class TestPreferredClassesPayload(HTTPBase):
         self.assertEqual(m["targets"], {"kimi": None})
 
     def test_no_classes_serves_empty_object(self):
-        ex._classes = []
+        T.classes = []
         _, p = self.get("/preferred")
         self.assertEqual(p["classes"], {})
 
@@ -1695,12 +1692,12 @@ def class_verdicts(idx=0):
         snap = list(T.state.values())
     with T.plock:
         ctx = ex._policy_ctx(T, snap, time.time())
-        return ex._class_verdicts(T, ex._classes[idx], ctx)
+        return ex._class_verdicts(T, T.classes[idx], ctx)
 
 
 def classes_reset(*results, cfg=None):
     """Install a class config + snapshots, clear class-session state, seed lanes."""
-    ex._classes = load_classes(cfg if cfg is not None else frontier_cfg())
+    T.classes = load_classes(cfg if cfg is not None else frontier_cfg())
     reset(*results)
     with T.plock:
         T.preferred["classes"] = {}
@@ -1716,17 +1713,19 @@ def boot_brain(entry, classes_doc, windows=None):
     d = tempfile.mkdtemp(prefix="brain-boot-")
     try:
         files = {k: os.path.join(d, v) for k, v in (
-            ("SWITCH_CREDS_DIR", ""), ("SWITCH_CLASSES_FILE", "classes.json"),
-            ("SWITCH_LANES_FILE", "lanes.json"), ("SWITCH_KEY_FILE", "switch_key"),
-            ("SWITCH_HARNESS_KEY_FILE", "harness_key"))}
+            ("SWITCH_CREDS_DIR", ""), ("SWITCH_LANES_FILE", "lanes.json"),
+            ("SWITCH_KEY_FILE", "switch_key"), ("SWITCH_HARNESS_KEY_FILE", "harness_key"))}
         files["SWITCH_CREDS_DIR"] = d
         with open(os.path.join(d, "tenants.json"), "w") as f:
             json.dump([{"tenant": TEST_TENANT, "name": "household", "lan": True,
                         "tap": "content"}], f)
-        with open(files["SWITCH_CLASSES_FILE"], "w") as f:
+        os.makedirs(os.path.join(d, TEST_TENANT))
+        classes_path = os.path.join(d, TEST_TENANT, "classes.json")
+        windows_path = os.path.join(d, TEST_TENANT, "classes.windows.json")
+        with open(classes_path, "w") as f:
             json.dump(classes_doc, f)
         if windows is not None:
-            with open(files["SWITCH_CLASSES_FILE"] + ".windows", "w") as f:
+            with open(windows_path, "w") as f:
                 json.dump(windows, f)
         with open(files["SWITCH_KEY_FILE"], "w") as f:
             f.write("boot-key")
@@ -1756,7 +1755,7 @@ def boot_brain(entry, classes_doc, windows=None):
         with open(log_path) as f:
             log_text = f.read()
         try:
-            with open(files["SWITCH_CLASSES_FILE"] + ".windows") as f:
+            with open(windows_path) as f:
                 windows_after = json.load(f)
         except FileNotFoundError:
             windows_after = None
@@ -2074,8 +2073,8 @@ class PayBase(unittest.TestCase):
     """Restores every global the owner settings touch."""
 
     def tearDown(self):
-        ex._classes = []
-        ex._lane_settings = {}
+        T.classes = []
+        T.lane_settings = {}
         install_money({})
         with T.poll_health_lock:
             T.poll_schedule.clear()
@@ -2133,18 +2132,18 @@ class TestTolerantLoadOfRetiredKeys(PayBase):
         self.assertEqual(gpt["pay"], [])
         self.assertNotIn("spend_credits", gpt)
         self.assertTrue(any("spend_credits is retired" in w and "pays nothing" in w
-                            for w in ex._classes_warnings), ex._classes_warnings)
+                            for w in T.classes_warnings), T.classes_warnings)
 
     def test_budget_keys_are_ignored_with_a_warning(self):
         out = load_classes(pay_cfg(lanes={"opus": {"pay": [], "budget": 5}}))
         self.assertEqual(len(out), 1)
-        self.assertTrue(any("budget ignored" in w for w in ex._classes_warnings))
+        self.assertTrue(any("budget ignored" in w for w in T.classes_warnings))
 
     def test_a_bad_lane_entry_is_dropped_and_the_rest_load(self):
         out = load_classes(pay_cfg(lanes={"nope": {"pay": []}, "opus": {"pay": [POT_A]}}))
         self.assertEqual(len(out), 1)
-        self.assertEqual(ex._lane_settings, {"opus": {"pay": [POT_A], "stop_at": None}})
-        self.assertTrue(any("lanes['nope']" in w for w in ex._classes_warnings))
+        self.assertEqual(T.lane_settings, {"opus": {"pay": [POT_A], "stop_at": None}})
+        self.assertTrue(any("lanes['nope']" in w for w in T.classes_warnings))
 
     def test_a_bad_pay_shape_drops_the_class(self):
         cfg = pay_cfg(gpt="gpt/credits")
@@ -3748,8 +3747,8 @@ class TestLocalPoller(unittest.TestCase):
 
     def setUp(self):
         self.addCleanup(setattr, plocal, "LOCAL_UPSTREAM", plocal.LOCAL_UPSTREAM)
-        self.addCleanup(setattr, ex, "_classes", ex._classes)
-        ex._classes = load_classes([local_class_cfg()])
+        self.addCleanup(setattr, T, "classes", T.classes)
+        T.classes = load_classes([local_class_cfg()])
 
     def serve(self, held):
         o = FakeLlamaRouter(held)
@@ -3766,6 +3765,8 @@ class TestLocalPoller(unittest.TestCase):
         self.assertIn("local", ex._provider_poll_targets(T))
         self.assertFalse(ex.PROVIDERS["local"]["enabled"](member))
         self.assertNotIn("local", ex._provider_poll_targets(member))
+        load_classes([local_class_cfg()], member)  # the member's own document names the class too
+        self.assertEqual([c["class"] for c in member.classes], ["local"])
         code, body = ex._bind_class_session(member, "local", "s-member", time.time())
         self.assertEqual(code, 503, body)
 
@@ -3826,7 +3827,7 @@ class TestLocalPoller(unittest.TestCase):
         self.assertEqual(r["err"], "local-gpt-oss-20b is declared but llama-server does not hold it")
 
     def test_no_class_declared_polls_models_only(self):
-        ex._classes = []
+        T.classes = []
         self.serve({})
         self.assertEqual(plocal.poll_local(T)["ok"], 1)
 
@@ -4599,7 +4600,7 @@ def class_pointer(idx=0):
         snap = list(T.state.values())
     with T.plock:
         ctx = ex._policy_ctx(T, snap, time.time())
-        cls = ex._classes[idx]
+        cls = T.classes[idx]
         return ex._class_pointer(cls, ex._class_verdicts(T, cls, ctx), ctx["money"]["pay_order"])
 
 
@@ -4637,7 +4638,7 @@ class ClassPolicyBase(unittest.TestCase):
                       kimi_result(five_hour=12.0, weekly=2.0))
 
     def tearDown(self):
-        ex._classes = []
+        T.classes = []
 
 
 class TestClassPointer(ClassPolicyBase):
@@ -4700,49 +4701,6 @@ class TestClassPointer(ClassPolicyBase):
             T.state["gpt"] = provider_result("gpt", good_age=ex.STALE_MAX + 100)
         # opus is the only known member -> last resort binds it even at 85
         self.assertEqual(self.pointer(), "lane:opus")
-
-
-class TestClassLanOnly(unittest.TestCase):
-    """A class marked lan_only is the LAN tenant's alone: a member tenant's
-    /preferred omits it and its bind is the unknown-class answer."""
-
-    def setUp(self):
-        cfg = frontier_cfg()
-        cfg[0]["lan_only"] = True
-        shared = frontier_cfg()[0]
-        shared["class"] = "shared"
-        self.cfg = cfg + [shared]
-        classes_reset(opus_acct(30, resets=True),
-                      provider_result("gpt", five_hour=8.0),
-                      kimi_result(five_hour=12.0, weekly=2.0), cfg=self.cfg)
-        self.addCleanup(setattr, ex, "_classes", [])
-        self.member = new_tenant("lan-only member")
-        self.addCleanup(ex._registry.delete, self.member.id)
-
-    def test_validation_keeps_a_boolean_and_refuses_anything_else(self):
-        self.assertEqual(ex._validate_classes_doc(self.cfg), [])
-        self.assertEqual([c["lan_only"] for c in ex._classes], [True, False])
-        bad = frontier_cfg()
-        bad[0]["lan_only"] = "yes"
-        errs = ex._validate_classes_doc(bad)
-        self.assertTrue(any("lan_only must be a boolean" in e for e in errs), errs)
-
-    def test_a_member_does_not_see_it_and_the_household_does(self):
-        self.assertTrue(T.lan)
-        mine = ex._preferred_payload(T)["classes"]
-        self.assertEqual(set(mine), {"frontier", "shared"})
-        self.assertIs(mine["frontier"]["lan_only"], True)
-        self.assertIs(mine["shared"]["lan_only"], False)
-        theirs = ex._preferred_payload(self.member)["classes"]
-        self.assertEqual(set(theirs), {"shared"})
-
-    def test_a_members_bind_is_refused_as_unknown_and_the_households_binds(self):
-        code, body = ex._bind_class_session(self.member, "frontier", "s-m", time.time())
-        self.assertEqual(code, 404, body)
-        self.assertEqual(body["classes"], ["shared"])
-        self.assertEqual(ex._bind_class_session(self.member, "nope", "s-m", time.time())[0], 404)
-        code, body = ex._bind_class_session(T, "frontier", "s-h", time.time())
-        self.assertEqual(code, 200, body)
 
 
 class TestClassBind(ClassPolicyBase):
@@ -5142,7 +5100,7 @@ class TestClassEndpointsHTTP(HTTPBase):
                       kimi_result())
 
     def tearDown(self):
-        ex._classes = []
+        T.classes = []
 
     def test_bind_requires_key(self):
         code, _ = self.get("/class-bind?class=frontier&session=s1")
@@ -5205,7 +5163,7 @@ class TestCeilingHTTPContract(HTTPBase):
                       cfg=frontier_cfg_ceilings(gpt=5))
 
     def tearDown(self):
-        ex._classes = []
+        T.classes = []
 
     def test_preferred_publishes_ceiling_and_reserved(self):
         _, p = self.get("/preferred")
@@ -5936,13 +5894,13 @@ class TestGptMemberUsableIntegration(HTTPBase):
     no_target to usable (fixture priorities are local to frontier_cfg)."""
 
     def setUp(self):
-        ex._classes = load_classes(frontier_cfg())
+        T.classes = load_classes(frontier_cfg())
         reset(acct(ACCT_A, 41, caps={"Opus": 55}), acct(ACCT_B, 30, caps={"Opus": 20}),
               kimi_result(five_hour=8.0, weekly=2.0), gpt_result(weekly=12.0))
         ex.compute_preferred(T)
 
     def tearDown(self):
-        ex._classes = []
+        T.classes = []
 
     def test_polled_gpt_member_becomes_usable(self):
         _, p = self.get("/preferred")
@@ -6118,12 +6076,12 @@ class TestProviderPoolPolicy(unittest.TestCase):
         self.assertEqual(self.pool_state("kimi")["account"], "kimi")
 
     def test_member_backing_follows_pool_incumbent(self):
-        ex._classes = load_classes(frontier_cfg())
-        self.addCleanup(setattr, ex, "_classes", [])
+        T.classes = load_classes(frontier_cfg())
+        self.addCleanup(setattr, T, "classes", [])
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30),
               gpt_result(weekly=10.0, name="gpt-a"), gpt_result(weekly=60.0, name="gpt-b"))
         ex.compute_preferred(T)
-        member = next(m for m in ex._classes[0]["members"] if m.get("provider") == "gpt")
+        member = next(m for m in T.classes[0]["members"] if m.get("provider") == "gpt")
         with T.lock:
             snap = list(T.state.values())
         with T.plock:
@@ -6197,8 +6155,8 @@ class TestPoolPayloadAndMetrics(HTTPBase):
     dedupes the legacy provider_* series and adds provider_account_*."""
 
     def setUp(self):
-        ex._classes = load_classes(frontier_cfg())
-        self.addCleanup(setattr, ex, "_classes", [])
+        T.classes = load_classes(frontier_cfg())
+        self.addCleanup(setattr, T, "classes", [])
         reset(acct(ACCT_A, 41), acct(ACCT_B, 30), kimi_result(),
               gpt_result(weekly=10.0, name="gpt-a"), gpt_result(weekly=60.0, name="gpt-b"))
         ex.compute_preferred(T)
@@ -7103,9 +7061,10 @@ def consumers_doc():
 
 
 class DocAPIBase(HTTPBase):
-    """Real files on disk + live HTTP: CLASSES_FILE/CONSUMERS_FILE point at
-    per-test paths, the module loaders install them, tearDown restores every
-    global the doc layer owns so test-class ordering can never leak state."""
+    """Real files on disk + live HTTP: the test tenant's classes and consumers
+    files, cleared per test, the loaders install them, and tearDown restores
+    every field the doc layer owns so test-class ordering can never leak
+    state."""
 
     def req(self, method, path, body=None, key=KEY, headers=None, raw=None):
         data = raw if raw is not None else (
@@ -7128,7 +7087,7 @@ class DocAPIBase(HTTPBase):
     def install_classes(self, cfg):
         with open(self.classes_path, "w") as f:
             json.dump(cfg, f)
-        ex._classes = ex._load_classes()
+        ex._load_classes(T)
 
     def install_consumers(self, doc):
         with open(T.consumers_file, "w") as f:
@@ -7136,12 +7095,10 @@ class DocAPIBase(HTTPBase):
         T.consumers = ex._load_consumers(T)
 
     def setUp(self):
-        self.classes_path = os.path.join(_TMP, f"classes-{self.__class__.__name__}.json")
-        self._old_classes_file = ex.CLASSES_FILE
-        ex.CLASSES_FILE = self.classes_path
-        for suffix in ("", ".windows", ".history.jsonl"):
+        self.classes_path = T.classes_file
+        for path in (T.classes_file, T.windows_file, T.classes_file + ".history.jsonl"):
             try:
-                os.remove(self.classes_path + suffix)
+                os.remove(path)
             except FileNotFoundError:
                 pass
         for suffix in ("", ".history.jsonl"):
@@ -7159,20 +7116,333 @@ class DocAPIBase(HTTPBase):
         ex.compute_preferred(T)
 
     def tearDown(self):
-        ex.CLASSES_FILE = self._old_classes_file
         with T.plock:
-            ex._classes = []
-            ex._classes_doc = []
-            ex._classes_warnings = []
+            T.classes = []
+            T.classes_doc = []
+            T.classes_warnings = []
             T.consumers = []
             T.consumers_doc = {"consumers": []}
             T.consumers_warnings = []
-            ex._lane_settings = {}
+            T.lane_settings = {}
             T.preferred["classes"] = {}
         try:
             os.remove(T.consumers_file)
         except FileNotFoundError:
             pass
+
+
+class TestClassesPerTenant(DocAPIBase):
+    """CLASSES-PLAN §1 tests 1-6, 8, 9: two tenants, A the LAN one (T) and B a
+    member made through PUT /tenants, each with its own classes document."""
+
+    SECRET_SESSION = "sess-a-private"
+    SECRET_CONSUMER = "a-private-laptop"
+
+    def a_doc(self):
+        """A's document: frontier (offered, an exact money pay on opus and
+        gpt, an allowance-like exact pot on kimi, a calibration note), local
+        (offered, but a provider no member can connect), and beta (not
+        offered, on the sonnet lane), with a lanes map paying an exact pot."""
+        frontier = pay_cfg(opus=[POT_A], gpt=["gpt/credits"], kimi=["kimi/*", "kimi/allowance"])[0]
+        frontier["onboarding"] = True
+        gpt = next(m for m in frontier["members"] if m.get("provider") == "gpt")
+        gpt["calibration_ref"] = "the operator's note"
+        gpt["calibrated_at"] = "2026-11-01"
+        local = local_class_cfg()
+        local["onboarding"] = True
+        beta = dict(sonnet_class(), onboarding=False)
+        return {"classes": [frontier, local, beta], "lanes": {"opus": {"pay": [POT_A]}}}
+
+    def raw(self, method, path, body=None, headers=None):
+        data = json.dumps(body).encode() if body is not None else None
+        r = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", data=data, method=method)
+        r.add_header("X-Switch-Key", KEY)
+        if data is not None:
+            r.add_header("Content-Type", "application/json")
+        for k, v in (headers or {}).items():
+            r.add_header(k, v)
+        try:
+            with urllib.request.urlopen(r, timeout=5) as resp:
+                text = resp.read().decode()
+                return resp.status, json.loads(text), text
+        except urllib.error.HTTPError as e:
+            text = e.read().decode()
+            return e.code, (json.loads(text) if text else None), text
+
+    def setUp(self):
+        super().setUp()
+        load_classes(self.a_doc())
+        self.assertEqual([c["class"] for c in T.classes], ["frontier", "local", "beta"], T.classes_warnings)
+        tid = tenancy.new_tenant_id()
+        code, body, _ = self.raw("PUT", f"/tenants/{tid}", {"name": "member b", "lan": False, "tap": "metadata"})
+        self.assertEqual(code, 200, body)
+        self.B = ex._registry.get(tid)
+        self.addCleanup(ex._registry.delete, tid)
+        self.BP = f"/t/{tid}"
+
+    def b_put(self, doc, reason="b edit"):
+        return self.raw("PUT", f"{self.BP}/classes", {"doc": doc, "reason": reason},
+                        {"If-Match": ex._doc_revision(self.B.classes_doc)})
+
+    # (3) the join
+    def test_the_join_writes_the_starter_of_the_offered_classes(self):
+        with open(self.B.classes_file) as f:
+            doc = json.load(f)
+        self.assertEqual([c["class"] for c in doc["classes"]], ["frontier"],
+                         "beta is not offered; local's only rungs are not connectable, so it emptied")
+        rungs = {m.get("lane") or m["provider"]: m for m in doc["classes"][0]["members"]}
+        self.assertEqual(rungs["opus"]["pay"], ["anthropic/*"], "a money pot becomes the provider's")
+        self.assertEqual(rungs["gpt"]["pay"], ["gpt/*"])
+        self.assertEqual(rungs["kimi"]["pay"], ["kimi/*"], "an allowance-like exact pot is dropped")
+        self.assertNotIn("calibration_ref", rungs["gpt"])
+        self.assertEqual(rungs["gpt"]["calibrated_at"], "2026-11-01")
+        self.assertNotIn("onboarding", doc["classes"][0])
+        self.assertEqual(doc["lanes"], {"opus": {"pay": ["anthropic/*"]}})
+        self.assertEqual([c["class"] for c in self.B.classes], ["frontier"], "installed live")
+        code, body, _ = self.raw("GET", f"{self.BP}/classes/starter")
+        self.assertEqual(code, 200)
+        self.assertEqual(body["doc"], doc, "the starter route is the join's")
+        self.assertIn({"class": "frontier", "member": "kimi/kimi-k3", "why": "exact_pay"}, body["dropped"],
+                      "a member's reply names no pot of the operator's")
+        code, mine, _ = self.raw("GET", f"{TP}/classes/starter")
+        self.assertEqual(mine["doc"], doc)
+        whys = mine["dropped"]
+        self.assertIn({"class": "frontier", "member": "kimi/kimi-k3", "pay": "kimi/allowance", "why": "exact_pay"},
+                      whys)
+        self.assertEqual([{k: v for k, v in d.items() if k != "pay"} for d in whys], body["dropped"])
+        for m in local_class_cfg()["members"]:
+            self.assertIn({"class": "local", "member": f"local/{m['model']}", "why": "not_connectable"}, whys)
+        self.assertIn({"class": "local", "why": "empty"}, whys)
+        self.assertFalse(any(d.get("class") == "beta" for d in whys), "a class not offered is not a loss")
+        with open(self.B.classes_file + ".history.jsonl") as f:
+            entries = [json.loads(line) for line in f]
+        self.assertEqual([(e["actor"], e["rev"]) for e in entries], [("join", ex._doc_revision(doc))])
+
+    def test_a_tenant_made_again_keeps_its_document(self):
+        before = ex._doc_revision(self.B.classes_doc)
+        code, _, _ = self.raw("PUT", f"/tenants/{self.B.id}", {"name": "renamed", "lan": False, "tap": "metadata"})
+        self.assertEqual(code, 200)
+        self.assertEqual(ex._doc_revision(self.B.classes_doc), before)
+
+    # (1) isolation of a PUT
+    def test_a_put_moves_its_tenant_only(self):
+        self.assertEqual(ex._bind_class_session(T, "frontier", "s-a", time.time())[0], 200)
+        with self.B.plock:  # B's own session on its own frontier (B has no account to bind it live)
+            self.B.preferred["classes"]["frontier"]["sessions"]["s-b"] = {"member": "lane:opus", "at": 1.0}
+        b_rev = ex._doc_revision(self.B.classes_doc)
+        with self.B.plock:
+            b_state = copy.deepcopy(self.B.preferred["classes"])
+        code, body, _ = self.req("PUT", "/classes", body={"doc": [sonnet_class()], "reason": "a edit"},
+                                 headers={"If-Match": ex._doc_revision(T.classes_doc)})
+        self.assertEqual(code, 200, body)
+        with T.plock:
+            self.assertEqual(set(T.preferred["classes"]), {"beta"}, "A's frontier and its sessions gone")
+        with self.B.plock:
+            self.assertEqual(self.B.preferred["classes"], b_state, "B's pointer and sessions untouched")
+        self.assertEqual(ex._doc_revision(self.B.classes_doc), b_rev)
+        with open(self.B.classes_file) as f:
+            self.assertEqual(ex._doc_revision(json.load(f)), b_rev)
+
+    # (2) nothing of A in B's replies
+    def test_bs_replies_carry_nothing_of_as(self):
+        self.install_consumers({"consumers": [{"id": self.SECRET_CONSUMER, "display": "A laptop",
+                                               "request_shape": "claude-code", "members": ["class:frontier"]}]})
+        self.assertEqual(ex._bind_class_session(T, "frontier", self.SECRET_SESSION, time.time())[0], 200)
+        with T.plock:
+            T.preferred["classes"]["frontier"]["pinned"] = "kimi/kimi-k3"
+        doc = copy.deepcopy(self.B.classes_doc)
+        texts = [self.raw("POST", f"{self.BP}/classes/validate", {"doc": doc})[2],
+                 self.b_put(doc)[2],
+                 self.raw("GET", f"{self.BP}/preferred")[2],
+                 self.raw("GET", f"{self.BP}/classes")[2],
+                 self.raw("GET", f"{self.BP}/classes/catalog")[2],
+                 self.raw("GET", f"{self.BP}/classes/starter")[2]]
+        for text in texts:
+            for secret in (self.SECRET_SESSION, self.SECRET_CONSUMER, ACCT_A, POT_A, "kimi/allowance",
+                           "the operator's note"):
+                self.assertNotIn(secret, text)
+        self.assertIsNone(json.loads(texts[2])["classes"]["frontier"]["pinned"], "A's pin is A's")
+
+    # (4) the refusals
+    def test_onboarding_is_the_lan_tenants_and_old_keys_and_digit_ids_are_refused(self):
+        offered = frontier_cfg()
+        offered[0]["onboarding"] = True
+        code, body, _ = self.b_put(offered)
+        self.assertEqual(code, 422, body)
+        self.assertTrue(any("onboarding" in e for e in body["errors"]), body)
+        old = frontier_cfg()
+        old[0]["lan_" + "only"] = True  # the retired key, spelled so no grep finds it alive
+        digits = frontier_cfg()
+        digits[0]["class"] = "k2"
+        # The retired key has its own reason, so an operator reverting to a revision from before the
+        # migration is told why, and what it became.
+        for doc, needle in ((old, "is retired: each tenant has its own classes"), (old, "is onboarding: false"),
+                            (digits, "class")):
+            for put in (self.b_put, lambda d: self.raw(
+                    "PUT", f"{TP}/classes", {"doc": d, "reason": "a edit"},
+                    {"If-Match": ex._doc_revision(T.classes_doc)})):
+                with self.subTest(needle=needle, put=put):
+                    code, body, _ = put(doc)
+                    self.assertEqual(code, 422, body)
+                    self.assertTrue(any(needle in e for e in body["errors"]), body)
+        self.assertEqual(self.req("PUT", "/classes", body={"doc": offered, "reason": "a edit"},
+                                  headers={"If-Match": ex._doc_revision(T.classes_doc)})[0], 200,
+                         "the LAN tenant offers a class")
+
+    def test_a_starter_copies_only_known_keys_and_puts_back_clean(self):
+        doc = self.a_doc()
+        doc["classes"][0]["colour"] = "teal"  # a key a load only warns of
+        doc["classes"][0]["members"][0]["note"] = "x"
+        doc["lanes"]["opus"]["colour"] = "teal"
+        load_classes(doc)
+        self.assertTrue(any("colour" in w for w in T.classes_warnings), T.classes_warnings)
+        code, body, _ = self.raw("GET", f"{self.BP}/classes/starter")
+        self.assertEqual(code, 200, body)
+        text = json.dumps(body["doc"])
+        for key in ("colour", "note", "onboarding", "calibration_ref"):
+            self.assertNotIn(f'"{key}"', text)
+        code, body, _ = self.b_put(body["doc"], reason="the starter, put back")
+        self.assertEqual(code, 200, body)
+        self.assertEqual(body.get("warnings"), [], body)
+
+    def test_the_example_classes_are_offered_and_their_starter_puts_clean(self):
+        with open(os.path.join(BRAIN, "classes.example.json")) as f:
+            example = json.load(f)
+        rows = example if isinstance(example, list) else example["classes"]
+        self.assertTrue(all(c.get("onboarding") is True for c in rows), "a self-hosted hive offers them all")
+        reset(acct(ACCT_A, 10), gpt_result(), kimi_result())
+        load_classes(example)
+        code, body, _ = self.raw("GET", f"{self.BP}/classes/starter")
+        self.assertEqual(code, 200, body)
+        self.assertTrue(body["doc"]["classes"], body)
+        self.assertEqual(ex._validate_classes_doc(self.B, body["doc"]), [])
+
+    def test_a_join_that_fails_leaves_no_tenant_and_a_second_put_joins(self):
+        tid = tenancy.new_tenant_id()
+        rec = {"name": "member c", "lan": False, "tap": "metadata"}
+        real = ex._doc_write
+
+        def broken(t, kind, doc):
+            if t.id == tid:
+                raise OSError("disk full")
+            return real(t, kind, doc)
+        with mock.patch.object(ex, "_doc_write", broken):
+            code, body, _ = self.raw("PUT", f"/tenants/{tid}", rec)
+        self.assertEqual(code, 500, body)
+        self.assertIn("PUT it again", body["error"])
+        self.assertIsNone(ex._registry.get(tid), "no tenant registered and never booted")
+        self.assertNotIn(tid, [r["tenant"] for r in ex._registry.payload()])
+        self.assertFalse(os.path.exists(os.path.join(ex.CREDS_DIR, tid)))
+        code, body, _ = self.raw("PUT", f"/tenants/{tid}", rec)
+        self.assertEqual((code, body.get("created")), (200, True), body)
+        c = ex._registry.get(tid)
+        self.addCleanup(ex._registry.delete, tid)
+        self.assertEqual([k["class"] for k in c.classes], ["frontier"], "the retried PUT completes the join")
+        self.assertTrue(os.path.exists(c.classes_file))
+
+    def test_a_failed_join_over_a_dir_already_on_disk_leaves_its_files(self):
+        tid = tenancy.new_tenant_id()
+        tdir = os.path.join(ex._registry.dir, tid)
+        os.makedirs(tdir)
+        self.addCleanup(shutil.rmtree, tdir, True)
+        with open(os.path.join(tdir, "kept.json"), "w") as f:
+            f.write("sealed bytes stand-in")
+        real = ex._doc_write
+
+        def broken(t, kind, doc):
+            if t.id == tid:
+                with open(os.path.join(tdir, "half-written.json"), "w") as f:
+                    f.write("x")
+                raise OSError("disk full")
+            return real(t, kind, doc)
+        with mock.patch.object(ex, "_doc_write", broken):
+            code, body, _ = self.raw("PUT", f"/tenants/{tid}", {"name": "member d", "lan": False, "tap": "metadata"})
+        self.assertEqual(code, 500, body)
+        self.assertIsNone(ex._registry.get(tid))
+        self.assertEqual(sorted(os.listdir(tdir)), ["kept.json"], "only what the PUT wrote is removed")
+
+    def test_a_failed_cleanup_still_answers_json(self):
+        tid = tenancy.new_tenant_id()
+        with mock.patch.object(ex, "_join_classes", side_effect=OSError("disk full")), \
+                mock.patch.object(ex._registry, "delete", side_effect=OSError("busy")):
+            code, body, _ = self.raw("PUT", f"/tenants/{tid}", {"name": "member e", "lan": False, "tap": "metadata"})
+        self.addCleanup(ex._registry.delete, tid)
+        self.assertEqual(code, 500, body)
+        self.assertIn("busy", body["cleanup"])
+
+    def test_a_member_binds_only_its_own_classes(self):
+        self.assertIn("beta", {c["class"] for c in T.classes}, "the LAN tenant's class")
+        code, body, _ = self.raw("GET", f"{self.BP}/class-bind?class=beta&session=s-b")
+        self.assertEqual(code, 404, body)
+
+    def test_a_leftover_root_document_is_warned_of(self):
+        root = os.path.join(ex.CREDS_DIR, "classes.json")
+        with open(root, "w") as f:
+            f.write("[]")
+        self.addCleanup(os.remove, root)
+        load_classes(self.a_doc())
+        warned = [w for w in T.classes_warnings if root in w]
+        self.assertEqual(len(warned), 1, T.classes_warnings)
+        self.assertIn("migrate_classes.py migrate", warned[0])
+        load_classes(self.a_doc(), self.B)
+        self.assertFalse(any(root in w for w in self.B.classes_warnings), "the operator's to fix")
+        code, body, _ = self.raw("GET", f"{TP}/classes")
+        self.assertTrue(any(root in w for w in body["warnings"]), body)
+
+    def test_a_members_hand_edited_onboarding_is_ignored_with_a_warning(self):
+        offered = frontier_cfg()
+        offered[0]["onboarding"] = True
+        load_classes(offered, self.B)
+        self.assertEqual([c["class"] for c in self.B.classes], ["frontier"])
+        self.assertTrue(any("onboarding" in w for w in self.B.classes_warnings), self.B.classes_warnings)
+
+    # (5) the catalogue
+    def test_the_catalogue(self):
+        code, cat, _ = self.raw("GET", f"{self.BP}/classes/catalog")
+        self.assertEqual(code, 200, cat)
+        self.assertEqual(cat["lanes"], {"opus": {"model": "claude-opus-4-8", "context_window": 200000},
+                                        "sonnet": {"model": "claude-sonnet-4-5", "context_window": 200000}},
+                         "each lane a rung of A's rides, and no other")
+        self.assertEqual(set(cat["models"]), {"gpt/gpt-5.6", "kimi/kimi-k3"}, "nothing of local")
+        self.assertEqual(cat["models"]["gpt/gpt-5.6"],
+                         {"context_window": 400000, "anthropic_token_ratio": 0.6, "calibrated_at": "2026-11-01",
+                          "modality": ex._model_modality("gpt", "gpt-5.6")})
+        self.assertIsNone(cat["models"]["kimi/kimi-k3"]["calibrated_at"])
+        self.assertEqual(self.raw("GET", f"{TP}/classes/catalog")[1], cat, "the same for every tenant")
+
+    def test_the_catalogue_takes_the_first_rung_in_document_order(self):
+        doc = self.a_doc()
+        extra = {"class": "second", "members": [
+            {"priority": 2, "kind": "anthropic", "lane": "fable", "model": "claude-fable-a", "context_window": 1000},
+            {"priority": 1, "kind": "anthropic", "lane": "opus", "model": "claude-opus-later",
+             "context_window": 1000}]}
+        doc["classes"].insert(0, extra)
+        load_classes(doc)
+        cat = ex._catalog()
+        self.assertEqual(cat["lanes"]["opus"]["model"], "claude-opus-later", "the first class in the document")
+        self.assertEqual(list(cat["lanes"])[:2], ["fable", "opus"], "its rungs in the document's order")
+
+    # (6) the root routes are gone
+    def test_the_root_classes_routes_are_404(self):
+        for method, path in (("GET", "/classes"), ("GET", "/classes/history"), ("GET", "/classes/catalog"),
+                             ("GET", "/classes/starter"), ("PUT", "/classes"), ("POST", "/classes/validate"),
+                             ("POST", "/classes/reload")):
+            with self.subTest(path=path, method=method):
+                body = {"doc": [], "reason": "x"} if method != "GET" else None
+                self.assertEqual(self.raw(method, path, body)[0], 404)
+
+    # (8) no module globals
+    def test_the_module_holds_no_classes(self):
+        for name in ("_classes", "_classes_doc", "_classes_warnings", "_lane_settings", "CLASSES_FILE",
+                     "DEFAULT_CLASSES", "_tenant_classes"):
+            self.assertFalse(hasattr(ex, name), name)
+
+    # (9) /preferred carries the class, never the retired visibility key
+    def test_preferred_classes_carry_no_visibility_key(self):
+        for t in (T, self.B):
+            for row in ex._preferred_payload(t)["classes"].values():
+                self.assertNotIn("lan_" + "only", row)
+                self.assertNotIn("onboarding", row)
 
 
 class TestClassesDocGet(DocAPIBase):
@@ -7185,7 +7455,7 @@ class TestClassesDocGet(DocAPIBase):
         self.assertEqual(code, 200)
         self.assertEqual(p["doc"], cfg, "GET preserves guidance in the raw document")
         self.assertNotEqual(p["revision"], before["revision"])
-        self.assertEqual(ex._classes[0]["guidance"], "Main tier. Settled work.")
+        self.assertEqual(T.classes[0]["guidance"], "Main tier. Settled work.")
         cfg[0]["guidance"] = "Different purpose."
         self.install_classes(cfg)
         _, changed, _ = self.req("GET", "/classes")
@@ -7209,7 +7479,7 @@ class TestClassesDocGet(DocAPIBase):
         self.install_classes(cfg)
         _, p, _ = self.req("GET", "/classes")
         self.assertEqual(p["doc"], cfg)
-        self.assertIsNone(ex._classes[0]["guidance"])
+        self.assertIsNone(T.classes[0]["guidance"])
         self.assertTrue(any("frontier" in w and "guidance" in w for w in p["warnings"]))
 
     def test_requires_key(self):
@@ -7317,7 +7587,7 @@ class TestClassesValidate(DocAPIBase):
         eff = p["live_effect"]
         self.assertEqual(eff["deleted_classes"], ["frontier"])
         self.assertEqual(eff["new_classes"], ["beta"])
-        self.assertIn({"tenant": T.id, "class": "frontier", "member": "kimi/kimi-k3"}, eff["invalidated_pins"])
+        self.assertIn({"class": "frontier", "member": "kimi/kimi-k3"}, eff["invalidated_pins"])
         self.assertTrue(any(b["session"] == "sess-le" for b in eff["invalidated_bindings"]))
         # window change: raising opus's declared window moves the derived min to kimi's
         wider = frontier_cfg()
@@ -7328,11 +7598,11 @@ class TestClassesValidate(DocAPIBase):
         self.assertEqual(eff["deleted_classes"], [])
 
     def test_validate_mutates_nothing(self):
-        before = ex._doc_revision(ex._classes_doc)
+        before = ex._doc_revision(T.classes_doc)
         self.validate([sonnet_class()])
-        self.assertEqual(ex._doc_revision(ex._classes_doc), before)
+        self.assertEqual(ex._doc_revision(T.classes_doc), before)
         with T.plock:
-            self.assertEqual([c["class"] for c in ex._classes], ["frontier"])
+            self.assertEqual([c["class"] for c in T.classes], ["frontier"])
 
 
 class TestClassesPut(DocAPIBase):
@@ -7348,7 +7618,7 @@ class TestClassesPut(DocAPIBase):
         return self.req("PUT", "/classes", body=body, key=key, headers=headers)
 
     def live_rev(self):
-        return ex._doc_revision(ex._classes_doc)
+        return ex._doc_revision(T.classes_doc)
 
     def test_put_rejects_bad_guidance_without_changing_live_document(self):
         before = self.live_rev()
@@ -7371,7 +7641,7 @@ class TestClassesPut(DocAPIBase):
         with open(self.classes_path) as f:
             self.assertEqual(json.load(f), doc, "atomic write landed the exact document")
         with T.plock:
-            self.assertEqual([c["class"] for c in ex._classes], ["frontier", "beta"],
+            self.assertEqual([c["class"] for c in T.classes], ["frontier", "beta"],
                              "hot-swap: live config replaced, no restart")
             self.assertIn("beta", T.preferred["classes"], "new class seeded fresh state")
         with open(self.classes_path + ".history.jsonl") as f:
@@ -7394,7 +7664,7 @@ class TestClassesPut(DocAPIBase):
         self.assertEqual(p["revision"], rev, "the 409 body carries the CURRENT revision")
         self.assertEqual(hdrs.get("X-Doc-Revision"), rev)
         with T.plock:
-            self.assertEqual([c["class"] for c in ex._classes], ["frontier"])
+            self.assertEqual([c["class"] for c in T.classes], ["frontier"])
         self.assertFalse(os.path.exists(self.classes_path + ".history.jsonl"),
                          "a refused write must not append history")
 
@@ -7457,7 +7727,7 @@ class TestClassesHotSwap(DocAPIBase):
 
     def put(self, doc):
         return self.req("PUT", "/classes", body={"doc": doc, "reason": "swap test"},
-                        headers={"If-Match": ex._doc_revision(ex._classes_doc)})
+                        headers={"If-Match": ex._doc_revision(T.classes_doc)})
 
     def test_deleted_class_state_dropped_and_persisted(self):
         ex._bind_class_session(T, "frontier", "sess-hs", time.time())
@@ -7518,7 +7788,7 @@ class TestClassesHotSwap(DocAPIBase):
 
 class TestClassesReload(DocAPIBase):
     def test_hand_edit_reload_bumps_revision_and_guards_stale_put(self):
-        old_rev = ex._doc_revision(ex._classes_doc)
+        old_rev = ex._doc_revision(T.classes_doc)
         doc = frontier_cfg() + [sonnet_class()]
         with open(self.classes_path, "w") as f:
             json.dump(doc, f)  # the hand edit
@@ -7530,7 +7800,7 @@ class TestClassesReload(DocAPIBase):
         self.assertNotEqual(p["revision"], old_rev, "a hand edit changes the revision by construction")
         self.assertEqual(hdrs.get("X-Doc-Revision"), p["revision"])
         with T.plock:
-            self.assertEqual([c["class"] for c in ex._classes], ["frontier", "beta"])
+            self.assertEqual([c["class"] for c in T.classes], ["frontier", "beta"])
         with open(self.classes_path + ".history.jsonl") as f:
             e = json.loads(f.readlines()[-1])
         self.assertEqual(e["actor"], "hand-edit (reload)")
@@ -7547,16 +7817,16 @@ class TestClassesReload(DocAPIBase):
         self.assertEqual(code, 401)
 
     def test_broken_json_refused_live_config_kept(self):
-        rev = ex._doc_revision(ex._classes_doc)
+        rev = ex._doc_revision(T.classes_doc)
         with open(self.classes_path, "w") as f:
             f.write("{not json")
         code, p, _ = self.req("POST", "/classes/reload")
         self.assertEqual(code, 422)
         self.assertIn("live config kept", p["error"])
         with T.plock:
-            self.assertEqual([c["class"] for c in ex._classes], ["frontier"],
+            self.assertEqual([c["class"] for c in T.classes], ["frontier"],
                              "reload must never wipe live routing over broken JSON")
-        self.assertEqual(ex._doc_revision(ex._classes_doc), rev)
+        self.assertEqual(ex._doc_revision(T.classes_doc), rev)
 
     def test_unchanged_reload_reports_changed_false(self):
         code, p, _ = self.req("POST", "/classes/reload")
@@ -7576,8 +7846,8 @@ class TestExampleConfigStaysValid(unittest.TestCase):
         here = BRAIN
         with open(os.path.join(here, "classes.example.json")) as f:
             doc = json.load(f)
-        self.assertEqual(ex._validate_classes_doc(doc), [])
-        out = ex._normalize_classes(doc)
+        self.assertEqual(ex._validate_classes_doc(T, doc), [])
+        out = ex._normalize_classes(doc, lan=True)
         self.assertEqual(len(out), len(doc), "tolerant load keeps every example class")
 
 
@@ -7686,7 +7956,7 @@ class TestConsumersDocAPI(DocAPIBase):
         self.assertEqual(oc["members"][0]["status"], "ok")
         code, _, _ = self.req("PUT", "/classes",
                               body={"doc": [sonnet_class()], "reason": "drop frontier"},
-                              headers={"If-Match": ex._doc_revision(ex._classes_doc)})
+                              headers={"If-Match": ex._doc_revision(T.classes_doc)})
         self.assertEqual(code, 200)
         _, pref, _ = self.req("GET", "/preferred")
         oc = next(c for c in pref["consumers"] if c["id"] == "gateway")
@@ -7701,7 +7971,7 @@ class TestDocHistory(DocAPIBase):
 
     def put_classes(self, doc, reason):
         return self.req("PUT", "/classes", body={"doc": doc, "reason": reason},
-                        headers={"If-Match": ex._doc_revision(ex._classes_doc)})
+                        headers={"If-Match": ex._doc_revision(T.classes_doc)})
 
     def test_requires_key(self):
         for path in ("/classes/history", "/consumers/history"):
@@ -7725,7 +7995,7 @@ class TestDocHistory(DocAPIBase):
         for e in p["entries"]:
             self.assertEqual(set(e), {"rev", "ts", "actor", "reason"},
                              "no doc per entry by default — they can be whole classes files")
-        self.assertEqual(p["entries"][0]["rev"], ex._doc_revision(ex._classes_doc),
+        self.assertEqual(p["entries"][0]["rev"], ex._doc_revision(T.classes_doc),
                          "the newest entry's rev is the live revision")
 
     def test_full_includes_doc(self):
@@ -8618,7 +8888,7 @@ class TestPreferredDialCheckContract(PayBase, HTTPBase):
         self.assertTrue(p["pots"]["kimi/credits"]["warnings"], "topup on for Kimi warns")
         self.assertEqual(p["pay_order"], ["gpt/credits"])
         with T.plock:
-            want = {"classes": ex._doc_revision(ex._classes_doc),
+            want = {"classes": ex._doc_revision(T.classes_doc),
                     "consumers": ex._doc_revision(T.consumers_doc),
                     "money": ex._doc_revision(T.money_doc), "stale_max": ex.STALE_MAX}
         self.assertEqual(p["settings"], want)
@@ -8662,11 +8932,12 @@ class TestPayEveryAccountOfAProvider(PayBase):
         reset(opus_acct(30, resets=True), gpt_on_credits(), kimi_result())
 
     def errors(self, doc):
-        return ex._validate_classes_doc(doc)
+        return ex._validate_classes_doc(T, doc)
 
     def test_the_form_is_accepted_on_a_member(self):
         for doc in (pay_cfg(kimi=["kimi/*"]), pay_cfg(kimi=["kimi/*", f"kimi/{self.POT}"]),
-                    pay_cfg(opus=["anthropic/*"]), pay_cfg(opus=["anthropic-api/*", POT_A])):
+                    pay_cfg(opus=["anthropic/*"]), pay_cfg(opus=["anthropic-api/*", POT_A]),
+                    pay_cfg(lanes={"opus": {"pay": ["anthropic/*"]}})):
             with self.subTest(doc=doc):
                 self.assertEqual(self.errors(doc), [])
 
@@ -8676,8 +8947,8 @@ class TestPayEveryAccountOfAProvider(PayBase):
                 (pay_cfg(kimi=["*/*"]), "pay '*/*': '*' stands for a provider's accounts"),
                 (pay_cfg(kimi=["/*"]), "pay '/*': <provider>/* names one provider by its id"),
                 (pay_cfg(kimi=["a/b/*"]), "pay 'a/b/*': <provider>/* names one provider by its id"),
-                (pay_cfg(lanes={"opus": {"pay": ["anthropic-api/*"]}}),
-                 "pay 'anthropic-api/*': <provider>/* is a class member's"),
+                (pay_cfg(lanes={"opus": {"pay": ["kimi/*"]}}),
+                 "pay 'kimi/*': kimi's accounts can never back a route of anthropic"),
                 (pay_cfg(kimi=["nope/*"]), "pay 'nope/*': no provider 'nope'"),
                 (pay_cfg(kimi=["gpt/*"]), "pay 'gpt/*': gpt's accounts can never back a route of kimi"),
                 (pay_cfg(opus=["kimi/*"]), "pay 'kimi/*': kimi's accounts can never back a route of anthropic"),
@@ -8714,13 +8985,13 @@ class TestPayEveryAccountOfAProvider(PayBase):
         classes_reset(kimi_result(), cfg=pay_cfg(kimi=["kimi/*"]))
         p = ex._preferred_payload(T)
         self.assertEqual(p["routes"][self.KIMI]["pay"], [f"kimi/{self.POT}"])
-        self.assertEqual(ex._classes_derived(ex._classes)["frontier"]["members"][2]["pay"], ["kimi/*"])
+        self.assertEqual(ex._classes_derived(T.classes)["frontier"]["members"][2]["pay"], ["kimi/*"])
         _, _, money = ex._normalize_money({"pots": {f"kimi/{self.POT}": {"route_budgets": {self.KIMI: 1}}}},
                                           strict=False)
         with T.lock:
             snap = list(T.state.values())
         roster = ex._decision_view(T, snap, time.time())[0]
-        errs = ex._money_problems(money, roster, ex._routes(ex._classes, {}, roster))[0]
+        errs = ex._money_problems(money, roster, ex._routes(T.classes, {}, roster))[0]
         self.assertFalse([e for e in errs if "route_budgets" in e], "a route budget on an expanded pot binds")
 
 
@@ -8731,7 +9002,7 @@ class TestClassesSettingsValidation(PayBase):
         reset(opus_acct(30, resets=True), gpt_on_credits(), kimi_result())
 
     def errors(self, doc):
-        return ex._validate_classes_doc(doc)
+        return ex._validate_classes_doc(T, doc)
 
     def assert_refused(self, doc, *needles):
         errs = self.errors(doc)
@@ -8761,7 +9032,7 @@ class TestClassesSettingsValidation(PayBase):
         # What depends on the pool is accepted with a warning (dangling).
         for cfg, needle in ((pay_cfg(opus=["nobody/credits"]), "unknown pot"),):
             with self.subTest(needle=needle):
-                self.assertEqual(ex._validate_classes_doc(cfg), [])
+                self.assertEqual(ex._validate_classes_doc(T, cfg), [])
                 self.assertTrue(any(needle in w for w in ex._doc_check(T, "classes", cfg)[1]))
 
     def test_stop_at_rejections(self):
@@ -8979,10 +9250,21 @@ class TestClassesDocAPIWithSettings(DocAPIBase, PayBase):
         self.assertEqual(code, 200, p)
         self.assertEqual(p["doc"], doc, "served as stored")
         with T.plock:
-            self.assertEqual(ex._lane_settings, {"opus": {"pay": [POT_A], "stop_at": None}})
+            self.assertEqual(T.lane_settings, {"opus": {"pay": [POT_A], "stop_at": None}})
         _, pref = self.get("/preferred")
         self.assertEqual(pref["routes"]["lane:opus"]["pay"], [POT_A])
         self.assertEqual(pref["classes"]["frontier"]["pointer"], "lane:opus")
+
+    def test_a_lanes_provider_wide_pay_expands_to_the_tenants_accounts(self):
+        rev = self.req("GET", "/classes")[1]["revision"]
+        doc = pay_cfg(gpt=["gpt/credits"], lanes={"opus": {"pay": ["anthropic/*"]}})
+        with T.lock:
+            T.state["gpt"] = gpt_on_credits()
+        code, p, _ = self.req("PUT", "/classes", {"doc": doc, "reason": "pay"}, headers={"If-Match": rev})
+        self.assertEqual(code, 200, p)
+        _, pref = self.get("/preferred")
+        self.assertEqual(pref["routes"]["lane:opus"]["pay"], [POT_A, f"{ACCT_B}/credits"],
+                         "anthropic/* is each of the tenant's Claude accounts by its money pot")
 
     def test_put_refuses_spend_credits_with_the_reason(self):
         rev = self.req("GET", "/classes")[1]["revision"]
@@ -9006,15 +9288,15 @@ class TestSettingsNumbersAreFinite(PayBase, HTTPBase):
                      {"window": "7d", "level": float("inf")},
                      {"window": "7d", "level": 101}):
             with self.subTest(stop=stop):
-                errs = ex._validate_classes_doc(pay_cfg(opus_stop=stop))
+                errs = ex._validate_classes_doc(T, pay_cfg(opus_stop=stop))
                 self.assertTrue(any("level must be a finite number in [0, 100]" in e for e in errs), errs)
-                errs = ex._validate_classes_doc(pay_cfg(lanes={"opus": {"stop_at": stop}}))
+                errs = ex._validate_classes_doc(T, pay_cfg(lanes={"opus": {"stop_at": stop}}))
                 self.assertTrue(errs, "lanes too")
         for key, val in (("reserve_ceiling", float("nan")), ("anthropic_token_ratio", float("inf"))):
             with self.subTest(key=key):
                 cfg = pay_cfg()
                 cfg[0]["members"][2][key] = val  # gpt, file order
-                self.assertTrue(ex._validate_classes_doc(cfg))
+                self.assertTrue(ex._validate_classes_doc(T, cfg))
 
     def test_any_non_finite_number_refuses_the_document(self):
         for kind, doc in (("money", {"pay_order": [], "pots": {"gpt/credits": {"topup": "on", "x": float("inf")}}}),
@@ -9027,8 +9309,8 @@ class TestSettingsNumbersAreFinite(PayBase, HTTPBase):
         self.assertEqual(load_classes(pay_cfg(opus_stop={"window": "7d", "level": float("inf")})), [])
 
     def keep_docs(self):
-        for name in ("_classes_doc", "_classes_warnings", "_lane_settings", "CLASSES_FILE"):
-            self.addCleanup(setattr, ex, name, getattr(ex, name))
+        for name in ("classes", "classes_doc", "classes_warnings", "lane_settings", "classes_file"):
+            self.addCleanup(setattr, T, name, getattr(T, name))
         for name in ("money_doc", "money_warnings", "money", "money_file"):
             self.addCleanup(setattr, T, name, getattr(T, name))
 
@@ -9053,14 +9335,14 @@ class TestSettingsNumbersAreFinite(PayBase, HTTPBase):
         cfg = pay_cfg()
         cfg[0]["members"][0]["note"] = float("nan")
         cfg[0]["members"][2]["reserve_ceiling"] = float("inf")
-        ex.CLASSES_FILE = self.write("classes-nan.json", json.dumps({"classes": cfg, "lanes": {}}))
-        out = ex._load_classes()
-        ex._swap_classes(out, ex._classes_doc, ex._classes_warnings, ex._lane_settings)
+        T.classes_file = self.write("classes-nan.json", json.dumps({"classes": cfg, "lanes": {}}))
+        ex._load_classes(T)
+        out = T.classes
         self.assertEqual([c["class"] for c in out], ["frontier"])
-        self.assertTrue(any("non-finite" in w and "note" in w for w in ex._classes_warnings),
-                        ex._classes_warnings)
-        self.assertTrue(any("non-finite" in w and "reserve_ceiling" in w for w in ex._classes_warnings))
-        self.assertIsNone(ex._non_finite_path(ex._classes_doc))
+        self.assertTrue(any("non-finite" in w and "note" in w for w in T.classes_warnings),
+                        T.classes_warnings)
+        self.assertTrue(any("non-finite" in w and "reserve_ceiling" in w for w in T.classes_warnings))
+        self.assertIsNone(ex._non_finite_path(T.classes_doc))
         self.served_with_revisions()
         code, body = self.get("/classes", key=ex.SWITCH_KEY)
         self.assertNotIn("note", body["doc"]["classes"][0]["members"][0])
@@ -9113,7 +9395,7 @@ class TestClassesUnknownKeysRefused(PayBase):
             with self.subTest(where=where, key=key):
                 cfg = pay_cfg()
                 (cfg[0] if where == "class" else cfg[0]["members"][2])[key] = 1
-                errs = ex._validate_classes_doc(cfg)
+                errs = ex._validate_classes_doc(T, cfg)
                 self.assertTrue(any(repr(key) in e or key in e for e in errs), errs)
 
 
@@ -9957,7 +10239,7 @@ class TestBudgetsAtPut(MoneyDocBase):
         self.assertEqual(self.put({"pots": {"gpt/credits": {"route_budgets": {GPT_ROUTE: 20}}}})[0], 200)
         errs, warns, _, _ = ex._doc_check(T, "classes", pay_cfg(gpt=[]))
         self.assertEqual(errs, [])
-        self.assertTrue(any(w.startswith(f"{T.name}: money: dangling:") and GPT_ROUTE in w for w in warns), warns)
+        self.assertTrue(any(w.startswith("money: dangling:") and GPT_ROUTE in w for w in warns), warns)
         # Once live, the orphaned budget is shown dangling on the pot and binds nothing.
         self.install_classes(pay_cfg(gpt=[]))
         ex.compute_preferred(T)
