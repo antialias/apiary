@@ -93,9 +93,10 @@ type tenant struct {
 	codexToks  map[string]codexTokEntry
 
 	// The api-kind dispensed keys (apikey.go).
-	apiKeyMu     sync.Mutex
-	apiKeys      map[string]apiKeyEntry
-	apiKeyStates map[string]string
+	apiKeyMu      sync.Mutex
+	apiKeys       map[string]apiKeyEntry
+	apiKeyStates  map[string]string
+	apiKeyDropped map[string]string
 
 	// The refusal records and readings (records.go).
 	recMu    sync.Mutex
@@ -175,6 +176,7 @@ func newTenant(row tenantRow) *tenant {
 		codexToks:       map[string]codexTokEntry{},
 		apiKeys:         map[string]apiKeyEntry{},
 		apiKeyStates:    map[string]string{},
+		apiKeyDropped:   map[string]string{},
 		records:         map[recKey]refusalRecord{},
 		readings:        map[string]headerReading{},
 		bindCache:       map[string]classBind{},

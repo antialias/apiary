@@ -40,9 +40,12 @@ type apiKeyEntry struct {
 	fetched time.Time
 }
 
-// Per tenant: tenant.apiKeyMu, tenant.apiKeys (the keys in hand) and
+// Per tenant: tenant.apiKeyMu, tenant.apiKeys (the keys in hand),
 // tenant.apiKeyStates (each account's last state, "" = a key in hand, else
-// why none: "missing", "fetch failed").
+// why none: "missing", "fetch failed") and tenant.apiKeyDropped (the
+// fingerprint of each account's key last dropped because its provider
+// refused it). apiKeyMu is a leaf: it may be taken under recMu, never the
+// other way round.
 
 // apiKeyFresh is how long the brain's answer is used without asking again: a
 // rotation, a key placed and a key withdrawn are each adopted within it.
@@ -84,6 +87,9 @@ func (tn *tenant) getAPIKey(ctx context.Context, account string) (string, error)
 	switch {
 	case err == nil:
 		tn.apiKeys[account] = apiKeyEntry{val: key, fetched: now}
+		if tn.apiKeyDropped[account] != apiKeyFP(key) {
+			delete(tn.apiKeyDropped, account) // another key: the refused one is history
+		}
 		tn.noteAPIKeyState(account, "")
 		return key, nil
 	case missing:
@@ -146,11 +152,46 @@ func (tn *tenant) noteAPIKeyState(account, state string) {
 }
 
 // dropAPIKey forgets an account's cached key (the provider refused it), so
-// the next dial asks the brain again.
+// the next dial asks the brain again. The refused key's fingerprint is kept
+// (apiKeySentFP): the record the refusal writes is that key's.
 func (tn *tenant) dropAPIKey(account string) {
 	tn.apiKeyMu.Lock()
+	if e, ok := tn.apiKeys[account]; ok && e.val != "" {
+		tn.apiKeyDropped[account] = apiKeyFP(e.val)
+	}
 	delete(tn.apiKeys, account)
 	tn.apiKeyMu.Unlock()
+}
+
+// apiKeyFP is a key's fingerprint, to tell one key from the next: what a
+// refusal record of the key keeps. Never logged or shown.
+func apiKeyFP(key string) string { return fp("Bearer " + key) }
+
+// apiKeyNowFP is the fingerprint of account's key in hand, "" when none is
+// cached (never fetched, dropped, or the brain has none).
+func (tn *tenant) apiKeyNowFP(account string) string {
+	tn.apiKeyMu.Lock()
+	defer tn.apiKeyMu.Unlock()
+	if e, ok := tn.apiKeys[account]; ok && e.val != "" {
+		return apiKeyFP(e.val)
+	}
+	return ""
+}
+
+// apiKeySentFP is the fingerprint of the key a refusal of account's key
+// refused: the one dropped for it (every path that reads a refused key drops
+// it before the refusal is recorded), else the one in hand ("" when neither
+// is known). A refusal of the key is recorded against it.
+func (tn *tenant) apiKeySentFP(account string) string {
+	tn.apiKeyMu.Lock()
+	defer tn.apiKeyMu.Unlock()
+	if d := tn.apiKeyDropped[account]; d != "" {
+		return d
+	}
+	if e, ok := tn.apiKeys[account]; ok && e.val != "" {
+		return apiKeyFP(e.val)
+	}
+	return ""
 }
 
 // apiKeyStatus is /_switch/status's "api_keys": each account asked for, its

@@ -24,20 +24,21 @@ func recoveryFixture(t *testing.T, handler http.HandlerFunc) (*recoveryRunner, *
 	t.Cleanup(srv.Close)
 	u, _ := url.Parse(srv.URL + "/coding")
 	oldProviders := providers
-	providers = []*provider{{name: "recovery-test", target: u, wire: bearerWire{account: "kimi"}}}
+	providers = []*provider{{name: "recovery-test", target: u, wire: bearerWire{}}}
 	t.Cleanup(func() { providers = oldProviders })
-	// The member signs with the tenant's own kimi key (bearerWire), here
-	// already cached as the brain would dispense it.
 	resetAPIKeys(t)
-	lan.apiKeyMu.Lock()
-	lan.apiKeys["kimi"] = apiKeyEntry{val: "test-only-key", fetched: time.Now()}
-	lan.apiKeyMu.Unlock()
 	lan.pref.mu.Lock()
 	oldAccounts := lan.pref.accounts
-	lan.pref.accounts = map[string]acctStanding{"kimi": {Kind: "provider"}}
+	lan.pref.accounts = map[string]acctStanding{}
 	lan.pref.mu.Unlock()
 	t.Cleanup(func() { lan.pref.mu.Lock(); lan.pref.accounts = oldAccounts; lan.pref.mu.Unlock() })
 	id := uniq("recovery")
+	// The member signs with the key of the account its dial picked, the
+	// tenant's own (bearerWire), here already cached as the brain would
+	// dispense it.
+	lan.apiKeyMu.Lock()
+	lan.apiKeys[uAccount(id)] = apiKeyEntry{val: "test-only-key", fetched: time.Now()}
+	lan.apiKeyMu.Unlock()
 	m := classMemberPref{ID: id, Kind: "provider", Provider: "recovery-test", Model: "test-model", Route: uRoute(id)}
 	lan.pref.mu.Lock()
 	oldClasses := lan.pref.classes

@@ -68,6 +68,9 @@ type refLimit struct {
 	// when the record is written.
 	readable bool
 	resets   time.Time // the reset the refusal names for this limit; zero = none
+	// key: the provider refused the key the account was sent with, so the
+	// record is that key's (refusalRecord.keyFP): another key ends it.
+	key bool
 }
 
 // refusal is one refusal, classified.

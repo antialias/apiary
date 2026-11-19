@@ -67,7 +67,7 @@ func TestModelsHandlerKindAndEffortPerKind(t *testing.T) {
 	// since #135): a provider is reached only as a class member.
 	local := &provider{name: "local", target: mustURL(t, "http://127.0.0.1:11434"), wire: localWire{}}
 	kimi := &provider{name: "kimi", target: mustURL(t, "https://kimi.example/anthropic"),
-		wire: bearerWire{account: "kimi"}}
+		wire: bearerWire{}}
 	gpt := &provider{name: "gpt", target: mustURL(t, "https://codex.example"), wire: codexWire{}}
 	withProviders(t, local, kimi, gpt)
 

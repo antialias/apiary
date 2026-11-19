@@ -94,9 +94,31 @@ type refusalRecord struct {
 	seen       limitSeen
 	status     int
 	detail     string
+	// keyFP is the fingerprint (apiKeyFP) of the key the provider refused,
+	// on a record of a refused key; "" on any other. Such a record is about
+	// that key alone: once the account's key in hand is another, every
+	// route reads it as ended (keyReplaced).
+	keyFP string
 }
 
 func (r refusalRecord) live(now time.Time) bool { return r.until.IsZero() || now.Before(r.until) }
+
+// keyReplaced: rec is a refused key's record, and the account's key in hand
+// is another one, so it no longer applies. A key not in hand (dropped, or
+// never fetched) replaces nothing: the next fetch says. Callers may hold
+// recMu (apiKeyMu is a leaf).
+func (tn *tenant) keyReplaced(account string, rec refusalRecord) bool {
+	if rec.keyFP == "" {
+		return false
+	}
+	now := tn.apiKeyNowFP(account)
+	return now != "" && now != rec.keyFP
+}
+
+// holds: rec is live and still applies to account.
+func (tn *tenant) holds(account string, rec refusalRecord, now time.Time) bool {
+	return rec.live(now) && !tn.keyReplaced(account, rec)
+}
 
 // closes: the record makes the check read `no` on what it names. A throttle
 // only deranks.
@@ -126,10 +148,15 @@ func clampedUntil(kind string, resets, now time.Time) time.Time {
 
 // writeRecord stores one record. An attributed record ends at the reset the
 // refusal named when it is still ahead, else by reading (until zero); an
-// unattributed one at its clamp.
+// unattributed one at its clamp, or at the end its writer named (a door's
+// hold on a refused key), no later than quotaCooldownCap.
 func (tn *tenant) writeRecord(account, limit string, rec refusalRecord) refusalRecord {
 	rec.resets = clampReset(rec.resets, rec.refusedAt)
 	switch {
+	case !rec.attributed && !rec.until.IsZero():
+		if cap := rec.refusedAt.Add(quotaCooldownCap); rec.until.After(cap) {
+			rec.until = cap
+		}
 	case !rec.attributed:
 		rec.until = clampedUntil(rec.kind, rec.resets, rec.refusedAt)
 	case rec.resets.After(rec.refusedAt):
@@ -194,6 +221,9 @@ func (tn *tenant) recordRefusal(account string, ref refusal, resp *http.Response
 	for _, l := range ref.limits {
 		rec := refusalRecord{kind: ref.class, limKind: l.kind, refusedAt: now, resets: l.resets,
 			status: status, detail: ref.detail}
+		if l.key {
+			rec.keyFP = tn.apiKeySentFP(account) // the key's record: another key ends it
+		}
 		if st != nil && st.AsOf != nil {
 			switch l.kind {
 			case limWindow:
@@ -225,11 +255,12 @@ func (tn *tenant) recordRefusal(account string, ref refusal, resp *http.Response
 	return ref.class, strings.Join(parts, ",")
 }
 
-// liveRecordsLocked is every live record on account, by limit. Caller holds recMu.
+// liveRecordsLocked is every live record on account that still applies to
+// it (holds), by limit. Caller holds recMu.
 func (tn *tenant) liveRecordsLocked(account string, now time.Time) map[string]refusalRecord {
 	var out map[string]refusalRecord
 	for k, r := range tn.records {
-		if k.account != account || !r.live(now) {
+		if k.account != account || !tn.holds(account, r, now) {
 			continue
 		}
 		if out == nil {
@@ -265,7 +296,7 @@ func (tn *tenant) spentRecordOf(account string, now time.Time) (refusalRecord, b
 		return a.until.After(b.until)
 	}
 	for k, r := range tn.records {
-		if k.account == account && r.closes() && r.live(now) && (!found || later(r, best)) {
+		if k.account == account && r.closes() && tn.holds(account, r, now) && (!found || later(r, best)) {
 			best, found = r, true
 		}
 	}
@@ -1094,7 +1125,7 @@ func (tn *tenant) recordsStatus(now time.Time) map[string]any {
 	defer tn.recMu.Unlock()
 	out := map[string]any{}
 	for k, r := range tn.records {
-		if !r.live(now) {
+		if !tn.holds(k.account, r, now) {
 			continue
 		}
 		var resets any

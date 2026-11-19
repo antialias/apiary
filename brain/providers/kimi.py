@@ -1,7 +1,7 @@
 """The Kimi for Coding driver (shared): a static-key provider whose quota the
-brain polls on GET /coding/v1/usages; its key is enrolled on the tenant's
-/auth page into the tenant's kimi.json (there is no process-wide key: a key
-belongs to a tenant)."""
+brain polls on GET /coding/v1/usages; its keys are named accounts on the
+keyring (providers/keyring.py), enrolled on the tenant's /auth page into the
+tenant's kimi.json (there is no process-wide key: a key belongs to a tenant)."""
 import base64
 import copy
 import hashlib
@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
 import claude_usage_exporter as core
-from providers import register, register_route
+from providers import keyring
 
 
 # ---- provider quota pollers (Phase 1 of cross-provider class switching) ----
@@ -31,65 +31,12 @@ from providers import register, register_route
 KIMI_USAGES_URL = os.environ.get("KIMI_USAGES_URL", "https://api.kimi.com/coding/v1/usages")
 
 
-# Kimi enrollment (#72): the enrolled key lives in the tenant's dir.
+# Kimi enrollment (#72): the tenant's keys live in the tenant's dir, on the
+# keyring (providers/keyring.py): several named Kimi accounts per tenant.
 KIMI_CREDS_FILE = "kimi.json"
 
 
 # ---- Kimi-for-Coding quota poller --------------------------------------------
-
-# Kimi key resolution (#72): the tenant's enrolled file key, mtime-cached like
-# every pooled creds file so an out-of-band edit is adopted live.
-# file_key: None = not loaded / no file, "" = file present but keyless.
-class _Store:
-    """One tenant's kimi key (tenant.stores["kimi"], _st)."""
-
-    def __init__(self, t):
-        self.file = t.path(KIMI_CREDS_FILE)
-        self.file_key = None
-        self.file_mtime = None
-
-
-def _st(t):
-    return t.store_for("kimi", _Store)
-
-
-def _kimi_key(t):
-    """The Moonshot key the brain polls with for this tenant: the enrolled
-    file's value, "" without one."""
-    with t.refresh_lock:
-        mtime = core._store.mtime(_st(t).file)
-        if mtime is None:
-            _st(t).file_key = None
-            _st(t).file_mtime = None
-            return ""
-        if _st(t).file_key is None or mtime != _st(t).file_mtime:
-            try:
-                raw = core._store.read_json(_st(t).file)
-                _st(t).file_key = (raw.get("api_key") or "") if isinstance(raw, dict) else ""
-            except Exception as e:  # noqa: BLE001
-                core.log(f"WARN kimi creds file unreadable: {e}")
-                _st(t).file_key = ""
-            _st(t).file_mtime = mtime
-        return _st(t).file_key or ""
-
-
-def _kimi_key_source(t):
-    """Where the active kimi key comes from — declared on /auth/providers."""
-    return "file" if _kimi_key(t) else "none"
-
-
-def _persist_kimi_key(t, key):
-    """Atomically write the enrolled kimi key. Raises ValueError (operator-readable)
-    on I/O failure; logs the fingerprint only, never the key."""
-    with t.refresh_lock:
-        try:
-            core._store.write_json(_st(t).file, {"api_key": key})
-        except Exception as e:  # noqa: BLE001
-            raise ValueError(f"the key could not be stored ({type(e).__name__}) — nothing was saved") from e
-        _st(t).file_key = key
-        _st(t).file_mtime = core._store.mtime(_st(t).file)
-    core.log(f"kimi key enrolled (fingerprint {core._key_fingerprint(key)})")
-
 
 def _get_kimi_usages(key):
     req = urllib.request.Request(
@@ -207,110 +154,24 @@ def _kimi_reading(raw, as_of):
             "beside": beside, "models": {}}, ""
 
 
-def poll_kimi(t, prev=None, account=None):  # noqa: ARG001 — uniform pool dispatch (#71)
-    """Return one Kimi poll result (never raises):
-      name, kind, provider, ok, ts, good_ts, stale, http, err, retry_after, reading
-    reading is the §1.5 normalized reading (_kimi_reading), None on a failure."""
-    out = {"name": "kimi", "kind": "provider", "provider": "kimi",
-           "ok": 0, "ts": time.time(), "good_ts": None, "stale": 0,
-           "http": 0, "err": "", "retry_after": None, "reading": None}
-    key = _kimi_key(t)
-    if not key:
-        out["err"] = "kimi key not configured (enroll one on /auth)"
-        return out
-    raw = None
-    try:
-        raw = _get_kimi_usages(key)
-    except urllib.error.HTTPError as e:
-        out["http"] = e.code
-        out["err"] = f"usage HTTP {e.code}"
-        out["retry_after"] = core._retry_after(e)
-        return out
-    except Exception as e:  # noqa: BLE001
-        out["err"] = f"usage {type(e).__name__}: {e}"
-        return out
-    reading, err = _kimi_reading(raw, out["ts"])
-    if reading is None:
-        out["err"] = err
-        return out
-    out["reading"] = reading
-    out["ok"] = 1
-    return out
+def _probe(key):
+    """Enrolment's probe: the poll's own read must give a reading. A new plan
+    without a weekly window enrolls (K1); `{}` reads no window at all, and is
+    not entitled until C9 says so."""
+    if _kimi_reading(_get_kimi_usages(key), time.time())[0] is None:
+        return "returned no usable quota payload"
+    return None
 
 
-def _kimi_auth_status(t, now):
-    """A single row (kimi is one key, not a pool) carrying where the key comes
-    from and its fingerprint — never the key."""
-    key = _kimi_key(t)
-    if not key:
-        return []
-    rows = core._account_health(t, ["kimi"], now)["accounts"]
-    for r in rows:
-        r["source"] = _kimi_key_source(t)
-        r["key_fingerprint"] = core._key_fingerprint(key)
-    return rows
-
-
-def _kimi_auth_begin(t, account=None):
-    """No redirect grant here — mint a bare one-shot state so complete has the same
-    shape (and TTL) as every other provider's flow."""
-    return None, core._auth_grant_mint(t, "kimi", "add", account=account)
-
-
-def _kimi_auth_complete(t, grant, fields):  # noqa: ARG001 — uniform authority signature
-    key = str(fields.get("api_key") or "").strip()
-    if not key:
-        raise ValueError("api_key is required")
-    # Validate BEFORE persist: one usage call proves the key. Error text carries
-    # the exception TYPE and fingerprint only — never the key, never upstream
-    # prose that could echo it.
-    try:
-        raw = _get_kimi_usages(key)
-    except urllib.error.HTTPError as e:
-        raise ValueError(f"key validation HTTP {e.code} (fingerprint "
-                         f"{core._key_fingerprint(key)}) — nothing was saved") from e
-    except Exception as e:  # noqa: BLE001
-        raise ValueError(f"key validation {type(e).__name__} — nothing was saved") from e
-    if _kimi_reading(raw, time.time())[0] is None:
-        # A new plan without a weekly window enrolls (K1); `{}` reads no
-        # window at all, and is not entitled until C9 says so.
-        raise ValueError("key was accepted but returned no usable quota payload — nothing was saved")
-    _persist_kimi_key(t, key)
-    with t.poll_health_lock:
-        t.poll_fails.pop("kimi", None)
-        t.poll_schedule.pop("kimi", None)  # due immediately
-    core._poll_wakeup.set()
-    return {"account": "kimi", "enrolled": True, "reauthorized": False}
-
-
-def _kimi_auth_remove(t, account):  # noqa: ARG001 — the one account is "kimi"
-    with t.refresh_lock:
-        core._remove_credentials(_st(t).file)
-        _st(t).file_key = None
-        _st(t).file_mtime = None
-    core.log("kimi key removed")
-
-
-register("kimi", {
-    "poll": poll_kimi, "enabled": lambda t: bool(_kimi_key(t)),
-    # The proxy signs this tenant's Kimi requests with this key, dispensed by
-    # GET /api-key?account=kimi like an api account's; it holds none of its own.
-    "api_key": lambda t, _account: _kimi_key(t),
-    "auth": {
-        "kind": "static-key",
-        "label": "Kimi for Coding (Moonshot)",
-        "custody": {"rotation": "none",
-                    "note": "A static API key, held by this brain alone: the routing "
-                            "proxy is dispensed it by GET /api-key."},
-        "enroll": {"flow": "paste-key", "can_add": True,
-                   "instructions": "Paste the sk-kimi-* key. It is validated with a "
-                                   "usage probe before anything is saved.",
-                   "fields": [{"name": "api_key", "label": "API key", "secret": True}]},
-        "status": _kimi_auth_status,
-        "begin": _kimi_auth_begin,
-        "complete": _kimi_auth_complete,
-        "remove": _kimi_auth_remove,
-    },
+# The proxy signs this tenant's Kimi requests with an account's key, dispensed
+# by GET /api-key?account=<name> like an api account's; it holds none of its own.
+KEYS = keyring.register(
+    "kimi", "Kimi for Coding (Moonshot)", KIMI_CREDS_FILE,
+    lambda key: _get_kimi_usages(key), _kimi_reading, _probe,
+    "Name the account and paste its sk-kimi-* key. It is validated with a usage probe "
+    "before anything is saved; a name already enrolled has its key replaced.",
+    "Static API keys, held by this brain alone: the routing proxy is dispensed each one by "
+    "GET /api-key.",
+    what="usage",
     # Sized from the brain's own polls (quota-model 66 §7).
-    "sizing": lambda wid, kind: "poll" if kind in ("window", "cycle_pool") else None,
-})
+    sizing=lambda wid, kind: "poll" if kind in ("window", "cycle_pool") else None)

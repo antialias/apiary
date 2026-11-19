@@ -65,7 +65,7 @@ func TestHostedProviderNamespace(t *testing.T) {
 // row, the union is empty whatever the provider table holds.
 func TestAdvertisedModelsNoProviderRows(t *testing.T) {
 	local := &provider{name: "local", target: mustURL(t, "http://127.0.0.1:11434"), wire: localWire{}}
-	kimi := &provider{name: "kimi", target: mustURL(t, "http://x"), wire: bearerWire{account: "kimi"}}
+	kimi := &provider{name: "kimi", target: mustURL(t, "http://x"), wire: bearerWire{}}
 	gpt := &provider{name: "gpt", target: mustURL(t, "http://y"), wire: codexWire{}}
 	withProviders(t, local, kimi, gpt)
 	oldReg := registry
@@ -82,7 +82,7 @@ func TestAdvertisedModelsNoProviderRows(t *testing.T) {
 // No provider claims them and no class row derives them — they exist purely so
 // gateway discovery finds the id it was asked for.
 func TestAdvertisedModelsUnionIncludesAnthropicRows(t *testing.T) {
-	kimi := &provider{name: "kimi", target: mustURL(t, "http://x"), wire: bearerWire{account: "kimi"}}
+	kimi := &provider{name: "kimi", target: mustURL(t, "http://x"), wire: bearerWire{}}
 	withProviders(t, kimi)
 
 	oldReg := registry

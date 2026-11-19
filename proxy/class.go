@@ -484,9 +484,10 @@ func (tn *tenant) memberVerdict(m classMemberPref, now time.Time) (best acctPick
 // (§2.2 row 9, the same rule as the lane swap): want when given and its check
 // admits it, else the first account rankRouteAccounts admits — the incumbent
 // while its check admits it. A pool member (one with a pool view, Targets)
-// dials only accounts in that view and names the one it picked; a
-// single-account provider (kimi) returns "" — the wire follows the brain's
-// incumbent — with that account's check. readmit lets PR11 (§2.2 row 14) dial
+// dials only accounts in that view and names the one it picked; a member
+// with no pool view returns "" — the wire follows the brain's incumbent —
+// with that account's check, unless its wire signs with the picked account's
+// own key (bearerWire, D6), which needs the account named. readmit lets PR11 (§2.2 row 14) dial
 // an account an unattributed record alone holds out. entitlement is
 // count_tokens (§2.2 row 20): free, so every account of the route may answer
 // it, the admitted first. ok=false: no account may be dialled.
@@ -500,8 +501,9 @@ func (tn *tenant) providerMemberDial(m classMemberPref, want string, readmit, en
 		_, has := m.Targets[a]
 		return !pool || has
 	}
+	named := pool || wireNamesAccount(m.Provider)
 	pick := func(p acctPick) (string, dialCheck, bool) {
-		if pool {
+		if named {
 			return p.account, p.check, true
 		}
 		return "", p.check, true
@@ -946,6 +948,15 @@ func (tn *tenant) routeClass(ce *registryEntry, sess string, q classReq, hdr htt
 	// while routing's pin remains gated on health, exactly as before.
 	pinFact, _ := tn.pinForBinding(class, sess, bindReason)
 	pinned := tn.health != nil && pinFact
+
+	// Each keyed member's key is asked before any check reads its records
+	// (memberKeyMissing; cached, so this asks the brain only when a key was
+	// dropped or has aged): a refusal's record of a key ends once the account's
+	// key is another (tenant.holds), so a key the owner replaced after the
+	// refusal serves at once, the bound member's check included.
+	for _, m := range members {
+		tn.memberKeyMissing(q.context(), m)
+	}
 
 	// §5.2 (#123): under enforce, the health verdict picks the LEAD — the
 	// member that heads the try list — and may short-circuit to a typed 503

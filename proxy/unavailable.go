@@ -356,9 +356,12 @@ type keyedWire interface {
 
 // memberKeyMissing is why a keyed wire's member has no key on any account of
 // its route ("" = one has a key, or the wire sends none of its own): it is
-// then unusable, with that reason, and nothing is recorded. The wire is asked
-// on tn's behalf (ctxOf): the key it looks for is tn's dispense of tn's
-// account, whatever ctx carried — a walk with no request context (the
+// then unusable, with that reason, and nothing is recorded. Every account is
+// asked, not just the first with a key: an account whose refused key was
+// dropped is fetched again here, so a key the brain has since replaced is in
+// hand before the walk reads that key's record (keyReplaced). The wire is
+// asked on tn's behalf (ctxOf): the key it looks for is tn's dispense of
+// tn's account, whatever ctx carried — a walk with no request context (the
 // prober's, the status page's) is never judged against another tenant.
 func (tn *tenant) memberKeyMissing(ctx context.Context, m classMemberPref) string {
 	ctx = tn.ctxOf(ctx)
@@ -374,11 +377,16 @@ func (tn *tenant) memberKeyMissing(ctx context.Context, m classMemberPref) strin
 	if !ok {
 		return ""
 	}
-	why := ""
+	why, has := "", false
 	for _, a := range r.Accounts {
-		if why = kw.keyMissing(ctx, a); why == "" {
-			return ""
+		if w := kw.keyMissing(ctx, a); w == "" {
+			has = true
+		} else {
+			why = w
 		}
+	}
+	if has {
+		return ""
 	}
 	return why
 }

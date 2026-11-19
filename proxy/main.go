@@ -2531,7 +2531,7 @@ func buildHandlers() (gated, core http.Handler) {
 		providers = append(providers, &provider{name: "local", target: t, wire: localWire{}})
 	}
 	if t := parseDirectTarget("SWITCH_KIMI_UPSTREAM", kimiUpstream); t != nil {
-		providers = append(providers, &provider{name: "kimi", target: t, wire: bearerWire{account: "kimi"}})
+		providers = append(providers, &provider{name: "kimi", target: t, wire: bearerWire{}})
 	}
 	if codexUpstream != "" {
 		if t := parseDirectTarget("SWITCH_CODEX_UPSTREAM", codexUpstream); t != nil {
@@ -3357,7 +3357,7 @@ func (tn *tenant) statusSnapshot() map[string]any {
 		codexBearers[acct] = time.Until(e.exp).Round(time.Minute).String()
 	}
 	tn.codexTokMu.Unlock()
-	return map[string]any{
+	out := map[string]any{
 		"tenant":            tn.id,
 		"name":              tn.name,
 		"lan":               tn.lan,
@@ -3401,4 +3401,13 @@ func (tn *tenant) statusSnapshot() map[string]any {
 		// eventsStatus above. Minimal until T6 (#125).
 		"member_health": tn.healthStatus(),
 	}
+	for _, f := range tenantStatusExtras {
+		f(tn, out)
+	}
+	return out
 }
+
+// tenantStatusExtras add an edition's keys to a tenant's status block
+// (members.<tenant>). Each runs with no tenant mutex held and may take only
+// leaf mutexes.
+var tenantStatusExtras []func(tn *tenant, out map[string]any)

@@ -101,11 +101,13 @@ func wireOf(p *provider) wire {
 // ---- pass-through wires ----
 
 // bearerWire is a hosted provider that speaks Anthropic natively and
-// authenticates with a static key (Kimi). The key is the asking tenant's own,
-// dispensed by its brain's GET /api-key?account=<account> (apikey.go) and
-// cached per tenant like an api account's; the proxy holds none of its own.
-// It replaces the client's bearer.
-type bearerWire struct{ account string }
+// authenticates with a static key (Kimi). The key is the asking tenant's own
+// account's, the one the class walk dialled (reqInfo.poolAccount: the
+// provider member's pool pick, one of the tenant's accounts of the
+// provider), dispensed by its brain's GET /api-key?account=<account>
+// (apikey.go) and cached per tenant like an api account's; the proxy holds
+// none of its own. It replaces the client's bearer.
+type bearerWire struct{}
 
 func (bearerWire) authLabel() string                                       { return "inject" }
 func (bearerWire) name() string                                            { return "bearer" }
@@ -113,17 +115,35 @@ func (bearerWire) owns(*http.Request) bool                                 { ret
 func (bearerWire) translate(resp *http.Response, _ reqInfo) *http.Response { return resp }
 func (bearerWire) reauth(*http.Request) bool                               { return false }
 
-// prepare fetches the tenant's key: an account the tenant's document does not
-// list is refused before anything is fetched (actuatorFor), and a tenant with
-// no key is refused rather than signed with anyone else's.
+// wireNamesAccount: the provider's wire signs with the key of the account
+// its dial picked (bearerWire), so the dial names that account even for a
+// member the brain gave no pool view.
+func wireNamesAccount(provider string) bool {
+	p := providerByName(provider)
+	if p == nil {
+		return false
+	}
+	_, ok := p.wire.(bearerWire)
+	return ok
+}
+
+// prepare fetches the key of the account the dial picked: an account the
+// tenant's document does not list is refused before anything is fetched
+// (actuatorFor), and a tenant with no key is refused rather than signed with
+// anyone else's. A hop the dial named no account for is refused: there is no
+// account to sign it as.
 func (w bearerWire) prepare(info *reqInfo, body []byte, _ string) string {
 	info.body = body
-	if _, _, err := info.tenant.actuatorFor(w.account); err != nil {
+	account := info.poolAccount
+	if account == "" {
+		return "no account was dialled for this member"
+	}
+	if _, _, err := info.tenant.actuatorFor(account); err != nil {
 		return err.Error()
 	}
-	key, err := info.tenant.getAPIKey(nil, w.account)
+	key, err := info.tenant.getAPIKey(nil, account)
 	if err != nil {
-		return "no " + w.account + " key: " + err.Error()
+		return "no " + account + " key: " + err.Error()
 	}
 	info.token = key
 	return ""

@@ -121,7 +121,7 @@ def _local_reading(as_of):
 
 
 def poll_local(t, prev=None, account=None):  # noqa: ARG001 — uniform pool dispatch (#71)
-    """Return one local-server poll result (never raises), shaped as poll_kimi's.
+    """Return one local-server poll result (never raises), shaped as every provider poll's.
     Fails when llama-server is unreachable, lacks a declared member, or its
     non-loading inventory cannot confirm that member's declared context_window."""
     out = {"name": "local", "kind": "provider", "provider": "local",

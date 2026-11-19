@@ -113,22 +113,42 @@ func TestEachProviderSignsWithTheAskingTenantsCredential(t *testing.T) {
 				t.Errorf("%s: tenant %s signed with %q (%v)", acct, tn.name, got, err)
 			}
 		}
-		info := reqInfo{tenant: tn}
-		if refusal := (bearerWire{account: "kimi"}).prepare(&info, nil, ""); refusal != "" {
+		info := reqInfo{tenant: tn, poolAccount: "kimi"}
+		if refusal := (bearerWire{}).prepare(&info, nil, ""); refusal != "" {
 			t.Fatalf("kimi: tenant %s refused: %s", tn.name, refusal)
 		}
 		out, _ := http.NewRequest("POST", "http://kimi.invalid/v1/messages", nil)
 		out.Header.Set("Authorization", "Bearer client")
-		bearerWire{account: "kimi"}.apply(out, info)
+		bearerWire{}.apply(out, info)
 		if got := out.Header.Get("Authorization"); got != "Bearer "+want("kimi") {
 			t.Errorf("kimi: tenant %s signed with %q", tn.name, got)
 		}
 	}
+	// A second Kimi account in one tenant signs with its own key, never the
+	// first's: the dial's account is the one bearerWire reads (D6).
+	a.pref.mu.Lock()
+	a.pref.accounts = map[string]acctStanding{"kimi": {Kind: "provider"}, "kimi2": {Kind: "provider"}}
+	a.pref.mu.Unlock()
+	for _, acct := range []string{"kimi2", "kimi"} {
+		info := reqInfo{tenant: a, poolAccount: acct}
+		if refusal := (bearerWire{}).prepare(&info, nil, ""); refusal != "" {
+			t.Fatalf("%s: refused: %s", acct, refusal)
+		}
+		out, _ := http.NewRequest("POST", "http://kimi.invalid/v1/messages", nil)
+		bearerWire{}.apply(out, info)
+		if got := out.Header.Get("Authorization"); got != "Bearer cred-"+a.id+"-"+acct {
+			t.Errorf("%s signed with %q", acct, got)
+		}
+	}
+	// A hop the dial named no account for is refused, not signed as one.
+	if refusal := (bearerWire{}).prepare(&reqInfo{tenant: a}, nil, ""); refusal == "" {
+		t.Error("a hop with no dialled account was signed")
+	}
 	// A tenant whose document does not list kimi is refused before any fetch.
 	c := addTenant(tenantRow{Tenant: "ten_" + strings.Repeat("e", 26), Name: "c", Tap: tapMetadata})
 	defer removeTenant(c.id)
-	info := reqInfo{tenant: c}
-	if refusal := (bearerWire{account: "kimi"}).prepare(&info, nil, ""); refusal == "" || info.token != "" {
+	info := reqInfo{tenant: c, poolAccount: "kimi"}
+	if refusal := (bearerWire{}).prepare(&info, nil, ""); refusal == "" || info.token != "" {
 		t.Errorf("kimi for a tenant without the account: refusal=%q token=%q", refusal, info.token)
 	}
 }
@@ -257,15 +277,15 @@ func TestKimiWithoutTheTenantsKeyIsRefused(t *testing.T) {
 	tn.pref.accounts = map[string]acctStanding{"kimi": {Kind: "provider"}}
 	tn.pref.mu.Unlock()
 
-	info := reqInfo{tenant: tn}
-	refusal := (bearerWire{account: "kimi"}).prepare(&info, nil, "")
+	info := reqInfo{tenant: tn, poolAccount: "kimi"}
+	refusal := (bearerWire{}).prepare(&info, nil, "")
 	if refusal == "" || info.token != "" {
 		t.Fatalf("kimi without the tenant's key: refusal=%q token=%q", refusal, info.token)
 	}
 	out, _ := http.NewRequest("POST", "http://kimi.invalid/v1/messages", nil)
 	out.Header.Set("Authorization", "Bearer client")
 	out.Header.Set("X-Api-Key", "client")
-	bearerWire{account: "kimi"}.apply(out, info)
+	bearerWire{}.apply(out, info)
 	if a, k := out.Header.Get("Authorization"), out.Header.Get("X-Api-Key"); a != "" || k != "" {
 		t.Errorf("an unkeyed request still carries Authorization=%q X-Api-Key=%q", a, k)
 	}

@@ -238,16 +238,17 @@ def iso(t):
     return datetime.fromtimestamp(t, timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def set_kimi_key(key, tenant=None):
-    """The tenant's enrolled kimi key: written to its kimi.json (None: no
-    file), the driver's watcher reset so the next read sees it."""
-    st = pkimi._st(tenant or T)
-    with (tenant or T).refresh_lock:
+def set_kimi_key(key, tenant=None, name="kimi"):
+    """The tenant's enrolled kimi key: its kimi.json on the keyring, one
+    account named `name` (None: no file), the keyring's cache reset so the
+    next read sees it."""
+    st = pkimi.KEYS.store(tenant or T)
+    with st.keys_lock:
         if key is None:
             ex._store.remove(st.file)
         else:
-            ex._store.write_json(st.file, {"api_key": key})
-        st.file_key, st.file_mtime = None, None
+            ex._store.write_json(st.file, [{"name": name, "api_key": key}])
+        st.keys, st.keys_mtime = None, None
 
 
 def kimi_window(pct, reset_at, limit=100.0):
@@ -279,7 +280,7 @@ def kimi_raw(five_hour=8.0, weekly=2.0, total_limit=100.0, total_remaining=99.0,
 def kimi_result(five_hour=8.0, weekly=2.0, total_limit=100.0, total_remaining=99.0,
                 parallel_limit=20.0, membership="LEVEL_INTERMEDIATE", ok=1,
                 ts=None, good_age=0, stale=0, http=0, err=""):
-    """A minimal Kimi poll result shaped like poll_kimi()'s output, read from
+    """A minimal Kimi poll result shaped like the Kimi keyring poll's output, read from
     a recorded-shape /usages body."""
     now = ts or time.time()
     return read({"name": "kimi", "kind": "provider", "provider": "kimi", "ok": ok,
@@ -831,7 +832,7 @@ class TestKimiPollNormalization(unittest.TestCase):
         }
         self._patch_get(raw)
         try:
-            res = pkimi.poll_kimi(T)
+            res = pkimi.KEYS.poll(T, account="kimi")
             self.assertEqual(res["ok"], 1)
             self.assertNotIn("usage", res, "the reading replaces the usage contract")
             w = ex._reading_windows(res["reading"])
@@ -880,7 +881,7 @@ class TestKimiPollNormalization(unittest.TestCase):
         # binding on the 5-hour window alone, not a failed poll.
         self._patch_get(kimi_raw(five_hour=8.0, weekly=None))
         try:
-            res = pkimi.poll_kimi(T)
+            res = pkimi.KEYS.poll(T, account="kimi")
             self.assertEqual(res["ok"], 1, res["err"])
             self.assertEqual(list(ex._reading_windows(res["reading"])), ["five_hour"])
             self.assertEqual(ex._provider_effective(res), 8.0)
@@ -898,7 +899,7 @@ class TestKimiPollNormalization(unittest.TestCase):
         # reading, never a reading of nothing.
         self._patch_get({})
         try:
-            res = pkimi.poll_kimi(T)
+            res = pkimi.KEYS.poll(T, account="kimi")
             self.assertEqual(res["ok"], 0)
             self.assertIsNone(res["reading"])
             self.assertIn("no window", res["err"])
@@ -926,7 +927,7 @@ class TestKimiPollNormalization(unittest.TestCase):
         }
         self._patch_get(raw)
         try:
-            res = pkimi.poll_kimi(T)
+            res = pkimi.KEYS.poll(T, account="kimi")
             w = ex._reading_windows(res["reading"])["seven_day"]
             self.assertEqual(w["used"], 7.5)
             self.assertEqual(w["limit"], 100.0)
@@ -940,7 +941,7 @@ class TestKimiPollNormalization(unittest.TestCase):
         }
         self._patch_get(raw)
         try:
-            res = pkimi.poll_kimi(T)
+            res = pkimi.KEYS.poll(T, account="kimi")
             rs = ex._reading_windows(res["reading"])["seven_day"]["resets_at"]
             self.assertIsInstance(rs, int)
             self.assertGreater(rs, 1_000_000_000)
@@ -999,7 +1000,7 @@ class TestKimiDisabledWhenNoKey(unittest.TestCase):
         with T.lock:
             T.state.pop("kimi", None)
         set_kimi_key(None)
-        res = pkimi.poll_kimi(T)
+        res = pkimi.KEYS.poll(T, account="kimi")
         self.assertEqual(res["ok"], 0)
         self.assertIn("not configured", res["err"])
         t = ex.render([T])
@@ -3851,7 +3852,7 @@ def runway_raw(balance=500, daily=3, max_daily=200, concurrent=2, monthly=10000)
 
 
 def runway_result(ok=1, good_age=0, **raw):
-    """A Runway poll result shaped like poll_runway()'s output."""
+    """A Runway poll result shaped like the Runway keyring poll's output."""
     now = time.time()
     return read({"name": "runway", "kind": "provider", "provider": "runway", "ok": ok,
                  "ts": now, "good_ts": now - good_age, "stale": 0, "http": 0, "err": "",
@@ -4167,7 +4168,7 @@ class TestProviderRegistry(unittest.TestCase):
         self.assertEqual(set(ex.PROVIDERS), {"kimi", "gpt", "anthropic", "local", "anthropic-api"})
 
     def test_poll_dispatch_identity(self):
-        self.assertIs(ex.PROVIDERS["kimi"]["poll"], pkimi.poll_kimi)
+        self.assertEqual(ex.PROVIDERS["kimi"]["poll"], pkimi.KEYS.poll, "Kimi polls on the keyring")
         self.assertIs(ex.PROVIDERS["gpt"]["poll"], pcodex.poll_gpt)
 
     def test_anthropic_facade_never_dispatches(self):
@@ -6203,8 +6204,8 @@ class TestPoolPayloadAndMetrics(HTTPBase):
 # ---- #72 unified provider auth ----------------------------------------------
 
 def clear_kimi_creds():
-    """Remove the tenant's enrolled kimi key file and reset the watcher, so
-    _kimi_key() reads no key."""
+    """Remove the tenant's enrolled kimi keys file and reset the cache, so
+    the keyring reads no key."""
     set_kimi_key(None)
 
 
@@ -6359,7 +6360,7 @@ class TestAuthProvidersEndpoint(AuthHTTP):
         # live anthropic tokens, pool refresh tokens, and the enrolled kimi key
         # must all be absent — fingerprints only.
         seed_openai_pool({"name": "gpt-a"})
-        pkimi._persist_kimi_key(T, "sk-kimi-super-secret-123")
+        pkimi.KEYS.persist(T, {"kimi": "sk-kimi-super-secret-123"})
         code, d = self.get("/auth/providers", key="test-switch-key")
         blob = json.dumps(d)
         for secret in ("r-" + ACCT_A, "tok-" + ACCT_A, "rt-gpt-a", "at-gpt-a",
@@ -6439,7 +6440,7 @@ class TestReauthAliasFrozen(AuthHTTP):
         self.assertEqual(g["state"], state)
 
     def test_reauth_complete_refuses_a_foreign_providers_state(self):
-        _, state = pkimi._kimi_auth_begin(T)
+        _, state = pkimi.KEYS.begin(T)
         code, d = self.post("/reauth/complete", {"state": state, "code": "c"},
                             key="test-switch-key")
         self.assertEqual(code, 422)
@@ -6452,7 +6453,7 @@ class TestAuthPendingIsolation(AuthHTTP):
     never complete on another, and every take is one-shot."""
 
     def test_cross_provider_complete_422s(self):
-        _, state = pkimi._kimi_auth_begin(T)
+        _, state = pkimi.KEYS.begin(T)
         code, d = self.post("/auth/gpt/complete", {"state": state,
                                                    "name": "gpt-b", "redirect_url": "x"},
                             key="test-switch-key")
@@ -6460,7 +6461,7 @@ class TestAuthPendingIsolation(AuthHTTP):
         self.assertIn("started for kimi", d["error"])
 
     def test_grants_are_one_shot(self):
-        _, state = pkimi._kimi_auth_begin(T)
+        _, state = pkimi.KEYS.begin(T)
         self.post("/auth/kimi/complete", {"state": state, "api_key": ""},
                   key="test-switch-key")
         code, d = self.post("/auth/kimi/complete", {"state": state, "api_key": "x"},
@@ -6814,9 +6815,9 @@ class TestCodexEnrollShapeConversion(unittest.TestCase):
 
 
 class TestKimiEnrollAndKeySource(AuthHTTP):
-    """#72 — kimi's static key: the tenant's file and nothing else (no
+    """#72 — kimi's static keys: the tenant's keyring and nothing else (no
     process-wide key: a key belongs to a tenant), enrollment validates by
-    probe before persisting, and the response says the proxy holds its own copy."""
+    probe before persisting, and the response says no copy is held elsewhere."""
 
     def setUp(self):
         super().setUp()
@@ -6826,24 +6827,23 @@ class TestKimiEnrollAndKeySource(AuthHTTP):
         clear_kimi_creds()
 
     def test_key_resolution_is_the_tenants_file(self):
-        self.assertEqual(pkimi._kimi_key(T), "")
-        self.assertEqual(pkimi._kimi_key_source(T), "none")
+        self.assertEqual(pkimi.KEYS.load(T), {})
         self.assertFalse(ex.PROVIDERS["kimi"]["enabled"](T))
         self.assertFalse(hasattr(pkimi, "KIMI_API_KEY"), "no env fallback: a key belongs to a tenant")
-        pkimi._persist_kimi_key(T, "sk-kimi-file")
-        self.assertEqual(pkimi._kimi_key(T), "sk-kimi-file")
-        self.assertEqual(pkimi._kimi_key_source(T), "file")
+        pkimi.KEYS.persist(T, {"kimi": "sk-kimi-file"})
+        self.assertEqual(pkimi.KEYS.load(T), {"kimi": "sk-kimi-file"})
+        self.assertEqual([r["source"] for r in pkimi.KEYS.status(T, time.time())], ["file"])
         other = new_tenant()
         self.addCleanup(ex._registry.delete, other.id)
-        self.assertEqual(pkimi._kimi_key(other), "", "another tenant has no key of this one's")
+        self.assertEqual(pkimi.KEYS.load(other).get("kimi", ""), "", "another tenant has no key of this one's")
         self.assertFalse(ex.PROVIDERS["kimi"]["enabled"](other))
 
     def test_out_of_band_file_edit_is_adopted_live(self):
-        pkimi._persist_kimi_key(T, "sk-kimi-one")
-        with open(pkimi._st(T).file, "w") as f:
-            json.dump({"api_key": "sk-kimi-two"}, f)
-        os.utime(pkimi._st(T).file, (time.time() + 5, time.time() + 5))
-        self.assertEqual(pkimi._kimi_key(T), "sk-kimi-two", "mtime guard adopts edits")
+        pkimi.KEYS.persist(T, {"kimi": "sk-kimi-one"})
+        with open(pkimi.KEYS.store(T).file, "w") as f:
+            json.dump([{"name": "kimi", "api_key": "sk-kimi-two"}], f)
+        os.utime(pkimi.KEYS.store(T).file, (time.time() + 5, time.time() + 5))
+        self.assertEqual(pkimi.KEYS.load(T).get("kimi", ""), "sk-kimi-two", "mtime guard adopts edits")
 
     def test_enroll_validates_then_persists(self):
         probed = []
@@ -6856,14 +6856,14 @@ class TestKimiEnrollAndKeySource(AuthHTTP):
         self.assertEqual(code, 200)
         self.assertNotIn("authorize_url", d, "paste-key has no authorize step")
         code, r = self.post("/auth/kimi/complete",
-                            {"state": d["state"], "api_key": " sk-kimi-new "},
+                            {"state": d["state"], "name": "kimi", "api_key": " sk-kimi-new "},
                             key="test-switch-key")
         self.assertEqual(code, 200, r)
         self.assertEqual(r["account"], "kimi")
         self.assertNotIn("note", r, "the proxy is dispensed this key; there is no copy to update")
         self.assertEqual(probed, ["sk-kimi-new"], "validated with the TRIMMED key")
-        self.assertEqual(json.load(open(pkimi._st(T).file)), {"api_key": "sk-kimi-new"})
-        self.assertEqual(pkimi._kimi_key(T), "sk-kimi-new")
+        self.assertEqual(json.load(open(pkimi.KEYS.store(T).file)), [{"name": "kimi", "api_key": "sk-kimi-new"}])
+        self.assertEqual(pkimi.KEYS.load(T).get("kimi", ""), "sk-kimi-new")
         self.assertTrue(ex.PROVIDERS["kimi"]["enabled"](T))
         self.assertTrue(ex._poll_wakeup.is_set())
 
@@ -6874,27 +6874,27 @@ class TestKimiEnrollAndKeySource(AuthHTTP):
         pkimi._get_kimi_usages = refuse
         _, d = self.post("/auth/kimi/begin", {}, key="test-switch-key")
         code, r = self.post("/auth/kimi/complete",
-                            {"state": d["state"], "api_key": "sk-kimi-bogus"},
+                            {"state": d["state"], "name": "kimi", "api_key": "sk-kimi-bogus"},
                             key="test-switch-key")
         self.assertEqual(code, 422)
         self.assertIn("401", r["error"])
         self.assertNotIn("sk-kimi-bogus", r["error"], "the key never rides an error")
-        self.assertFalse(os.path.exists(pkimi._st(T).file))
+        self.assertFalse(os.path.exists(pkimi.KEYS.store(T).file))
 
     def test_junk_quota_payload_persists_nothing(self):
         pkimi._get_kimi_usages = lambda key: {"whatever": True}
         _, d = self.post("/auth/kimi/begin", {}, key="test-switch-key")
         code, r = self.post("/auth/kimi/complete",
-                            {"state": d["state"], "api_key": "sk-kimi-x"},
+                            {"state": d["state"], "name": "kimi", "api_key": "sk-kimi-x"},
                             key="test-switch-key")
         self.assertEqual(code, 422)
         self.assertIn("no usable quota", r["error"])
-        self.assertFalse(os.path.exists(pkimi._st(T).file))
+        self.assertFalse(os.path.exists(pkimi.KEYS.store(T).file))
 
     def test_empty_key_422s(self):
         _, d = self.post("/auth/kimi/begin", {}, key="test-switch-key")
         code, r = self.post("/auth/kimi/complete",
-                            {"state": d["state"], "api_key": "   "},
+                            {"state": d["state"], "name": "kimi", "api_key": "   "},
                             key="test-switch-key")
         self.assertEqual(code, 422)
         self.assertIn("api_key is required", r["error"])
@@ -7952,7 +7952,7 @@ class TestPollBackoff(unittest.TestCase):
         for obj, attr, val in ((pkimi, "_get_kimi_usages", lambda key: body("kimi")),
                                (psub, "_load_creds", lambda t: [ACCT_A]),
                                (ex, "_provider_poll_targets",
-                                lambda t: {"gpt": ("gpt", None), "kimi": ("kimi", None)}),
+                                lambda t: {"gpt": ("gpt", None), "kimi": ("kimi", "kimi")}),
                                (psub, "_ensure_token", lambda t, name, **_: name),
                                (psub, "_get", get),
                                (ex, "log", logged.append),
@@ -8497,6 +8497,81 @@ class TestPreferredDialCheckContract(PayBase, HTTPBase):
         self.assertEqual(code, 200)
         self.assertEqual(p["route"], "frontier/lane:opus")
         self.assertEqual(p["check"]["check"], "included")
+
+
+class TestPayEveryAccountOfAProvider(PayBase):
+    """C13: a class member's pay may say "<provider>/*", every account of that
+    provider by its money pot, so one classes document grants pots whose
+    account names differ per tenant. The document keeps the form; each
+    tenant's routes carry it expanded to exact pot ids."""
+
+    KIMI = "frontier/kimi/kimi-k3"
+    POT = ex._money_pot("kimi")
+
+    def setUp(self):
+        reset(opus_acct(30, resets=True), gpt_on_credits(), kimi_result())
+
+    def errors(self, doc):
+        return ex._validate_classes_doc(doc)
+
+    def test_the_form_is_accepted_on_a_member(self):
+        for doc in (pay_cfg(kimi=["kimi/*"]), pay_cfg(kimi=["kimi/*", f"kimi/{self.POT}"]),
+                    pay_cfg(opus=["anthropic/*"]), pay_cfg(opus=["anthropic-api/*", POT_A])):
+            with self.subTest(doc=doc):
+                self.assertEqual(self.errors(doc), [])
+
+    def test_refusals(self):
+        for doc, needle in (
+                (pay_cfg(kimi=["*/credits"]), "pay '*/credits': '*' stands for a provider's accounts"),
+                (pay_cfg(kimi=["*/*"]), "pay '*/*': '*' stands for a provider's accounts"),
+                (pay_cfg(kimi=["/*"]), "pay '/*': <provider>/* names one provider by its id"),
+                (pay_cfg(kimi=["a/b/*"]), "pay 'a/b/*': <provider>/* names one provider by its id"),
+                (pay_cfg(lanes={"opus": {"pay": ["anthropic-api/*"]}}),
+                 "pay 'anthropic-api/*': <provider>/* is a class member's"),
+                (pay_cfg(kimi=["nope/*"]), "pay 'nope/*': no provider 'nope'"),
+                (pay_cfg(kimi=["gpt/*"]), "pay 'gpt/*': gpt's accounts can never back a route of kimi"),
+                (pay_cfg(opus=["kimi/*"]), "pay 'kimi/*': kimi's accounts can never back a route of anthropic"),
+                (pay_cfg(kimi=["kimi/*", "kimi/*"]), "pay lists a pot twice")):
+            with self.subTest(needle=needle):
+                errs = self.errors(doc)
+                self.assertTrue(any(needle in e for e in errs), (needle, errs))
+
+    def test_a_load_drops_a_member_whose_pay_names_no_account(self):
+        out = load_classes(pay_cfg(kimi=["*/credits"]))
+        self.assertNotIn("kimi", {m.get("provider") for c in out for m in c["members"]})
+
+    def test_each_tenant_expands_it_to_its_own_pots(self):
+        classes = load_classes(pay_cfg(kimi=["kimi/*"], opus=["anthropic-api/*"]))
+        mine = {ACCT_A: "anthropic", "kimi": "kimi", "kimi-b": "kimi", "gpt": "gpt", "team-a": "anthropic-api"}
+        theirs = {ACCT_B: "anthropic", "moon": "kimi"}
+        a = ex._routes(classes, {}, mine)
+        b = ex._routes(classes, {}, theirs)
+        self.assertEqual(a[self.KIMI]["pay"], [f"kimi/{self.POT}", f"kimi-b/{self.POT}"])
+        self.assertEqual(b[self.KIMI]["pay"], [f"moon/{self.POT}"])
+        self.assertEqual(a["frontier/lane:opus"]["pay"], [f"team-a/{ex._money_pot('anthropic-api')}"])
+        self.assertEqual(b["frontier/lane:opus"]["pay"], [], "no account of the provider, no pot")
+        self.assertEqual(ex._routes(classes, {}, {})[self.KIMI]["pay"], [])
+        for r in (a, b):
+            self.assertEqual(r[self.KIMI]["pay_declared"], ["kimi/*"])
+            self.assertEqual(ex._route_setting_issues(r[self.KIMI], mine, {}), [])
+
+    def test_an_exact_pot_beside_it_is_listed_once_in_its_place(self):
+        classes = load_classes(pay_cfg(kimi=[f"kimi-b/{self.POT}", "kimi/*"]))
+        r = ex._routes(classes, {}, {"kimi": "kimi", "kimi-b": "kimi"})
+        self.assertEqual(r[self.KIMI]["pay"], [f"kimi-b/{self.POT}", f"kimi/{self.POT}"])
+
+    def test_the_document_keeps_the_form_and_preferred_carries_exact_ids(self):
+        classes_reset(kimi_result(), cfg=pay_cfg(kimi=["kimi/*"]))
+        p = ex._preferred_payload(T)
+        self.assertEqual(p["routes"][self.KIMI]["pay"], [f"kimi/{self.POT}"])
+        self.assertEqual(ex._classes_derived(ex._classes)["frontier"]["members"][2]["pay"], ["kimi/*"])
+        _, _, money = ex._normalize_money({"pots": {f"kimi/{self.POT}": {"route_budgets": {self.KIMI: 1}}}},
+                                          strict=False)
+        with T.lock:
+            snap = list(T.state.values())
+        roster = ex._decision_view(T, snap, time.time())[0]
+        errs = ex._money_problems(money, roster, ex._routes(ex._classes, {}, roster))[0]
+        self.assertFalse([e for e in errs if "route_budgets" in e], "a route budget on an expanded pot binds")
 
 
 class TestClassesSettingsValidation(PayBase):
@@ -12964,10 +13039,10 @@ class TestAnthropicApiProvider(AuthHTTP):
     def setUp(self):
         super().setUp()
         d = tempfile.mkdtemp(dir=_TMP)
-        self.addCleanup(setattr, papi._st(T), "file", papi._st(T).file)
-        papi._st(T).file = os.path.join(d, "anthropic-api.json")
-        self.addCleanup(setattr, papi._st(T), "keys", None)
-        papi._st(T).keys = None
+        self.addCleanup(setattr, papi.KEYS.store(T), "file", papi.KEYS.store(T).file)
+        papi.KEYS.store(T).file = os.path.join(d, "anthropic-api.json")
+        self.addCleanup(setattr, papi.KEYS.store(T), "keys", None)
+        papi.KEYS.store(T).keys = None
         self.seen = []
         orig = papi._get_models
         self.addCleanup(setattr, papi, "_get_models", orig)
@@ -12981,7 +13056,7 @@ class TestAnthropicApiProvider(AuthHTTP):
                          {"state": d["state"], "name": name, "api_key": key}, key="test-switch-key")
 
     def poll_into_state(self, name):
-        res = papi.poll(T, None, account=name)
+        res = papi.KEYS.poll(T, None, account=name)
         res["good_ts"] = res["ts"]
         with T.lock:
             T.state[name] = res
@@ -12991,12 +13066,12 @@ class TestAnthropicApiProvider(AuthHTTP):
         code, d = self.enroll("team-a")
         self.assertEqual((code, d["account"], d["reauthorized"]), (200, "team-a", False))
         self.assertEqual(self.seen, [self.KEY], "validated with one model list")
-        with open(papi._st(T).file) as f:
+        with open(papi.KEYS.store(T).file) as f:
             self.assertEqual(json.load(f), [{"name": "team-a", "api_key": self.KEY}])
-        self.assertEqual(os.stat(papi._st(T).file).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(papi.KEYS.store(T).file).st_mode & 0o777, 0o600)
         code, d = self.enroll("team-a", key="test-api-key-two")
         self.assertEqual((code, d["reauthorized"]), (200, True), "a name enrolled again is re-keyed")
-        self.assertEqual(papi._load(T), {"team-a": "test-api-key-two"})
+        self.assertEqual(papi.KEYS.load(T), {"team-a": "test-api-key-two"})
 
     def test_a_refused_key_saves_nothing(self):
         def refuse(key):
@@ -13006,13 +13081,13 @@ class TestAnthropicApiProvider(AuthHTTP):
         self.assertEqual(code, 422)
         self.assertIn("HTTP 401", d["error"])
         self.assertNotIn(self.KEY, d["error"])
-        self.assertFalse(os.path.exists(papi._st(T).file))
+        self.assertFalse(os.path.exists(papi.KEYS.store(T).file))
 
     def test_a_name_another_account_holds_is_refused(self):
         for name in (ACCT_A, "kimi", "bad name"):
             code, d = self.enroll(name)
             self.assertEqual(code, 422, name)
-        self.assertFalse(os.path.exists(papi._st(T).file))
+        self.assertFalse(os.path.exists(papi.KEYS.store(T).file))
 
     def test_the_auth_page_lists_accounts_by_fingerprint_never_the_key(self):
         self.enroll("team-a")
@@ -13024,14 +13099,14 @@ class TestAnthropicApiProvider(AuthHTTP):
 
     def test_the_poll_reads_an_open_unmetered_allowance(self):
         self.enroll("team-a")
-        res = papi.poll(T, None, account="team-a")
+        res = papi.KEYS.poll(T, None, account="team-a")
         self.assertEqual((res["ok"], res["kind"], res["provider"]), (1, "provider", "anthropic-api"))
         self.assertEqual(res["reading"]["kind"], "api")
         self.assertTrue(ex._unmetered(res))
         def refuse(key):
             raise urllib.error.HTTPError(papi.ANTHROPIC_API_BASE + "/v1/models", 401, "no", {}, None)
         papi._get_models = refuse
-        res = papi.poll(T, None, account="team-a")
+        res = papi.KEYS.poll(T, None, account="team-a")
         self.assertEqual((res["ok"], res["http"], ex._classify_poll_error(res)), (0, 401, "auth"))
 
     def test_its_accounts_serve_every_lane_as_api_accounts(self):
@@ -13137,6 +13212,36 @@ class NoticesBase(unittest.TestCase):
 
     def doc(self, **v):
         return self.n.payload({"acme": nview(**v)})["accounts"]["acme"]
+
+
+class TestNoticesCoverage(unittest.TestCase):
+    """_notices_coverage: a dry account's class is covered by another account
+    whose check is included or paid now, in member order. A second account of
+    the same member (a second key of one provider, PROVIDERS-PLAN.md §3)
+    counts, named by its account; another member, by its id."""
+
+    @staticmethod
+    def ctx(own_checks, other_check="no"):
+        own = {"kind": "provider", "provider": "acme", "model": "m1"}
+        other = {"kind": "provider", "provider": "other", "model": "model-x"}
+        return {"classes": [{"class": "images", "members": [own, other]}],
+                "routes": {"images/acme/m1": {"accounts": ["acme", "acme-two"]},
+                           "images/other/model-x": {"accounts": ["other"]}},
+                "checks": {"images/acme/m1": own_checks,
+                           "images/other/model-x": {"other": {"check": other_check}}}}
+
+    def test_another_account_of_its_own_member_covers_it(self):
+        ctx = self.ctx({"acme": {"check": "no"}, "acme-two": {"check": "paid"}}, other_check="included")
+        self.assertEqual(ex._notices_coverage("acme", ctx), [{"class": "images", "covered_by": "acme-two"}])
+
+    def test_its_own_check_never_covers_it(self):
+        ctx = self.ctx({"acme": {"check": "paid"}, "acme-two": {"check": "no"}}, other_check="included")
+        self.assertEqual(ex._notices_coverage("acme", ctx), [{"class": "images", "covered_by": "other/model-x"}])
+        ctx = self.ctx({"acme": {"check": "paid"}, "acme-two": {"check": "no"}})
+        self.assertEqual(ex._notices_coverage("acme", ctx), [{"class": "images", "covered_by": None}])
+
+    def test_a_class_it_does_not_serve_is_not_listed(self):
+        self.assertEqual(ex._notices_coverage("nobody", self.ctx({})), [])
 
 
 class TestNoticesCycle(NoticesBase):
@@ -13479,14 +13584,15 @@ class TestNoticesInTheDocument(PayBase):
         self.assertEqual(doc, {"enabled": False, "why": "no bridge address", "accounts": {}})
 
     def test_an_api_account_whose_pot_no_dial_draws_is_not_prepaid(self):
-        with mock.patch.object(papi, "_load", return_value={"key-a": "sk-test"}):
-            now = time.time()
-            api = read({"name": "key-a", "kind": "provider", "provider": "anthropic-api", "ok": 1,
-                        "ts": now, "good_ts": now, "stale": 0, "http": 0, "err": "",
-                        "retry_after": None, "raw": {}})
-            classes_reset(opus_acct(30, resets=True), api)
-            self.assertEqual(ex._preferred_payload(T)["accounts"]["key-a"]["kind"], "api")
-            self.assertEqual(ex._preferred_payload(T)["notices"]["accounts"], {})
+        papi.KEYS.persist(T, {"key-a": "sk-test"})
+        self.addCleanup(papi.KEYS.remove, T, "key-a")
+        now = time.time()
+        api = read({"name": "key-a", "kind": "provider", "provider": "anthropic-api", "ok": 1,
+                    "ts": now, "good_ts": now, "stale": 0, "http": 0, "err": "",
+                    "retry_after": None, "raw": {}})
+        classes_reset(opus_acct(30, resets=True), api)
+        self.assertEqual(ex._preferred_payload(T)["accounts"]["key-a"]["kind"], "api")
+        self.assertEqual(ex._preferred_payload(T)["notices"]["accounts"], {})
 
 
 class TestNoticesRecharge(NoticesBase):
@@ -13657,26 +13763,26 @@ class TestAuthRemove(AuthRemoveBase):
         self.assertEqual(self.post_t("/auth/no-such-provider/remove", {"account": "api-a"})[0], 404)
         code, d = self.post_t("/auth/kimi/remove", {"account": "api-a"})
         self.assertEqual(code, 404, "an account is removed only through its own provider")
-        self.assertEqual(papi._load(self.t), {"api-a": self.SECRETS["api-a"]}, "nothing was removed")
+        self.assertEqual(papi.KEYS.load(self.t), {"api-a": self.SECRETS["api-a"]}, "nothing was removed")
 
     def test_another_tenants_account_is_unknown(self):
-        seed = papi._st(T)
+        seed = papi.KEYS.store(T)
         ex._store.write_json(seed.file, [{"name": "api-t", "api_key": "test-remove-other-tenant"}])
         seed.keys = None
         self.addCleanup(ex._store.remove, seed.file)
         self.addCleanup(setattr, seed, "keys", None)
         code, _ = self.post_t("/auth/anthropic-api/remove", {"account": "api-t"})
         self.assertEqual(code, 404)
-        self.assertEqual(papi._load(T), {"api-t": "test-remove-other-tenant"})
+        self.assertEqual(papi.KEYS.load(T), {"api-t": "test-remove-other-tenant"})
 
     def test_an_api_key_then_the_last(self):
         self.enroll_api("api-a")
         self.enroll_api("api-b")
-        self.put_state(papi.poll(self.t, None, account="api-a"), papi.poll(self.t, None, account="api-b"))
+        self.put_state(papi.KEYS.poll(self.t, None, account="api-a"), papi.KEYS.poll(self.t, None, account="api-b"))
         self.assertLessEqual({"api-a", "api-b"}, self.listed())
         code, d = self.post_t("/auth/anthropic-api/remove", {"account": "api-a"})
         self.assertEqual((code, d), (200, {"account": "api-a", "removed": True}))
-        self.assertEqual(ex._store.read_json(papi._st(self.t).file),
+        self.assertEqual(ex._store.read_json(papi.KEYS.store(self.t).file),
                          [{"name": "api-b", "api_key": self.SECRETS["api-b"]}])
         self.assertNotIn("api-a", self.t.state)
         self.assertNotIn("api-a", self.listed())
@@ -13684,7 +13790,7 @@ class TestAuthRemove(AuthRemoveBase):
         self.assert_no_secret("api-a")
         code, _ = self.post_t("/auth/anthropic-api/remove", {"account": "api-b"})
         self.assertEqual(code, 200)
-        self.assertFalse(os.path.exists(papi._st(self.t).file), "the file goes with its last key")
+        self.assertFalse(os.path.exists(papi.KEYS.store(self.t).file), "the file goes with its last key")
         self.assertFalse(ex.PROVIDERS["anthropic-api"]["enabled"](self.t))
         self.assertNotIn("api-b", self.listed())
         self.assert_no_secret("api-a", "api-b")
@@ -13734,20 +13840,20 @@ class TestAuthRemove(AuthRemoveBase):
         self.assertIn("kimi", self.listed())
         code, d = self.post_t("/auth/kimi/remove", {"account": "kimi"})
         self.assertEqual(code, 200, d)
-        self.assertFalse(os.path.exists(pkimi._st(self.t).file))
-        self.assertEqual(pkimi._kimi_key(self.t), "")
+        self.assertFalse(os.path.exists(pkimi.KEYS.store(self.t).file))
+        self.assertEqual(pkimi.KEYS.load(self.t).get("kimi", ""), "")
         self.assertNotIn("kimi", self.listed())
         self.assert_no_secret("kimi")
 
     def test_a_failed_rewrite_removes_nothing(self):
         self.enroll_api("api-a")
         self.enroll_api("api-b")
-        self.put_state(papi.poll(self.t, None, account="api-a"))
+        self.put_state(papi.KEYS.poll(self.t, None, account="api-a"))
         with mock.patch.object(ex._store, "write_json", side_effect=OSError("disk full")):
             code, d = self.post_t("/auth/anthropic-api/remove", {"account": "api-a"})
         self.assertEqual(code, 422, d)
         self.assertIn("could not be stored", d["error"])
-        self.assertIn("api-a", papi._load(self.t))
+        self.assertIn("api-a", papi.KEYS.load(self.t))
         self.assertIn("api-a", self.t.state, "the poll state stays with the account")
 
     def test_a_remove_during_an_add_stays_removed(self):
@@ -13760,14 +13866,14 @@ class TestAuthRemove(AuthRemoveBase):
             return {"data": []}
         papi._get_models = probe_while_removed
         self.enroll_api("api-b")
-        self.assertEqual(ex._store.read_json(papi._st(self.t).file),
+        self.assertEqual(ex._store.read_json(papi.KEYS.store(self.t).file),
                          [{"name": "api-b", "api_key": self.SECRETS["api-b"]}])
         self.assert_no_secret("api-a")
 
     def test_a_failed_write_never_says_where_credentials_live(self):
         """A 422 a member sees says what went wrong, never the store's path."""
         self.enroll_api("api-a")
-        boom = OSError(13, "Permission denied", papi._st(self.t).file)
+        boom = OSError(13, "Permission denied", papi.KEYS.store(self.t).file)
         with mock.patch.object(ex._store, "write_json", side_effect=boom), \
                 mock.patch.object(ex._store, "remove", side_effect=boom):
             _, d = self.post_t("/auth/anthropic-api/begin", {})
@@ -13855,7 +13961,7 @@ class TestReAddIsANewIdentity(AuthRemoveBase):
             self.assertEqual(self.post_t("/auth/anthropic-api/remove", {"account": "api-a"})[0], 200)
         adder.join(5)
         self.assertEqual(added.get("code"), 200)
-        self.assertIn("api-a", papi._load(self.t), "the re-add stands")
+        self.assertIn("api-a", papi.KEYS.load(self.t), "the re-add stands")
         self.assertIsNotNone(self.epoch("api-a"), "an enrolled account has an epoch")
 
 
@@ -13877,8 +13983,8 @@ class TestKimiKeyPerTenant(AuthRemoveBase):
         self.addCleanup(ex._registry.delete, other.id)
         empty = new_tenant("kimi none")
         self.addCleanup(ex._registry.delete, empty.id)
-        pkimi._persist_kimi_key(self.t, "sk-kimi-tenant-a")
-        pkimi._persist_kimi_key(other, "sk-kimi-tenant-b")
+        pkimi.KEYS.persist(self.t, {"kimi": "sk-kimi-tenant-a"})
+        pkimi.KEYS.persist(other, {"kimi": "sk-kimi-tenant-b"})
         self.assertEqual(self.get_t(self.t, "/api-key?account=kimi"),
                          (200, {"account": "kimi", "api_key": "sk-kimi-tenant-a"}))
         self.assertEqual(self.get_t(other, "/api-key?account=kimi"),
@@ -13888,6 +13994,241 @@ class TestKimiKeyPerTenant(AuthRemoveBase):
         self.assertNotIn("api_key", d)
         self.assertEqual(self.post_t("/auth/kimi/remove", {"account": "kimi"})[0], 200)
         self.assertEqual(self.get_t(self.t, "/api-key?account=kimi")[1]["reason"], "no_key")
+
+
+class TestKeyring(AuthRemoveBase):
+    """providers/keyring.py (PROVIDERS-PLAN.md cut 1), over the two shared
+    providers declared on it: several named keys per provider per tenant,
+    each its own account; remove drops one and the file goes with the last;
+    names follow the roster's rules (D5: a provider's id is its own
+    provider's alone); status rows carry fingerprints, never a key; and a
+    tenant's keys are its own. Fakes only."""
+
+    KEYS = {"kimi": "test-keyring-kimi-one-111111", "kimi-two": "test-keyring-kimi-two-222222",
+            "api-one": "test-keyring-api-one-333333", "api-two": "test-keyring-api-two-444444"}
+
+    def setUp(self):
+        super().setUp()
+        orig = pkimi._get_kimi_usages
+        self.addCleanup(setattr, pkimi, "_get_kimi_usages", orig)
+        pkimi._get_kimi_usages = lambda key: kimi_raw()
+
+    def enrol(self, pid, name, key=None, t=None):
+        t = t or self.t
+        _, d = self.post_on(t, f"/auth/{pid}/begin", {})
+        return self.post_on(t, f"/auth/{pid}/complete",
+                            {"state": d["state"], "name": name, "api_key": key or self.KEYS[name]})
+
+    def post_on(self, t, path, obj):
+        orig = self.t
+        self.t = t
+        try:
+            return self.post_t(path, obj)
+        finally:
+            self.t = orig
+
+    def get_on(self, t, path):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{tp(path, t)}")
+        req.add_header("X-Switch-Key", "test-switch-key")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode() or "null")
+
+    def test_two_accounts_of_one_provider_in_one_tenant(self):
+        for pid, kr_, names in (("kimi", pkimi.KEYS, ("kimi", "kimi-two")),
+                                ("anthropic-api", papi.KEYS, ("api-one", "api-two"))):
+            with self.subTest(pid):
+                for n in names:
+                    code, r = self.enrol(pid, n)
+                    self.assertEqual((code, r), (200, {"account": n, "enrolled": True, "reauthorized": False}))
+                kr = ex.PROVIDERS[pid]
+                self.assertEqual(kr["accounts"](self.t), list(names))
+                targets = ex._provider_poll_targets(self.t)
+                self.assertEqual({n: targets[n] for n in names}, {n: (pid, n) for n in names},
+                                 "one poll target per account, named like it")
+                for n in names:
+                    r = kr["poll"](self.t, account=n)
+                    self.assertEqual((r["ok"], r["name"], r["provider"]), (1, n, pid), r["err"])
+                self.assertEqual(ex._store.read_json(kr_.store(self.t).file), [{"name": n, "api_key": self.KEYS[n]} for n in names])
+
+    def test_a_kimi_poll_reads_its_own_accounts_key(self):
+        seen = []
+        pkimi._get_kimi_usages = lambda key: seen.append(key) or kimi_raw()
+        self.enrol("kimi", "kimi")
+        self.enrol("kimi", "kimi-two")
+        seen.clear()
+        pkimi.KEYS.poll(self.t, account="kimi-two")
+        pkimi.KEYS.poll(self.t, account="kimi")
+        self.assertEqual(seen, [self.KEYS["kimi-two"], self.KEYS["kimi"]])
+        r = pkimi.KEYS.poll(self.t, account="kimi-three")
+        self.assertEqual((r["ok"], r["err"]), (0, "no kimi key for 'kimi-three' (not configured: enrol one on /auth)"))
+
+    def test_removing_one_keeps_the_other_and_the_file_goes_with_the_last(self):
+        self.enrol("kimi", "kimi")
+        self.enrol("kimi", "kimi-two")
+        path = pkimi.KEYS.store(self.t).file
+        for n in ("kimi", "kimi-two"):
+            self.put_state({"name": n, "ok": 1, "kind": "provider", "provider": "kimi",
+                            "reading": {"kind": "subscription"}, "ts": time.time()})
+        self.assertEqual(self.post_t("/auth/kimi/remove", {"account": "kimi"}), (200, {"account": "kimi", "removed": True}))
+        self.assertEqual(ex._store.read_json(path), [{"name": "kimi-two", "api_key": self.KEYS["kimi-two"]}])
+        self.assertEqual(pkimi.KEYS.names(self.t), ["kimi-two"])
+        self.assertNotIn("kimi", self.t.state)
+        self.assertIn("kimi-two", self.t.state)
+        self.assertTrue(ex.PROVIDERS["kimi"]["enabled"](self.t))
+        self.assertEqual(self.post_t("/auth/kimi/remove", {"account": "kimi"})[0], 404, "a remove that sticks")
+        self.assertEqual(self.post_t("/auth/kimi/remove", {"account": "kimi-two"})[0], 200)
+        self.assertFalse(os.path.exists(path), "the file goes with its last key")
+        self.assertFalse(ex.PROVIDERS["kimi"]["enabled"](self.t))
+        self.assertEqual(self.left_in_dir(), [])
+
+    def left_in_dir(self):
+        hits = []
+        for root, _dirs, files in os.walk(self.t.dir):
+            for fname in files:
+                with open(os.path.join(root, fname), "rb") as f:
+                    blob = f.read()
+                hits += [fname for k in self.KEYS.values() if k.encode() in blob]
+        return hits
+
+    def test_the_name_rules(self):
+        self.enrol("anthropic-api", "api-one")
+        cases = (("kimi", "kimi", 200, None),                     # D5: its own provider's id
+                 ("kimi", "gpt", 422, "'gpt' is another provider's id"),
+                 ("anthropic-api", "kimi", 422, "'kimi' is another provider's id"),
+                 ("kimi", "api-one", 422, "'api-one' already names a anthropic-api account"),
+                 ("kimi", "-dash", 422, "name must be"),
+                 ("kimi", "a/b", 422, "name must be"),
+                 ("kimi", "x" * 65, 422, "name must be"),
+                 ("kimi", "", 422, "name is required"))
+        for pid, name, want, err in cases:
+            with self.subTest(name=name):
+                code, r = self.enrol(pid, name, key="test-keyring-name-rule-555555")
+                self.assertEqual(code, want, r)
+                if err:
+                    self.assertIn(err, r["error"])
+        self.assertEqual(pkimi.KEYS.names(self.t), ["kimi"])
+        self.assertEqual(papi.KEYS.names(self.t), ["api-one"])
+        code, r = self.enrol("kimi", "kimi", key="test-keyring-kimi-rotated-6")
+        self.assertEqual((code, r["reauthorized"]), (200, True), "the same name again replaces its key")
+        self.assertEqual(pkimi.KEYS.load(self.t), {"kimi": "test-keyring-kimi-rotated-6"})
+
+    def test_an_account_loop_name_is_refused(self):
+        with mock.patch.object(ex, "_account_loop_names", return_value=["loop-acct"]):
+            with self.assertRaises(ValueError) as cm:
+                pkimi.KEYS.complete(self.t, {}, {"name": "loop-acct", "api_key": "k"})
+        self.assertEqual(str(cm.exception), "'loop-acct' already names another account — nothing was saved")
+
+    def test_a_keyring_it_cannot_read_is_never_written_over(self):
+        path = pkimi.KEYS.store(self.t).file
+        for doc, why in (([{"name": "kimi", "api_key": self.KEYS["kimi"]}, {"name": 5}],
+                          "an entry is not {name, api_key}"),
+                         ({"api_key": self.KEYS["kimi"]}, "it is not a list of {name, api_key}"),
+                         ([{"name": "kimi", "api_key": self.KEYS["kimi"]},
+                           {"name": "kimi", "api_key": self.KEYS["kimi-two"]}], "it names an account twice")):
+            with self.subTest(why=why):
+                ex._store.write_json(path, doc)
+                with open(path, "rb") as f:
+                    before = f.read()
+                code, r = self.enrol("kimi", "kimi-two")
+                self.assertEqual((code, r["error"]), (422, f"the kimi keyring cannot be read ({why}), so "
+                                                            "'kimi-two' was not saved — nothing was changed"))
+                code, r = self.post_t("/auth/kimi/remove", {"account": "kimi:keyring"})
+                self.assertEqual(code, 422, r)
+                self.assertIn("cannot be read", r["error"])
+                with open(path, "rb") as f:
+                    self.assertEqual(f.read(), before, "the file is left as it is")
+                code, d = self.get_on(self.t, "/auth/providers")
+                row = d["providers"]["kimi"]["accounts"][-1]
+                self.assertEqual((row["name"], row["health"], row["last_error_kind"]),
+                                 ("kimi:keyring", "auth_dead", "unreadable"))
+                self.assertEqual(row["err"], "the saved Kimi for Coding (Moonshot) accounts can't be read; "
+                                             "adding or removing one is refused until the hive's operator "
+                                             "repairs them")
+                text = json.dumps(d)
+                self.assertNotIn(self.t.dir, text)
+                for k in self.KEYS.values():
+                    self.assertNotIn(k, text)
+                health = ex._unified_account_health(self.t, time.time())
+                self.assertEqual(health["worst"], "auth_dead", "the strip says a human must act")
+        with open(path, "wb") as f:
+            f.write(b"\x00 not json")
+        code, r = self.enrol("kimi", "kimi-two")
+        self.assertEqual(code, 422)
+        self.assertIn("it does not open: ", r["error"])
+        ex._store.remove(path)
+        self.assertEqual(self.enrol("kimi", "kimi-two")[0], 200, "a fixed file enrols again")
+        self.assertNotIn("kimi:keyring", [r["name"] for r in ex.PROVIDERS["kimi"]["auth"]["status"](self.t, 0)])
+
+    def test_one_name_never_lands_on_two_providers(self):
+        """Both enrolments pass the first name check and probe; the check that
+        counts runs again under the tenant's enrol_lock, which every
+        provider's enrolment shares, so the second sees the first's account."""
+        out = {}
+
+        def enrol(kr, key):
+            try:
+                out[kr.pid] = kr.complete(self.t, {}, {"name": "shared", "api_key": key})
+            except ValueError as e:
+                out[kr.pid] = str(e)
+        threads = [threading.Thread(target=enrol, args=(pkimi.KEYS, self.KEYS["kimi"])),
+                   threading.Thread(target=enrol, args=(papi.KEYS, self.KEYS["api-one"]))]
+        with self.t.enrol_lock:
+            for th in threads:
+                th.start()
+            time.sleep(0.3)
+            self.assertEqual((pkimi.KEYS.names(self.t), papi.KEYS.names(self.t)), ([], []),
+                             "neither writes while the shared lock is held")
+        for th in threads:
+            th.join(5)
+        won = [pid for pid, r in out.items() if isinstance(r, dict)]
+        self.assertEqual(len(won), 1, out)
+        lost = next(r for r in out.values() if isinstance(r, str))
+        self.assertEqual(lost, f"'shared' already names a {won[0]} account — nothing was saved")
+
+    def test_status_rows_carry_fingerprints_never_a_key(self):
+        self.enrol("kimi", "kimi")
+        self.enrol("kimi", "kimi-two")
+        code, d = self.get_on(self.t, "/auth/providers")
+        self.assertEqual(code, 200)
+        rows = d["providers"]["kimi"]["accounts"]
+        self.assertEqual([(r["name"], r["source"], r["key_fingerprint"]) for r in rows],
+                         [(n, "file", ex._key_fingerprint(self.KEYS[n])) for n in ("kimi", "kimi-two")])
+        text = json.dumps(d)
+        for k in self.KEYS.values():
+            self.assertNotIn(k, text)
+        self.assertEqual([f["name"] for f in d["providers"]["kimi"]["enroll"]["fields"]], ["name", "api_key"])
+
+    def test_api_key_per_account(self):
+        self.enrol("kimi", "kimi")
+        self.enrol("kimi", "kimi-two")
+        self.enrol("anthropic-api", "api-one")
+        self.enrol("anthropic-api", "api-two")
+        for n in ("kimi", "kimi-two", "api-one", "api-two"):
+            self.put_state({"name": n, "ok": 1, "kind": "provider",
+                            "provider": "kimi" if n.startswith("kimi") else "anthropic-api",
+                            "reading": {"kind": "api"}, "ts": time.time()})
+            self.assertEqual(ex.api_key(self.t, n), (self.KEYS[n], ""), n)
+            self.assertEqual(self.get_on(self.t, f"/api-key?account={n}"),
+                             (200, {"account": n, "api_key": self.KEYS[n]}))
+
+    def test_two_tenants_with_one_account_name_never_cross(self):
+        other = new_tenant("keyring other")
+        self.addCleanup(ex._registry.delete, other.id)
+        self.enrol("kimi", "kimi-two")
+        self.enrol("kimi", "kimi-two", key="test-keyring-kimi-other-777", t=other)
+        self.assertEqual(pkimi.KEYS.load(self.t), {"kimi-two": self.KEYS["kimi-two"]})
+        self.assertEqual(pkimi.KEYS.load(other), {"kimi-two": "test-keyring-kimi-other-777"})
+        self.assertEqual(self.get_on(other, "/api-key?account=kimi-two")[1]["api_key"],
+                         "test-keyring-kimi-other-777")
+        self.assertEqual(self.post_t("/auth/kimi/remove", {"account": "kimi-two"})[0], 200)
+        self.assertEqual(pkimi.KEYS.load(other), {"kimi-two": "test-keyring-kimi-other-777"},
+                         "a remove in one tenant leaves the other's")
+        code, d = self.get_on(self.t, "/api-key?account=kimi-two")
+        self.assertEqual(code, 404, "removed here, it is no account of this tenant's")
+        self.assertNotIn("api_key", d)
 
 
 if __name__ == "__main__":

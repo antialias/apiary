@@ -296,7 +296,9 @@ UA = None  # set in main
 #   enrol_lock     a remove (POST /auth/<pid>/remove) holds it from its
 #                  driver's remove through _forget_account; an enrolment
 #                  (/auth/<pid>/complete) takes it for its epoch advance, after
-#                  its driver wrote the account. So a remove's forget never
+#                  its driver wrote the account. A keyring enrolment also holds
+#                  it from its name check through its write, so two providers'
+#                  enrolments never take one name. So a remove's forget never
 #                  lands after an overlapping re-add's advance: an enrolled
 #                  account always has an epoch newer than any forget. Outermost:
 #                  taken before any lock a driver or the core takes.
@@ -570,16 +572,33 @@ _SPEND_CREDITS_REASON = ("spend_credits is retired: `pay` lists the money pots a
                          "draw (run migrate_pay.py to translate it)")
 
 
-def _route_settings_error(s, where):
+# A class member's pay may name every account of a provider at once (C13):
+# "<provider>/*" is each of the tenant's accounts of that provider by its
+# money pot, so one global classes document grants pots whose account names
+# differ per tenant. _routes expands it; a route's pay is exact ids.
+PAY_ALL = "*"
+
+
+def _route_settings_error(s, where, *, member=False):
     """Shape check of one route's owner settings (§1.9), shared by class members
-    and the `lanes` map: `pay` is a list of distinct pot-id strings, `stop_at`
-    is {window, level}. Whether the pots and the window exist depends on the
+    and the `lanes` map: `pay` is a list of distinct pot-id strings, a
+    member's also "<provider>/*" (never "*" for an account), `stop_at` is
+    {window, level}. Whether the pots and the window exist depends on the
     accounts, so _settings_problems checks that at PUT, never at load."""
     pay = s.get("pay")
     if pay is not None:
         if (not isinstance(pay, list)
                 or any(not isinstance(p, str) or "/" not in p for p in pay)):
-            return f"{where}: pay must be an array of pot ids (<account>/<pot>)"
+            return (f"{where}: pay must be an array of pot ids (<account>/<pot>"
+                    f"{' or <provider>/*' if member else ''})")
+        for p in pay:
+            acct, pot = _split_pot(p)
+            if PAY_ALL in acct:
+                return f"{where}: pay {p!r}: '*' stands for a provider's accounts (<provider>/*), never for an account"
+            if pot == PAY_ALL and not member:
+                return f"{where}: pay {p!r}: <provider>/* is a class member's; a lane's pay names its pots"
+            if pot == PAY_ALL and (not acct or "/" in acct):
+                return f"{where}: pay {p!r}: <provider>/* names one provider by its id"
         if len(set(pay)) != len(pay):
             return f"{where}: pay lists a pot twice"
     st = s.get("stop_at")
@@ -668,7 +687,7 @@ def _class_error(c, seen, *, check_guidance=True, strict=False):
                 return f"{where}: reserve_ceiling must be a number or null"
             if not 0 <= rc <= 100:
                 return f"{where}: reserve_ceiling must be a percent in [0, 100], got {rc}"
-        reason = _route_settings_error(m, where)
+        reason = _route_settings_error(m, where, member=True)
         if reason:
             return reason
         if strict:
@@ -3492,8 +3511,24 @@ def _money_pots(roster):
 # ("lane:<lane>"). Its accounts are the ones that can serve it: every Anthropic
 # account for a lane or a lane member, the provider's pool for a provider member.
 
+def _pay_pots(pay, roster):
+    """A route's pay as exact pot ids, in its order: "<provider>/*" becomes
+    the money pot of each of the roster's accounts of that provider (sorted;
+    none when it has none), and a pot listed twice is kept once."""
+    out = []
+    for p in pay:
+        prov, pot = _split_pot(p)
+        each = ([f"{a}/{_money_pot(pv)}" for a, pv in sorted(roster.items()) if pv == prov]
+                if pot == PAY_ALL else [p])
+        out += [x for x in each if x not in out]
+    return out
+
+
 def _routes(classes, lane_settings, roster):
-    """{route id: route} for every class member and every bare lane."""
+    """{route id: route} for every class member and every bare lane. A route's
+    pay is exact pot ids (a member's "<provider>/*" expanded against this
+    roster); pay_declared is what the document says, which
+    _route_setting_issues checks."""
     anth = sorted(n for n, pv in roster.items()
                   if pv == "anthropic" or (PROVIDERS.get(pv) or {}).get("lanes"))
     out = {}
@@ -3511,7 +3546,8 @@ def _routes(classes, lane_settings, roster):
             rid = f"{c['class']}/{mid}"
             out[rid] = {"id": rid, "kind": "member", "class": c["class"], "member": mid,
                         "lane": lane, "provider": prov, "scope": scope, "accounts": accts,
-                        "pay": list(m["pay"]), "stop_at": m["stop_at"],
+                        "pay": _pay_pots(m["pay"], roster), "pay_declared": list(m["pay"]),
+                        "stop_at": m["stop_at"],
                         "priority": m["priority"], "request_kind": c["request_kind"]}
     for lc in _lanes:
         st = lane_settings.get(lc["lane"]) or {}
@@ -3519,6 +3555,7 @@ def _routes(classes, lane_settings, roster):
         out[rid] = {"id": rid, "kind": "lane", "class": None, "member": None,
                     "lane": lc["lane"], "provider": "anthropic", "scope": lc["scope_model"],
                     "accounts": anth, "pay": list(st.get("pay") or []),
+                    "pay_declared": list(st.get("pay") or []),
                     "stop_at": st.get("stop_at"), "priority": None, "request_kind": "chat"}
     return out
 
@@ -3527,15 +3564,26 @@ def _route_setting_issues(route, roster, standings):
     """[(severity, message)] for one route's settings against the accounts:
     "error" for what a PUT refuses, which is structure alone (a pay pot that is
     no money pot; a known account's pot that can never back the route, being
-    another provider's); "dangling" for what depends on the accounts and their
+    another provider's; a <provider>/* of no provider, or of one whose
+    accounts can never back the route); "dangling" for what depends on the accounts and their
     readings (an account not in the pool; a stop_at window no measured account
     carries), which a PUT accepts with a warning,
     since the pool and the readings move under the document; and "warning"
     (stop_at >= 100; no account measured yet). At runtime an error or a
     dangling setting is shown and binds nothing (§1.9)."""
     out = []
-    for pid in route["pay"]:
+    for pid in route["pay_declared"]:
         acct, pot = _split_pot(pid)
+        if pot == PAY_ALL:
+            # Every account of provider `acct`: one that can back the route is
+            # its own provider's, or for a lane's an Anthropic or lane provider's.
+            if acct != "anthropic" and acct not in PROVIDERS:
+                out.append(("error", f"pay {pid!r}: no provider {acct!r}"))
+            elif acct != route["provider"] and not (
+                    route["provider"] == "anthropic" and (PROVIDERS.get(acct) or {}).get("lanes")):
+                out.append(("error", f"pay {pid!r}: {acct}'s accounts can never back a route of "
+                                     f"{route['provider']}"))
+            continue
         if pot != _money_pot(roster.get(acct, route["provider"])):
             out.append(("error", f"pay {pid!r}: not a money pot (an account's money pot is "
                                  f"{acct}/{_money_pot(roster.get(acct, route['provider']))})"))
@@ -4541,9 +4589,11 @@ def _prepaid_accounts(ctx):
 
 def _notices_coverage(acct, ctx):
     """[{class, covered_by}] for every class a member of which the account
-    serves (the member's route lists it): covered_by is the first other
-    member, in member order, with an account other than this one whose check
-    is included or paid now, else None."""
+    serves (the member's route lists it): covered_by is, in member order, the
+    first member with an account other than this one whose check is included
+    or paid now, else None. On a member of the account's own, that is
+    another account of it (a second key of one provider), named by its
+    account; on any other member, the member by its id."""
     out = []
     for c in ctx["classes"]:
         rids = [(m, f"{c['class']}/{_member_id(m)}") for m in c["members"]]
@@ -4552,11 +4602,12 @@ def _notices_coverage(acct, ctx):
             continue
         by = None
         for m, rid in rids:
-            if rid in mine:
-                continue
             checks = ctx["checks"].get(rid) or {}
-            if any(a != acct and ch["check"] in ("included", "paid") for a, ch in checks.items()):
-                by = _member_id(m)
+            order = (ctx["routes"].get(rid) or {}).get("accounts") or []
+            other = next((a for a in order + sorted(set(checks) - set(order))
+                          if a != acct and (checks.get(a) or {}).get("check") in ("included", "paid")), None)
+            if other is not None:
+                by = other if rid in mine else _member_id(m)
                 break
         out.append({"class": c["class"], "covered_by": by})
     return out
