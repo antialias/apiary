@@ -97,6 +97,8 @@ type tenant struct {
 	apiKeys       map[string]apiKeyEntry
 	apiKeyStates  map[string]string
 	apiKeyDropped map[string]string
+	apiKeyFails   map[string]apiKeyFail
+	apiKeyFlights map[string]*apiKeyFlight
 
 	// The refusal records and readings (records.go).
 	recMu    sync.Mutex
@@ -177,6 +179,8 @@ func newTenant(row tenantRow) *tenant {
 		apiKeys:         map[string]apiKeyEntry{},
 		apiKeyStates:    map[string]string{},
 		apiKeyDropped:   map[string]string{},
+		apiKeyFails:     map[string]apiKeyFail{},
+		apiKeyFlights:   map[string]*apiKeyFlight{},
 		records:         map[recKey]refusalRecord{},
 		readings:        map[string]headerReading{},
 		bindCache:       map[string]classBind{},
@@ -807,6 +811,8 @@ func (tn *tenant) dropDeparted(left []string) {
 	for a := range gone {
 		delete(tn.apiKeys, a)
 		delete(tn.apiKeyStates, a)
+		delete(tn.apiKeyDropped, a)
+		delete(tn.apiKeyFails, a)
 	}
 	tn.apiKeyMu.Unlock()
 	log.Printf("tenant %s: dropped the cached credentials of %s (left the brain's document, or re-added)",

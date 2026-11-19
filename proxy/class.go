@@ -951,7 +951,8 @@ func (tn *tenant) routeClass(ce *registryEntry, sess string, q classReq, hdr htt
 
 	// Each keyed member's key is asked before any check reads its records
 	// (memberKeyMissing; cached, so this asks the brain only when a key was
-	// dropped or has aged): a refusal's record of a key ends once the account's
+	// dropped or has aged, and a failed ask stands for apiKeyRetry, so the
+	// walk's own asks after it wait on no hung brain): a refusal's record of a key ends once the account's
 	// key is another (tenant.holds), so a key the owner replaced after the
 	// refusal serves at once, the bound member's check included.
 	for _, m := range members {

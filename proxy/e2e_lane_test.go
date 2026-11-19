@@ -133,9 +133,13 @@ type e2eEnv struct {
 	brainHard float64
 	// apiKeys (C8) is what /api-key dispenses, account -> key; an account
 	// absent is the brain's named 404 (no key placed). apiKeyCalls counts the
-	// requests. Under brainMu.
-	apiKeys     map[string]string
-	apiKeyCalls int
+	// requests; apiKeyHang makes /api-key answer nothing until its caller
+	// gives up, or, with apiKeyHangFor set, a 503 after that long (a brain
+	// that answers no one in time). Under brainMu.
+	apiKeys       map[string]string
+	apiKeyCalls   int
+	apiKeyHang    bool
+	apiKeyHangFor time.Duration
 
 	// codex knobs (#33): the fake brain dispenses "codex-tok-<n>" per
 	// /openai-token call, so tests can assert WHICH dispense served a hop.
@@ -563,7 +567,20 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 			env.brainMu.Lock()
 			env.apiKeyCalls++
 			key, ok := env.apiKeys[acct]
+			hang, hangFor := env.apiKeyHang, env.apiKeyHangFor
 			env.brainMu.Unlock()
+			if hang && hangFor > 0 {
+				select {
+				case <-r.Context().Done():
+				case <-time.After(hangFor):
+					w.WriteHeader(http.StatusServiceUnavailable)
+				}
+				return
+			}
+			if hang {
+				<-r.Context().Done()
+				return
+			}
 			if !ok {
 				w.WriteHeader(404)
 				_ = json.NewEncoder(w).Encode(map[string]any{

@@ -290,3 +290,23 @@ func TestKimiWithoutTheTenantsKeyIsRefused(t *testing.T) {
 		t.Errorf("an unkeyed request still carries Authorization=%q X-Api-Key=%q", a, k)
 	}
 }
+
+// An account that left the document takes its refused key's fingerprint and
+// its failed ask with it: an account of the same name added later starts
+// clean.
+func TestDropDepartedForgetsTheRefusedKeyAndTheFailedAsk(t *testing.T) {
+	tn := addTenant(tenantRow{Tenant: "ten_" + strings.Repeat("h", 26), Name: "left", Tap: tapMetadata})
+	defer removeTenant(tn.id)
+	tn.apiKeyMu.Lock()
+	tn.apiKeyDropped["api"] = apiKeyFP("refused")
+	tn.apiKeyFails["api"] = apiKeyFail{at: time.Now(), why: "unreachable"}
+	tn.apiKeyMu.Unlock()
+	tn.dropDeparted([]string{"api"})
+	tn.apiKeyMu.Lock()
+	_, dropped := tn.apiKeyDropped["api"]
+	_, failed := tn.apiKeyFails["api"]
+	tn.apiKeyMu.Unlock()
+	if dropped || failed {
+		t.Fatalf("after the drop: refused key kept %v, failed ask kept %v", dropped, failed)
+	}
+}

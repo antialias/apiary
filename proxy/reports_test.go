@@ -46,11 +46,17 @@ func runReporterFor(t *testing.T, brain, key string) {
 	t.Helper()
 	oldBrain, oldKey := brainBase, switchKey
 	brainBase, switchKey = brain, key
+	t.Cleanup(func() { brainBase, switchKey = oldBrain, oldKey })
+	runReporter(t)
+}
+
+// runReporter runs the sender against the brain already configured, for the
+// rest of the test; it is stopped before any earlier cleanup. It writes no
+// global, so a test whose brain stream is reading them can use it.
+func runReporter(t *testing.T) {
+	t.Helper()
 	lan.startReporter()
-	t.Cleanup(func() {
-		lan.stopReporterNow(context.Background())
-		brainBase, switchKey = oldBrain, oldKey
-	})
+	t.Cleanup(func() { lan.stopReporterNow(context.Background()) })
 }
 
 // reportsSettle waits (tests only) up to 5 s for the running sender to have

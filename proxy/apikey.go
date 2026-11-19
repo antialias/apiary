@@ -42,14 +42,42 @@ type apiKeyEntry struct {
 
 // Per tenant: tenant.apiKeyMu, tenant.apiKeys (the keys in hand),
 // tenant.apiKeyStates (each account's last state, "" = a key in hand, else
-// why none: "missing", "fetch failed") and tenant.apiKeyDropped (the
+// why none: "missing", "fetch failed"), tenant.apiKeyDropped (the
 // fingerprint of each account's key last dropped because its provider
-// refused it). apiKeyMu is a leaf: it may be taken under recMu, never the
-// other way round.
+// refused it), tenant.apiKeyFails (each account's last ask the brain did not
+// answer, for apiKeyRetry) and tenant.apiKeyFlights (each account's ask in
+// flight). apiKeyMu is a leaf: it may be taken under recMu, never the other
+// way round.
 
 // apiKeyFresh is how long the brain's answer is used without asking again: a
 // rotation, a key placed and a key withdrawn are each adopted within it.
 var apiKeyFresh = 5 * time.Minute
+
+// apiKeyRetry is how long an ask the brain did not answer stands before the
+// brain is asked again: meanwhile the cached key, stale or not, serves, and
+// with none the ask's error is the answer. A brain that hangs costs each
+// account one wait (brainClient's timeout) per apiKeyRetry, whatever the
+// number of requests and of asks in each (a class walk asks each keyed
+// member's key before its checks and again as it dials).
+var apiKeyRetry = 30 * time.Second
+
+// apiKeyFail is an ask of the brain that failed: when, and the error a caller
+// with no cached key is given.
+type apiKeyFail struct {
+	at  time.Time
+	why string
+}
+
+// apiKeyFlight is one account's ask of the brain in flight: every caller that
+// comes while it runs waits for its answer rather than asking again. retry:
+// its answer is not one a waiter may take (the ask was cut short by the
+// caller that made it, or a drop began during it), so a waiter asks anew.
+type apiKeyFlight struct {
+	done  chan struct{}
+	key   string
+	err   error
+	retry bool
+}
 
 // getAPIKey is the account's key, or an error that names why there is none.
 // ctx is the caller's (nil: it has none).
@@ -57,32 +85,86 @@ func (tn *tenant) getAPIKey(ctx context.Context, account string) (string, error)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// Read before the cache: a drop after it moves the count, so neither a
-	// fetch's answer nor the copy read here is kept or served stale.
-	gen := tn.credDrops.Load()
-	tn.apiKeyMu.Lock()
-	e, has := tn.apiKeys[account]
-	tn.apiKeyMu.Unlock()
-	now := time.Now()
-	if has && now.Sub(e.fetched) < apiKeyFresh {
-		if e.val == "" {
-			return "", errors.New(e.none)
+	for {
+		// Read before the cache: a drop after it moves the count, so neither a
+		// fetch's answer nor the copy read here is kept or served stale.
+		gen := tn.credDrops.Load()
+		tn.apiKeyMu.Lock()
+		e, has := tn.apiKeys[account]
+		now := time.Now()
+		if has && now.Sub(e.fetched) < apiKeyFresh {
+			tn.apiKeyMu.Unlock()
+			if e.val == "" {
+				return "", errors.New(e.none)
+			}
+			return e.val, nil
 		}
-		return e.val, nil
+		if f, failed := tn.apiKeyFails[account]; failed && now.Sub(f.at) < apiKeyRetry {
+			tn.apiKeyMu.Unlock()
+			if has && e.val != "" {
+				return e.val, nil // STALE: the brain did not answer lately
+			}
+			return "", errors.New(f.why)
+		}
+		if fl := tn.apiKeyFlights[account]; fl != nil {
+			tn.apiKeyMu.Unlock()
+			select {
+			case <-fl.done:
+			case <-ctx.Done():
+				return "", fmt.Errorf("the ask for the api key was cut short: %w", ctx.Err())
+			}
+			if fl.retry {
+				continue
+			}
+			return fl.key, fl.err
+		}
+		fl := &apiKeyFlight{done: make(chan struct{})}
+		if tn.apiKeyFlights == nil {
+			tn.apiKeyFlights = map[string]*apiKeyFlight{}
+		}
+		tn.apiKeyFlights[account] = fl
+		tn.apiKeyMu.Unlock()
+		tn.flyAPIKey(ctx, fl, account, gen, e, has)
+		return fl.key, fl.err
 	}
+}
+
+// flyAPIKey is the leader's ask for its flight. The flight ends however the
+// ask does: were it to panic (net/http recovers a handler), a flight left
+// registered would hold every later caller for that account, and retry (true
+// until the ask returns) sends its waiters to ask again.
+func (tn *tenant) flyAPIKey(ctx context.Context, fl *apiKeyFlight, account string, gen uint64, e apiKeyEntry, has bool) {
+	fl.retry = true
+	defer func() {
+		tn.apiKeyMu.Lock()
+		delete(tn.apiKeyFlights, account)
+		tn.apiKeyMu.Unlock()
+		close(fl.done)
+	}()
+	fl.key, fl.retry, fl.err = tn.askAPIKey(ctx, account, gen, e, has)
+}
+
+// askAPIKey asks the brain for account's key and keeps its answer; e (has)
+// is the cache's entry as getAPIKey read it, at gen. retry: the answer is
+// this caller's alone (cut short, or a drop began during the ask).
+func (tn *tenant) askAPIKey(ctx context.Context, account string, gen uint64, e apiKeyEntry, has bool) (string, bool, error) {
 	key, missing, err := tn.fetchAPIKey(ctx, account)
 	if err != nil && ctx.Err() != nil {
-		return "", fmt.Errorf("the ask for the api key was cut short: %w", ctx.Err())
+		return "", true, fmt.Errorf("the ask for the api key was cut short: %w", ctx.Err())
 	}
+	now := time.Now()
 	tn.apiKeyMu.Lock()
 	defer tn.apiKeyMu.Unlock()
 	if tn.credDrops.Load() != gen {
 		// A drop began since this fetch did: answer it once, cache nothing,
 		// and never fall back to the copy read before it.
 		if err != nil {
-			return "", err
+			return "", true, err
 		}
-		return key, nil
+		return key, true, nil
+	}
+	if err == nil || missing {
+		delete(tn.apiKeyFails, account)
 	}
 	switch {
 	case err == nil:
@@ -91,18 +173,23 @@ func (tn *tenant) getAPIKey(ctx context.Context, account string) (string, error)
 			delete(tn.apiKeyDropped, account) // another key: the refused one is history
 		}
 		tn.noteAPIKeyState(account, "")
-		return key, nil
+		return key, false, nil
 	case missing:
 		// The brain answered that it has no key: a cached one is withdrawn.
 		tn.apiKeys[account] = apiKeyEntry{none: err.Error(), fetched: now}
-	case has && e.val != "":
-		tn.noteAPIKeyState(account, "")
-		return e.val, nil // STALE: the brain is unreachable, the key is still the key
 	default:
 		err = fmt.Errorf("the brain's /api-key is unreachable and no key is cached (%v)", err)
+		if tn.apiKeyFails == nil {
+			tn.apiKeyFails = map[string]apiKeyFail{}
+		}
+		tn.apiKeyFails[account] = apiKeyFail{at: now, why: err.Error()}
+		if has && e.val != "" {
+			tn.noteAPIKeyState(account, "")
+			return e.val, false, nil // STALE: the brain is unreachable, the key is still the key
+		}
 	}
 	tn.noteAPIKeyState(account, err.Error())
-	return "", err
+	return "", false, err
 }
 
 // fetchAPIKey asks the brain. missing: the brain answered that it has none

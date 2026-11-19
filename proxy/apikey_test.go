@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -20,13 +21,15 @@ import (
 func resetAPIKeys(t *testing.T) {
 	t.Helper()
 	lan.apiKeyMu.Lock()
-	oldKeys, oldStates := lan.apiKeys, lan.apiKeyStates
-	lan.apiKeys, lan.apiKeyStates = map[string]apiKeyEntry{}, map[string]string{}
+	oldKeys, oldStates, oldFails := lan.apiKeys, lan.apiKeyStates, lan.apiKeyFails
+	lan.apiKeys, lan.apiKeyStates, lan.apiKeyFails = map[string]apiKeyEntry{}, map[string]string{}, map[string]apiKeyFail{}
 	lan.apiKeyMu.Unlock()
+	oldRetry := apiKeyRetry
 	t.Cleanup(func() {
 		lan.apiKeyMu.Lock()
-		lan.apiKeys, lan.apiKeyStates = oldKeys, oldStates
+		lan.apiKeys, lan.apiKeyStates, lan.apiKeyFails = oldKeys, oldStates, oldFails
 		lan.apiKeyMu.Unlock()
+		apiKeyRetry = oldRetry
 	})
 }
 
@@ -176,6 +179,83 @@ func TestAPIKeyDroppedIsFetchedAgain(t *testing.T) {
 	_, _ = lan.getAPIKey(context.Background(), "runway")
 	if b.calls != 2 {
 		t.Fatalf("%d brain calls, want 2", b.calls)
+	}
+}
+
+// A brain that does not answer is asked once per apiKeyRetry: meanwhile the
+// cached key serves stale, and an account with none gets the failed ask's
+// error, without a wait. Once the window has passed the brain is asked again.
+func TestAPIKeyFailedAskStandsForItsWindow(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(srv.Close)
+	oldBrain, oldKey, oldFresh := brainBase, switchKey, apiKeyFresh
+	brainBase, switchKey, apiKeyFresh = srv.URL, "unit-key", 0
+	t.Cleanup(func() { brainBase, switchKey, apiKeyFresh = oldBrain, oldKey, oldFresh })
+	resetAPIKeys(t)
+	lan.apiKeyMu.Lock()
+	lan.apiKeys["runway"] = apiKeyEntry{val: "key-one", fetched: time.Now().Add(-time.Hour)}
+	lan.apiKeyMu.Unlock()
+	for i := 0; i < 3; i++ {
+		if k, err := lan.getAPIKey(context.Background(), "runway"); err != nil || k != "key-one" {
+			t.Fatalf("ask %d: %q %v, want the stale key", i, k, err)
+		}
+		if _, err := lan.getAPIKey(context.Background(), "other"); err == nil ||
+			!strings.Contains(err.Error(), "unreachable and no key is cached") {
+			t.Fatalf("ask %d for other: %v", i, err)
+		}
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("%d brain calls, want one per account", n)
+	}
+	apiKeyRetry = 0
+	_, _ = lan.getAPIKey(context.Background(), "runway")
+	if n := calls.Load(); n != 3 {
+		t.Fatalf("%d brain calls, want the brain asked again after the window", n)
+	}
+}
+
+// Callers that ask while an ask is in flight wait for its answer: one call
+// to the brain, the same key for each.
+func TestAPIKeyAsksInFlightAreOne(t *testing.T) {
+	release := make(chan struct{})
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		<-release
+		_ = json.NewEncoder(w).Encode(map[string]any{"account": "runway", "api_key": "key-one"})
+	}))
+	t.Cleanup(srv.Close)
+	oldBrain, oldKey := brainBase, switchKey
+	brainBase, switchKey = srv.URL, "unit-key"
+	t.Cleanup(func() { brainBase, switchKey = oldBrain, oldKey })
+	resetAPIKeys(t)
+	const n = 5
+	var wg sync.WaitGroup
+	got := make([]string, n)
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got[i], _ = lan.getAPIKey(context.Background(), "runway")
+		}()
+	}
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(20 * time.Millisecond) // the rest have joined the ask in flight
+	close(release)
+	wg.Wait()
+	for i, k := range got {
+		if k != "key-one" {
+			t.Fatalf("caller %d got %q", i, k)
+		}
+	}
+	if c := calls.Load(); c != 1 {
+		t.Fatalf("%d brain calls, want 1", c)
 	}
 }
 

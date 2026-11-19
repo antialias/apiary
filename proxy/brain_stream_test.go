@@ -452,7 +452,7 @@ func TestBrainStreamReportPostDoesNotBlockReader(t *testing.T) {
 	lan.ledgerMu.Lock()
 	lan.ledgerOwn = append(lan.ledgerOwn, &ownEntry{e: ledgerEntry{ID: "proxy-hang", At: unixSeconds(time.Now())}})
 	lan.ledgerMu.Unlock()
-	runReporterFor(t, brainBase, "k") // stopped first: its hung post is cancelled
+	runReporter(t) // stopped first: its hung post is cancelled
 	waitUntil(t, "the document and the report post", func() bool { ok, _, _ := prefState(); return ok && posts.Load() >= 1 })
 	end := time.Now().Add(4 * silence)
 	for time.Now().Before(end) {
