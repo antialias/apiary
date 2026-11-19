@@ -4488,6 +4488,42 @@ def _compute_provider_pools(t, ctx, now):
     return dirty
 
 
+def _held_accounts(t, snap):
+    """(lane accounts, {provider id: pool accounts}) the tenant holds now: the
+    ones configured (the account loop's names, a provider's poll targets) and
+    the ones it is polling. A removed account is in neither: its removal drops
+    its credentials and its reading, and a restart restores readings only for
+    configured accounts. The account loop's cache keeps its names through an
+    unreadable file, so a passing read error removes nothing here."""
+    lanes = set(_account_loop_names(t))
+    pools = {}
+    for name, (pid, _) in _provider_poll_targets(t).items():
+        pools.setdefault(pid, set()).add(name)
+    for r in snap:
+        if _target_kind(r) == "provider":
+            pools.setdefault(r.get("provider") or r["name"], set()).add(r["name"])
+        else:
+            lanes.add(r["name"])
+    return lanes, pools
+
+
+def _drop_unheld(ls, lane, held, now):
+    """Clear a lane's or pool's pin and account when its tenant no longer holds
+    them. _compute_lane moves a lane off a removed account whenever another one
+    serves; with none left, the lane (and a pin on it) would name the removed
+    account for good, and the proxy would ask for a token the brain no longer
+    has. Caller holds _plock; True when anything changed."""
+    dirty = False
+    if ls.get("pinned") and ls["pinned"] not in held:
+        log(f"preferred[{lane}] pin {ls['pinned']!r} invalidated (account removed)")
+        ls["pinned"] = None
+        dirty = True
+    if ls.get("account") and ls["account"] not in held:
+        dirty = _set_lane(ls, lane, None, f"{ls['account']} is no longer connected", now,
+                          switch=False) or dirty
+    return dirty
+
+
 def compute_preferred(t):
     """Run the sticky-hysteresis policy for every lane, then refresh the legacy
     mirror (flat top-level keys := the default lane) and persist if anything moved.
@@ -4506,9 +4542,16 @@ def compute_preferred(t):
         snap = list(t.state.values())
     now = time.time()
     dirty = False
+    lane_held, pool_held = _held_accounts(t, snap)
     with t.plock:
         _prune_reports(t, snap, now)
         ctx = _policy_ctx(t, snap, now)
+        for ln, ls in t.preferred["lanes"].items():
+            if _drop_unheld(ls, ln, lane_held, now):
+                dirty = True
+        for pid, ps in (t.preferred.get("providers") or {}).items():
+            if _drop_unheld(ps, f"provider:{pid}", pool_held.get(pid, set()), now):
+                dirty = True
         for lc in _lanes:
             # The contract filter: providers serve no Anthropic lane today, so
             # they never compete in the account switchover (see _serves) — the

@@ -446,6 +446,84 @@ class TestIncumbentUntilForced(unittest.TestCase):
                          "no drift back to a now-cooler account — incumbent wins")
 
 
+class TestLanesNameOnlyHeldAccounts(unittest.TestCase):
+    """A lane or a pool never names an account its tenant no longer holds. A
+    member whose only Claude sign-in was removed kept every lane on it, so the
+    proxy asked the brain for that account's token on every document and got
+    404, and a request would have been dialled to an account that is gone."""
+
+    def lanes(self):
+        with T.plock:
+            return {ln: s["account"] for ln, s in T.preferred["lanes"].items()}
+
+    def remove(self, name):
+        ACCOUNTS.pop(name, None)
+        with T.lock:
+            T.state.pop(name, None)
+
+    def test_removing_the_last_account_clears_every_lane(self):
+        reset(acct(ACCT_A, 30))
+        ACCOUNTS.pop(ACCT_B)
+        ex.compute_preferred(T)
+        self.assertEqual(set(self.lanes().values()), {ACCT_A})
+        self.remove(ACCT_A)
+        ex.compute_preferred(T)
+        self.assertEqual(set(self.lanes().values()), {None})
+        with T.plock:
+            self.assertIsNone(T.preferred["account"])
+            self.assertEqual(T.preferred["lanes"]["default"]["reason"], f"{ACCT_A} is no longer connected")
+        doc = ex._preferred_payload(T)
+        self.assertIsNone(doc["account"])
+        self.assertEqual({ln: lp["account"] for ln, lp in doc["lanes"].items()},
+                         {ln: None for ln in doc["lanes"]})
+
+    def test_a_held_account_without_a_reading_keeps_its_lane(self):
+        """No reading is not removal: the lane keeps its incumbent."""
+        reset(acct(ACCT_A, 30))
+        ex.compute_preferred(T)
+        with T.lock:
+            T.state.clear()
+        ex.compute_preferred(T)
+        self.assertEqual(set(self.lanes().values()), {ACCT_A})
+
+    def test_a_restored_lane_on_an_account_never_loaded_is_cleared(self):
+        """The test member's case after a restart: its state file names an
+        account its tenant has no credentials or reading for."""
+        reset()
+        ACCOUNTS.clear()
+        with T.plock:
+            for ls in T.preferred["lanes"].values():
+                ls.update(account="gone@example.com", reason="bootstrap", since=1.0)
+            T.preferred["lanes"]["opus"]["pinned"] = "gone@example.com"
+        ex.compute_preferred(T)
+        self.assertEqual(set(self.lanes().values()), {None})
+        with T.plock:
+            self.assertIsNone(T.preferred["lanes"]["opus"]["pinned"])
+            self.assertIsNone(T.preferred["account"])
+
+    def test_a_pin_on_a_removed_account_lets_the_lane_move(self):
+        reset(acct(ACCT_A, 30), acct(ACCT_B, 45))
+        ex.compute_preferred(T)
+        with T.plock:
+            T.preferred["lanes"]["opus"]["pinned"] = ACCT_A
+        self.remove(ACCT_A)
+        ex.compute_preferred(T)
+        self.assertEqual(lane_account("opus"), ACCT_B)
+        with T.plock:
+            self.assertIsNone(T.preferred["lanes"]["opus"]["pinned"])
+
+    def test_a_pool_whose_accounts_are_all_gone_names_none(self):
+        reset(gpt_result(weekly=10.0, name="gpt-a"))
+        ex.compute_preferred(T)
+        with T.plock:
+            self.assertEqual(T.preferred["providers"]["gpt"]["account"], "gpt-a")
+        with T.lock:
+            T.state.pop("gpt-a")
+        ex.compute_preferred(T)
+        with T.plock:
+            self.assertIsNone(T.preferred["providers"]["gpt"]["account"])
+
+
 class TestSessionAwareRouting(unittest.TestCase):
     """End-to-end via compute_preferred: the session gate must change routing, not
     just the lane-effective number."""
