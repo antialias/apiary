@@ -1267,6 +1267,38 @@ func errBodyTypeMsg(body []byte) (string, string) {
 	return e.Error.Type, strings.TrimSpace(e.Error.Message)
 }
 
+// logBodyMax bounds how much of a provider's words a household log line
+// quotes.
+const logBodyMax = 300
+
+// logProviderText is how a log line about tn's request shows the provider's
+// words (a refusal's body, an error's message): the household's quoted, as
+// key=%q (bare %q when key is ""), clipped to logBodyMax bytes; a member's
+// never, only the error type they carried, as error_type=%q. The log is the
+// operator's, and the operator sees a member's metadata and nothing more.
+func (tn *tenant) logProviderText(key, errType, text string) string {
+	if tn == nil || !tn.lan {
+		if errType == "" {
+			errType = "unknown"
+		}
+		return "error_type=" + strconv.Quote(tapShort(errType, 64))
+	}
+	if len(text) > logBodyMax {
+		text = text[:logBodyMax] + "…"
+	}
+	if key == "" {
+		return strconv.Quote(text)
+	}
+	return key + "=" + strconv.Quote(text)
+}
+
+// logBody is logProviderText for a provider's response body: body=%q for
+// the household, the body's error type for a member.
+func (tn *tenant) logBody(body []byte) string {
+	errType, _ := errBodyTypeMsg(body)
+	return tn.logProviderText("body", errType, string(body))
+}
+
 // shapeRejected429 reports Anthropic's client-shape refusal (#90). Both marks
 // are required — the bare message AND the absence of the unified ratelimit
 // headers a capacity 429 carries — so a real quota 429 that merely lacks a
@@ -1346,21 +1378,13 @@ func (t *failoverTransport) classRoundTripInner(req *http.Request, info reqInfo)
 	if resp.StatusCode == http.StatusNotFound {
 		// A 404 once came back with out=unknown nobody could explain
 		// afterwards. Same bounded snippet the refusals get.
-		snip := string(bufferResp(resp))
-		if len(snip) > 300 {
-			snip = snip[:300] + "…"
-		}
-		log.Printf("⚠️  404 on class %s member %s (eff=%s) body=%q", cc.class, cc.member.ID, info.eff, snip)
+		log.Printf("⚠️  404 on class %s member %s (eff=%s) %s", cc.class, cc.member.ID, info.eff, tn.logBody(bufferResp(resp)))
 	}
 	if out.ladder != ladderWalkQuota {
 		return resp, err
 	}
-	snippet := string(out.refusal.body)
-	if len(snippet) > 300 {
-		snippet = snippet[:300] + "…"
-	}
-	log.Printf("⚠️  %d %s on class %s member %s (eff=%s) ratelimit[%s] body=%q",
-		resp.StatusCode, out.refusal.class, cc.class, cc.member.ID, info.eff, ratelimitDetail(resp.Header), snippet)
+	log.Printf("⚠️  %d %s on class %s member %s (eff=%s) ratelimit[%s] %s",
+		resp.StatusCode, out.refusal.class, cc.class, cc.member.ID, info.eff, ratelimitDetail(resp.Header), tn.logBody(out.refusal.body))
 	before := cc.served.snapshot().attempts
 	if tn.health != nil {
 		cc.quotaNote = captureNoteWalk(cc.member.ID, resp)
@@ -1561,7 +1585,6 @@ func (t *failoverTransport) walkRungs(req *http.Request, info reqInfo, resp *htt
 			log.Printf("⚠️  class %s walk from %s skips %s", cc.class, cc.member.ID, renderSkips(skipped))
 		}
 	}
-	var snippet string
 	from := cc.member.ID
 	for _, rc := range cands {
 		next := rc.m
@@ -1629,12 +1652,8 @@ func (t *failoverTransport) walkRungs(req *http.Request, info reqInfo, resp *htt
 		if ref = tn.rungRefusal(next, resp); !ref.walks() {
 			return resp, err, false
 		}
-		snippet = string(ref.body)
-		if len(snippet) > 300 {
-			snippet = snippet[:300] + "…"
-		}
-		log.Printf("⚠️  %d %s on class %s member %s (crossed) ratelimit[%s] body=%q",
-			resp.StatusCode, ref.class, cc.class, next.ID, ratelimitDetail(resp.Header), snippet)
+		log.Printf("⚠️  %d %s on class %s member %s (crossed) ratelimit[%s] %s",
+			resp.StatusCode, ref.class, cc.class, next.ID, ratelimitDetail(resp.Header), tn.logBody(ref.body))
 		crossReason = refusalCross(resp, ref)
 		note(next, servedAccount(next, eff2), nc, resp, ref)
 		from = next.ID

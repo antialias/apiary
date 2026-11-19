@@ -167,7 +167,7 @@ type tenant struct {
 // newTenant is a tenant with fresh, empty state.
 func newTenant(row tenantRow) *tenant {
 	return &tenant{
-		id: row.Tenant, name: row.Name, lan: row.Lan, tap: row.Tap,
+		id: row.Tenant, name: row.Name, lan: row.Lan, tap: tapOf(row),
 		pref:            &decision{},
 		lastEffective:   map[string]string{},
 		lastState:       map[string]routeState{},
@@ -206,6 +206,19 @@ func (tn *tenant) brainURL() string {
 		return ""
 	}
 	return brainBase + "/t/" + tn.id
+}
+
+// tapOf is the tap mode a row loads with. A member (every row not marked
+// lan) is metadata whatever its row says: Apiary promises members that the
+// operator sees metadata and nothing more, and no writer of the index is
+// trusted to keep that. A member row asking for content is refused that mode
+// and loads as metadata, loud in the log every time it is read.
+func tapOf(r tenantRow) string {
+	if !r.Lan && r.Tap != tapMetadata {
+		log.Printf("⚠️  tenants: %s is a member but its index row asks tap %q: refused, it loads as %s", r.Tenant, r.Tap, tapMetadata)
+		return tapMetadata
+	}
+	return r.Tap
 }
 
 // metadataOnly reports whether the tenant's tap withholds content.
@@ -360,7 +373,7 @@ func applyTenantIndex(rows []tenantRow, source string) error {
 			started = append(started, tn)
 			continue
 		}
-		tn.name, tn.lan, tn.tap = r.Name, r.Lan, r.Tap
+		tn.name, tn.lan, tn.tap = r.Name, r.Lan, tapOf(r)
 	}
 	for id, tn := range members {
 		if !seen[id] {

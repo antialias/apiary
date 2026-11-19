@@ -488,7 +488,7 @@ func (t *failoverTransport) anthropicReauth(req *http.Request, resp *http.Respon
 			left = shortDur(l) + " left"
 		}
 	}
-	head := fmt.Sprintf("upstream 401 %s: %q (fp %s, fetched %s, %s)", d.acct, msg, r.old.fp, fetched, left)
+	head := fmt.Sprintf("upstream 401 %s: %s (fp %s, fetched %s, %s)", d.acct, tn.logProviderText("", typ, msg), r.old.fp, fetched, left)
 	if r.tok == "" || r.tok == refused {
 		switch r.how {
 		case "failed":
@@ -525,7 +525,7 @@ func (t *failoverTransport) anthropicReauth(req *http.Request, resp *http.Respon
 	}
 	resp2.Body.Close()
 	tn.noteRetryRefused(d.acct, r.tok, msg2)
-	log.Printf("upstream 401 %s on the retry: %q (fp %s, fetched just now) — answered 403", d.acct, msg2, fp("Bearer "+r.tok))
+	log.Printf("upstream 401 %s on the retry: %s (fp %s, fetched just now) — answered 403", d.acct, tn.logProviderText("", typ, msg2), fp("Bearer "+r.tok))
 	return reauthRefusedResponse(req2, d.acct, msg2), nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -433,5 +434,66 @@ func TestTenantStopWaitsForItsGoroutines(t *testing.T) {
 	case <-waited:
 	case <-time.After(time.Second):
 		t.Fatal("stop returned with a background goroutine still counted")
+	}
+}
+
+// A member is metadata whatever its index row says: a row not marked lan
+// that asks tap content is refused that mode, loads as metadata, and says so
+// in the log, on its first load and on every index that names it again. The
+// household keeps the content tap its row names.
+func TestMemberAskingContentLoadsAsMetadata(t *testing.T) {
+	const b = "ten_memberbbbbbbbbbbbbbbbbbbbb"
+	oldPath := tenantsStateFilePath
+	tenantsStateFilePath = ""
+	defer func() { resetTenants(); tenantsStateFilePath = oldPath }()
+	logs := captureLog(t)
+
+	rows := []tenantRow{
+		{Tenant: testLanTenant, Name: "household", Lan: true, Tap: tapContent},
+		{Tenant: b, Name: "member b", Tap: tapContent},
+	}
+	installTenants()
+	for _, pass := range []string{"new", "again"} {
+		logs.Reset()
+		if err := applyTenantIndex(rows, "test"); err != nil {
+			t.Fatalf("%s: index refused: %v", pass, err)
+		}
+		mb := memberOf(b)
+		if mb == nil || !mb.metadataOnly() || mb.tap != tapMetadata {
+			t.Fatalf("%s: member asking content loaded with tap %q, want metadata", pass, mb.tap)
+		}
+		if hh := lanTenant(); hh == nil || hh.metadataOnly() {
+			t.Fatalf("%s: the household lost its content tap", pass)
+		}
+		if !strings.Contains(logs.String(), b+" is a member but its index row asks tap \"content\": refused") {
+			t.Fatalf("%s: no loud refusal in the log: %q", pass, logs.String())
+		}
+	}
+}
+
+// Every log line that shows a provider's words about a request goes through
+// logProviderText: a member's (and a request with no tenant) shows only the
+// error type, the household's the clipped body.
+func TestLogProviderTextHidesAMembersWords(t *testing.T) {
+	member := addTenant(tenantRow{Tenant: "ten_" + strings.Repeat("m", 26), Name: "member", Tap: tapMetadata})
+	defer removeTenant(member.id)
+	body := []byte(`{"type":"error","error":{"type":"not_found_error","message":"secret words"}}`)
+	for name, tn := range map[string]*tenant{"member": member, "no tenant": nil} {
+		if got := tn.logBody(body); got != `error_type="not_found_error"` {
+			t.Fatalf("%s: logBody = %s, want the error type alone", name, got)
+		}
+		if got := tn.logProviderText("", "authentication_error", "secret words"); got != `error_type="authentication_error"` {
+			t.Fatalf("%s: logProviderText = %s, want the error type alone", name, got)
+		}
+		if got := tn.logBody([]byte("<html>secret words</html>")); got != `error_type="unknown"` {
+			t.Fatalf("%s: logBody of a non-JSON body = %s", name, got)
+		}
+	}
+	if got := lan.logBody(body); !strings.HasPrefix(got, "body=") || !strings.Contains(got, "secret words") {
+		t.Fatalf("household: logBody = %s, want the body snippet", got)
+	}
+	long := strings.Repeat("x", 400)
+	if got := lan.logProviderText("", "", long); got != strconv.Quote(long[:300]+"…") {
+		t.Fatalf("household: logProviderText not clipped to 300: %d bytes", len(got))
 	}
 }

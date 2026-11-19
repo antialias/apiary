@@ -131,6 +131,14 @@ func (tn *tenant) injectEvictLocked(now time.Time) {
 }
 
 func (tn *tenant) injectEnqueue(sessionKey, text string, now time.Time) (queuedInstruction, int, *injectError) {
+	// Typing into a session is the household's alone (the lan tenant): a
+	// member's sessions are theirs, and the operator sees their metadata and
+	// nothing more, so nothing is queued into one.
+	if !tn.lan {
+		return queuedInstruction{}, 0, &injectError{
+			Type: "member_session", Message: "a member's session takes no queued instructions", Status: http.StatusForbidden,
+		}
+	}
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return queuedInstruction{}, 0, &injectError{

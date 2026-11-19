@@ -430,6 +430,32 @@ func TestRespAggErrorEnvelope(t *testing.T) {
 	}
 }
 
+// A metadata member's turn_ended keeps the error's type and status and
+// carries none of the provider's words, on the JSON and the SSE terminal.
+func TestRespMetadataTurnEndedWithholdsErrorMessage(t *testing.T) {
+	respTest(t)
+	member := addTenant(tenantRow{Tenant: "ten_" + strings.Repeat("m", 26), Name: "member", Tap: tapMetadata})
+	defer removeTenant(member.id)
+	id := respIdentFixture()
+	id.tenant = member
+
+	body := `{"type":"error","error":{"type":"invalid_request_error","message":"prompt quoted back: secret words"}}`
+	ev := respDecodeEnd(t, respOne(t, respDrive(t, id, 400, "application/json", body, 16), "turn_ended"))
+	if ev.Reason != "error" || ev.Status != 400 || ev.ErrorType != "invalid_request_error" {
+		t.Fatalf("turn_ended = %+v, want the error's reason, status and type", ev)
+	}
+	if ev.ErrorMessage != "" {
+		t.Fatalf("metadata turn_ended error_message = %q, want withheld", ev.ErrorMessage)
+	}
+
+	sse := `data: {"type":"message_start","message":{"id":"m","model":"x"}}` + "\n\n" +
+		`data: {"type":"error","error":{"type":"overloaded_error","message":"secret words"}}` + "\n\n"
+	ev = respDecodeEnd(t, respOne(t, respDrive(t, id, 200, "text/event-stream", sse, 19), "turn_ended"))
+	if ev.ErrorType != "overloaded_error" || ev.ErrorMessage != "" {
+		t.Fatalf("metadata SSE turn_ended = %+v, want the type without the message", ev)
+	}
+}
+
 // ---- 5: usage presence is preserved, never invented (S8) ----
 
 func TestRespAggUsageUnknownPreserved(t *testing.T) {

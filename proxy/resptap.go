@@ -1026,7 +1026,11 @@ func (t *respTap) publishEnded(reason string, a *respAgg, cr *chanReader) {
 	ev.Ratio, ev.Scaling = t.id.scaleInfo()
 	if a != nil {
 		ev.ErrorType = tapShort(a.errType, 64)
-		ev.ErrorMessage = tapShort(a.errMsg, respTapErrMax)
+		// The metadata tap keeps the error's type and withholds its words:
+		// a provider's message can quote the request back.
+		if !t.id.tenant.metadataOnly() {
+			ev.ErrorMessage = tapShort(a.errMsg, respTapErrMax)
+		}
 	}
 	if cr != nil {
 		ev.Bytes = cr.total

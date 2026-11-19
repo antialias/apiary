@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +148,42 @@ func TestInjectRejectsUnknownSession(t *testing.T) {
 	_, _, problem := lan.injectEnqueue(strings.Repeat("a", 64), "hello", time.Now())
 	if problem == nil || problem.Type != "unknown_session" || problem.Status != 404 {
 		t.Fatalf("problem = %#v", problem)
+	}
+}
+
+// The operator types into the household's sessions and never a member's: an
+// enqueue for a member's live session is refused with a typed 403 and queues
+// nothing, while the same enqueue for the household's is accepted.
+func TestInjectRefusedForAMemberHouseholdKeepsIt(t *testing.T) {
+	withInjectWorld(t)
+	member := addTenant(tenantRow{Tenant: "ten_" + strings.Repeat("m", 26), Name: "member", Tap: tapMetadata})
+	defer removeTenant(member.id)
+	now := time.Now()
+	mKey := member.injectObserve("member-session", now)
+	hKey := lan.injectObserve("household-session", now)
+
+	post := func(tenantID, key string) (int, injectError) {
+		b, _ := json.Marshal(map[string]string{"tenant": tenantID, "session_key": key, "text": "do this"})
+		rec := httptest.NewRecorder()
+		injectHandler(rec, httptest.NewRequest(http.MethodPost, "/_switch/inject", bytes.NewReader(b)))
+		var out struct {
+			Error injectError `json:"error"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &out)
+		return rec.Code, out.Error
+	}
+
+	if code, e := post(member.id, mKey); code != http.StatusForbidden || e.Type != "member_session" {
+		t.Fatalf("member enqueue = %d %#v, want 403 member_session", code, e)
+	}
+	member.injectMu.Lock()
+	queued := len(member.injectSessions[mKey].items)
+	member.injectMu.Unlock()
+	if queued != 0 {
+		t.Fatalf("member's session has %d queued items, want none", queued)
+	}
+	if code, e := post(lan.id, hKey); code != http.StatusAccepted {
+		t.Fatalf("household enqueue = %d %#v, want 202", code, e)
 	}
 }
 

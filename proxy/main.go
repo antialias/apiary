@@ -1981,12 +1981,8 @@ func (t *failoverTransport) dispatch(req *http.Request, info reqInfo) (*http.Res
 	// closes that window on this account for every route it binds; a 429 that
 	// rejects nothing is a throttle, which only deranks.
 	kind, what := tn.recordRefusal(info.eff, ref, resp)
-	snippet := string(ref.body)
-	if len(snippet) > 300 {
-		snippet = snippet[:300] + "…"
-	}
-	log.Printf("⚠️  %d on %s lane=%s %s=%s ratelimit[%s] body=%q",
-		resp.StatusCode, info.eff, info.lane, kind, what, ratelimitDetail(resp.Header), snippet)
+	log.Printf("⚠️  %d on %s lane=%s %s=%s ratelimit[%s] %s",
+		resp.StatusCode, info.eff, info.lane, kind, what, ratelimitDetail(resp.Header), tn.logBody(ref.body))
 
 	route := laneRouteID(info.lane)
 	ftok, facct, fc, ok := tn.failoverRoute(route, info.lane, model, info.eff)
