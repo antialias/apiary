@@ -1,0 +1,70 @@
+{
+ "_comment": "GET wham/rate-limit-reset-credits and GET wham/usage bodies in the provider's shape (quota-model 69 \u00a71, \u00a79): every field as the provider sends it, but the credit's profile fields and the usage read's account fields; every value made up.",
+ "reset_credits": {
+  "available_count": 1,
+  "credits": [
+   {
+    "description": "Thanks for using Codex! You've been granted one free rate limit reset.",
+    "expires_at": "2027-02-02T11:20:05.204913Z",
+    "granted_at": "2027-01-03T11:20:05.204913Z",
+    "id": "RateLimitResetCredit_3f9c2a71b0d84e6aa5c1d7e0f2b4c689",
+    "is_supported_by_plan": true,
+    "redeem_started_at": null,
+    "redeemed_at": null,
+    "reset_type": "codex_rate_limits",
+    "status": "available",
+    "title": "Full reset (Monthly)"
+   },
+   {
+    "description": "Thanks for using Codex! You've been granted one free rate limit reset.",
+    "expires_at": "2026-12-31T09:02:44.718205Z",
+    "granted_at": "2026-12-01T09:02:44.718205Z",
+    "id": "RateLimitResetCredit_8b1e4d0c97a2453f9e6d2c5a1f0b7e34",
+    "is_supported_by_plan": true,
+    "redeem_started_at": "2026-12-19T21:41:10.330117Z",
+    "redeemed_at": "2026-12-19T21:41:11.902664Z",
+    "reset_type": "codex_rate_limits",
+    "status": "redeemed",
+    "title": "Full reset (Monthly)"
+   }
+  ],
+  "history_enabled": true,
+  "immediate_reset_purchase_eligible": false,
+  "total_earned_count": 0
+ },
+ "usage": {
+  "additional_rate_limits": null,
+  "code_review_rate_limit": null,
+  "credits": {
+   "approx_cloud_messages": null,
+   "approx_local_messages": null,
+   "balance": null,
+   "has_credits": false,
+   "overage_limit_reached": false,
+   "unlimited": false
+  },
+  "model_usage": {},
+  "plan_type": "plus",
+  "promo": null,
+  "rate_limit": {
+   "allowed": true,
+   "limit_reached": false,
+   "primary_window": {
+    "limit_window_seconds": 604800,
+    "reset_after_seconds": 391207,
+    "reset_at": 1800391207,
+    "used_percent": 9
+   },
+   "secondary_window": null
+  },
+  "rate_limit_reached_type": null,
+  "rate_limit_reset_credits": {
+   "applicable_available_count": 0,
+   "available_count": 1
+  },
+  "spend_control": {
+   "individual_limit": null,
+   "reached": false
+  }
+ }
+}

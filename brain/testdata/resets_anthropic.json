@@ -1,0 +1,691 @@
+{
+ "_comment": "GET /api/oauth/usage?cedar_ember=1 bodies in the provider's shape (quota-model 69 \u00a71, \u00a79): every field as the provider sends it; every value made up. cli_version is the provider's answer to a client version below the one it offers grants to.",
+ "bodies": {
+  "all_used": {
+   "amber_cistern": null,
+   "amber_cistern_offer": null,
+   "amber_gauge": null,
+   "amber_ladder": null,
+   "brass_thimble": null,
+   "cedar_ember": {
+    "at_limit": false,
+    "cooldown_until": null,
+    "eligible": true,
+    "exhausted": [],
+    "grants": [
+     {
+      "arm": null,
+      "blocking": [],
+      "clears": [
+       "seven_day_overage_included"
+      ],
+      "ends_at": "2027-04-20T06:59:00+00:00",
+      "gives_back_weekly": true,
+      "id": "launch-2612-fable",
+      "label": "New model launch: one Fable reset",
+      "paused": false,
+      "percent_used": {
+       "seven_day": 47,
+       "seven_day_overage_included": 6
+      },
+      "resets_left": 0,
+      "resets_total": 1,
+      "starts_at": "2026-12-14T17:00:00+00:00",
+      "type": "full",
+      "unavailable_reason": "unavailable",
+      "usable_now": false,
+      "use_requires_limit": false
+     }
+    ],
+    "ineligible_reason": null,
+    "next_grant_id": null,
+    "paused_held": false,
+    "weekly_resets_at": "2027-01-24T17:00:00+00:00"
+   },
+   "cinder_cove": null,
+   "copper_kite": null,
+   "extra_usage": {
+    "credits_can_pay": "no",
+    "credits_ever_enabled": false,
+    "currency": "USD",
+    "daily": null,
+    "decimal_places": 2,
+    "disabled_reason": "out_of_credits",
+    "is_enabled": false,
+    "monthly_limit": 5000,
+    "spend_limit_reached": false,
+    "used_credits": 0.0,
+    "user_disabled": false,
+    "utilization": 0.0,
+    "weekly": null
+   },
+   "five_hour": null,
+   "granite_teacup": null,
+   "harbor_lantern": null,
+   "iguana_necktie": null,
+   "indicator": null,
+   "juniper_tide": null,
+   "limits": [
+    {
+     "group": "weekly",
+     "is_active": true,
+     "kind": "weekly_all",
+     "percent": 47,
+     "resets_at": "2027-01-24T16:59:59.412000+00:00",
+     "scope": null,
+     "severity": "normal"
+    },
+    {
+     "group": "weekly",
+     "is_active": false,
+     "kind": "weekly_scoped",
+     "percent": 6,
+     "resets_at": "2027-01-24T16:59:59.412130+00:00",
+     "scope": {
+      "model": {
+       "display_name": "Fable",
+       "id": null
+      },
+      "surface": null
+     },
+     "severity": "normal"
+    }
+   ],
+   "maple_sundial": null,
+   "member_dashboard_available": false,
+   "nimbus_quill": null,
+   "omelette_promotional": null,
+   "pace": null,
+   "promo_credits": null,
+   "seven_day": {
+    "limit_dollars": null,
+    "locked_reason": null,
+    "remaining_dollars": null,
+    "resets_at": "2027-01-24T16:59:59.412000+00:00",
+    "used_dollars": null,
+    "utilization": 47.0
+   },
+   "seven_day_cowork": null,
+   "seven_day_oauth_apps": null,
+   "seven_day_omelette": null,
+   "seven_day_opus": null,
+   "seven_day_sonnet": null,
+   "spend": {
+    "auto_reload": null,
+    "balance": null,
+    "can_purchase_credits": false,
+    "can_toggle": false,
+    "cap": {
+     "credits": {
+      "amount_minor": 5000,
+      "exponent": 2
+     },
+     "money": null
+    },
+    "disabled_reason": "out_of_credits",
+    "disclaimer": "Usage credits cover you when you hit your plan limits. [Learn more](https://support.claude.com/articles/12429409)",
+    "enabled": false,
+    "limit": {
+     "amount_minor": 5000,
+     "currency": "USD",
+     "exponent": 2
+    },
+    "percent": 0,
+    "severity": "normal",
+    "used": {
+     "amount_minor": 0,
+     "currency": "USD",
+     "exponent": 2
+    }
+   },
+   "starry_waterfall": null,
+   "tangelo": null,
+   "wattle_ember": null,
+   "weekly_scoped_shares": [
+    {
+     "allowance_percent_of_weekly": 45,
+     "limit_index": 1,
+     "used_percent_of_weekly": 3
+    }
+   ]
+  },
+  "cli_version": {
+   "amber_cistern": null,
+   "amber_cistern_offer": null,
+   "amber_gauge": null,
+   "amber_ladder": null,
+   "brass_thimble": null,
+   "cedar_ember": {
+    "at_limit": false,
+    "cooldown_until": null,
+    "eligible": false,
+    "exhausted": [],
+    "grants": [],
+    "ineligible_reason": "cli_version",
+    "next_grant_id": null,
+    "weekly_resets_at": null
+   },
+   "cinder_cove": null,
+   "copper_kite": null,
+   "extra_usage": {
+    "credits_can_pay": "no",
+    "credits_ever_enabled": false,
+    "currency": "USD",
+    "daily": null,
+    "decimal_places": 2,
+    "disabled_reason": "out_of_credits",
+    "is_enabled": false,
+    "monthly_limit": 5000,
+    "spend_limit_reached": false,
+    "used_credits": 0.0,
+    "user_disabled": false,
+    "utilization": 0.0,
+    "weekly": null
+   },
+   "five_hour": null,
+   "granite_teacup": null,
+   "harbor_lantern": null,
+   "iguana_necktie": null,
+   "indicator": null,
+   "juniper_tide": null,
+   "limits": [
+    {
+     "group": "weekly",
+     "is_active": true,
+     "kind": "weekly_all",
+     "percent": 47,
+     "resets_at": "2027-01-24T16:59:59.412000+00:00",
+     "scope": null,
+     "severity": "normal"
+    },
+    {
+     "group": "weekly",
+     "is_active": false,
+     "kind": "weekly_scoped",
+     "percent": 6,
+     "resets_at": "2027-01-24T16:59:59.412130+00:00",
+     "scope": {
+      "model": {
+       "display_name": "Fable",
+       "id": null
+      },
+      "surface": null
+     },
+     "severity": "normal"
+    }
+   ],
+   "maple_sundial": null,
+   "member_dashboard_available": false,
+   "nimbus_quill": null,
+   "omelette_promotional": null,
+   "pace": null,
+   "promo_credits": null,
+   "seven_day": {
+    "limit_dollars": null,
+    "locked_reason": null,
+    "remaining_dollars": null,
+    "resets_at": "2027-01-24T16:59:59.412000+00:00",
+    "used_dollars": null,
+    "utilization": 47.0
+   },
+   "seven_day_cowork": null,
+   "seven_day_oauth_apps": null,
+   "seven_day_omelette": null,
+   "seven_day_opus": null,
+   "seven_day_sonnet": null,
+   "spend": {
+    "auto_reload": null,
+    "balance": null,
+    "can_purchase_credits": false,
+    "can_toggle": false,
+    "cap": {
+     "credits": {
+      "amount_minor": 5000,
+      "exponent": 2
+     },
+     "money": null
+    },
+    "disabled_reason": "out_of_credits",
+    "disclaimer": "Usage credits cover you when you hit your plan limits. [Learn more](https://support.claude.com/articles/12429409)",
+    "enabled": false,
+    "limit": {
+     "amount_minor": 5000,
+     "currency": "USD",
+     "exponent": 2
+    },
+    "percent": 0,
+    "severity": "normal",
+    "used": {
+     "amount_minor": 0,
+     "currency": "USD",
+     "exponent": 2
+    }
+   },
+   "starry_waterfall": null,
+   "tangelo": null,
+   "wattle_ember": null,
+   "weekly_scoped_shares": [
+    {
+     "allowance_percent_of_weekly": 45,
+     "limit_index": 1,
+     "used_percent_of_weekly": 3
+    }
+   ]
+  },
+  "two_usable": {
+   "amber_cistern": null,
+   "amber_cistern_offer": null,
+   "amber_gauge": null,
+   "amber_ladder": null,
+   "brass_thimble": null,
+   "cedar_ember": {
+    "at_limit": false,
+    "cooldown_until": null,
+    "eligible": true,
+    "exhausted": [],
+    "grants": [
+     {
+      "arm": null,
+      "blocking": [],
+      "clears": [
+       "seven_day",
+       "seven_day_overage_included"
+      ],
+      "ends_at": "2027-02-11T18:00:00+00:00",
+      "gives_back_weekly": false,
+      "id": "full-reset-2701",
+      "label": "One full limit reset (January 2027)",
+      "paused": false,
+      "percent_used": {
+       "seven_day": 100,
+       "seven_day_overage_included": 64
+      },
+      "resets_left": 1,
+      "resets_total": 1,
+      "starts_at": "2027-01-12T18:00:00+00:00",
+      "type": "weekly",
+      "unavailable_reason": null,
+      "usable_now": true,
+      "use_requires_limit": false
+     },
+     {
+      "arm": null,
+      "blocking": [],
+      "clears": [
+       "seven_day_overage_included"
+      ],
+      "ends_at": "2027-04-20T06:59:00+00:00",
+      "gives_back_weekly": true,
+      "id": "launch-2612-fable",
+      "label": "New model launch: one Fable reset",
+      "paused": false,
+      "percent_used": {
+       "seven_day": 100,
+       "seven_day_overage_included": 64
+      },
+      "resets_left": 2,
+      "resets_total": 2,
+      "starts_at": "2026-12-14T17:00:00+00:00",
+      "type": "full",
+      "unavailable_reason": null,
+      "usable_now": true,
+      "use_requires_limit": false
+     },
+     {
+      "arm": null,
+      "blocking": [],
+      "clears": [
+       "seven_day",
+       "seven_day_overage_included"
+      ],
+      "ends_at": "2027-01-31T07:59:00+00:00",
+      "gives_back_weekly": false,
+      "id": "free_reset_dec_2026",
+      "label": "Free limit reset",
+      "paused": false,
+      "percent_used": {
+       "seven_day": 100,
+       "seven_day_overage_included": 64
+      },
+      "resets_left": 0,
+      "resets_total": 1,
+      "starts_at": "2026-12-02T15:10:00+00:00",
+      "type": "weekly",
+      "unavailable_reason": "unavailable",
+      "usable_now": false,
+      "use_requires_limit": false
+     }
+    ],
+    "ineligible_reason": null,
+    "next_grant_id": "full-reset-2701",
+    "paused_held": false,
+    "weekly_resets_at": "2027-01-24T17:00:00+00:00"
+   },
+   "cinder_cove": null,
+   "copper_kite": null,
+   "extra_usage": {
+    "credits_can_pay": "no",
+    "credits_ever_enabled": false,
+    "currency": "USD",
+    "daily": null,
+    "decimal_places": 2,
+    "disabled_reason": "out_of_credits",
+    "is_enabled": false,
+    "monthly_limit": 5000,
+    "spend_limit_reached": false,
+    "used_credits": 0.0,
+    "user_disabled": false,
+    "utilization": 0.0,
+    "weekly": null
+   },
+   "five_hour": null,
+   "granite_teacup": null,
+   "harbor_lantern": null,
+   "iguana_necktie": null,
+   "indicator": null,
+   "juniper_tide": null,
+   "limits": [
+    {
+     "group": "weekly",
+     "is_active": true,
+     "kind": "weekly_all",
+     "percent": 100,
+     "resets_at": "2027-01-24T16:59:59.412000+00:00",
+     "scope": null,
+     "severity": "critical"
+    },
+    {
+     "group": "weekly",
+     "is_active": false,
+     "kind": "weekly_scoped",
+     "percent": 64,
+     "resets_at": "2027-01-24T16:59:59.412130+00:00",
+     "scope": {
+      "model": {
+       "display_name": "Fable",
+       "id": null
+      },
+      "surface": null
+     },
+     "severity": "normal"
+    }
+   ],
+   "maple_sundial": null,
+   "member_dashboard_available": false,
+   "nimbus_quill": null,
+   "omelette_promotional": null,
+   "pace": null,
+   "promo_credits": null,
+   "seven_day": {
+    "limit_dollars": null,
+    "locked_reason": null,
+    "remaining_dollars": null,
+    "resets_at": "2027-01-24T16:59:59.412000+00:00",
+    "used_dollars": null,
+    "utilization": 100.0
+   },
+   "seven_day_cowork": null,
+   "seven_day_oauth_apps": null,
+   "seven_day_omelette": null,
+   "seven_day_opus": null,
+   "seven_day_sonnet": null,
+   "spend": {
+    "auto_reload": null,
+    "balance": null,
+    "can_purchase_credits": false,
+    "can_toggle": false,
+    "cap": {
+     "credits": {
+      "amount_minor": 5000,
+      "exponent": 2
+     },
+     "money": null
+    },
+    "disabled_reason": "out_of_credits",
+    "disclaimer": "Usage credits cover you when you hit your plan limits. [Learn more](https://support.claude.com/articles/12429409)",
+    "enabled": false,
+    "limit": {
+     "amount_minor": 5000,
+     "currency": "USD",
+     "exponent": 2
+    },
+    "percent": 0,
+    "severity": "normal",
+    "used": {
+     "amount_minor": 0,
+     "currency": "USD",
+     "exponent": 2
+    }
+   },
+   "starry_waterfall": null,
+   "tangelo": null,
+   "wattle_ember": null,
+   "weekly_scoped_shares": [
+    {
+     "allowance_percent_of_weekly": 45,
+     "limit_index": 1,
+     "used_percent_of_weekly": 29
+    }
+   ]
+  },
+  "used_and_usable": {
+   "amber_cistern": null,
+   "amber_cistern_offer": null,
+   "amber_gauge": null,
+   "amber_ladder": null,
+   "brass_thimble": null,
+   "cedar_ember": {
+    "at_limit": false,
+    "cooldown_until": null,
+    "eligible": true,
+    "exhausted": [],
+    "grants": [
+     {
+      "arm": null,
+      "blocking": [],
+      "clears": [
+       "seven_day",
+       "seven_day_overage_included"
+      ],
+      "ends_at": "2027-02-11T18:00:00+00:00",
+      "gives_back_weekly": false,
+      "id": "full-reset-2701",
+      "label": "One full limit reset (January 2027)",
+      "paused": false,
+      "percent_used": {
+       "seven_day": 88,
+       "seven_day_overage_included": 40
+      },
+      "resets_left": 0,
+      "resets_total": 1,
+      "starts_at": "2027-01-12T18:00:00+00:00",
+      "type": "weekly",
+      "unavailable_reason": "unavailable",
+      "usable_now": false,
+      "use_requires_limit": false
+     },
+     {
+      "arm": null,
+      "blocking": [],
+      "clears": [
+       "seven_day",
+       "seven_day_overage_included"
+      ],
+      "ends_at": "2027-01-31T07:59:00+00:00",
+      "gives_back_weekly": false,
+      "id": "free_reset_dec_2026",
+      "label": "Free limit reset",
+      "paused": false,
+      "percent_used": {
+       "seven_day": 88,
+       "seven_day_overage_included": 40
+      },
+      "resets_left": 0,
+      "resets_total": 1,
+      "starts_at": "2026-12-02T15:10:00+00:00",
+      "type": "weekly",
+      "unavailable_reason": "unavailable",
+      "usable_now": false,
+      "use_requires_limit": false
+     },
+     {
+      "arm": null,
+      "blocking": [],
+      "clears": [
+       "seven_day_overage_included"
+      ],
+      "ends_at": "2027-04-20T06:59:00+00:00",
+      "gives_back_weekly": true,
+      "id": "launch-2612-fable",
+      "label": "New model launch: one Fable reset",
+      "paused": false,
+      "percent_used": {
+       "seven_day": 88,
+       "seven_day_overage_included": 40
+      },
+      "resets_left": 0,
+      "resets_total": 1,
+      "starts_at": "2026-12-14T17:00:00+00:00",
+      "type": "full",
+      "unavailable_reason": "unavailable",
+      "usable_now": false,
+      "use_requires_limit": false
+     },
+     {
+      "arm": null,
+      "blocking": [],
+      "clears": [
+       "seven_day_overage_included"
+      ],
+      "ends_at": "2027-04-20T06:59:00+00:00",
+      "gives_back_weekly": true,
+      "id": "launch-2612-fable-extra",
+      "label": "New model launch: one more Fable reset",
+      "paused": false,
+      "percent_used": {
+       "seven_day": 88,
+       "seven_day_overage_included": 40
+      },
+      "resets_left": 1,
+      "resets_total": 1,
+      "starts_at": "2026-12-14T17:00:00+00:00",
+      "type": "full",
+      "unavailable_reason": null,
+      "usable_now": true,
+      "use_requires_limit": false
+     }
+    ],
+    "ineligible_reason": null,
+    "next_grant_id": "launch-2612-fable-extra",
+    "paused_held": false,
+    "weekly_resets_at": "2027-01-24T17:00:00+00:00"
+   },
+   "cinder_cove": null,
+   "copper_kite": null,
+   "extra_usage": {
+    "credits_can_pay": "no",
+    "credits_ever_enabled": false,
+    "currency": "USD",
+    "daily": null,
+    "decimal_places": 2,
+    "disabled_reason": "out_of_credits",
+    "is_enabled": false,
+    "monthly_limit": 5000,
+    "spend_limit_reached": false,
+    "used_credits": 0.0,
+    "user_disabled": false,
+    "utilization": 0.0,
+    "weekly": null
+   },
+   "five_hour": null,
+   "granite_teacup": null,
+   "harbor_lantern": null,
+   "iguana_necktie": null,
+   "indicator": null,
+   "juniper_tide": null,
+   "limits": [
+    {
+     "group": "weekly",
+     "is_active": true,
+     "kind": "weekly_all",
+     "percent": 88,
+     "resets_at": "2027-01-24T16:59:59.412000+00:00",
+     "scope": null,
+     "severity": "warning"
+    },
+    {
+     "group": "weekly",
+     "is_active": false,
+     "kind": "weekly_scoped",
+     "percent": 40,
+     "resets_at": "2027-01-24T16:59:59.412130+00:00",
+     "scope": {
+      "model": {
+       "display_name": "Fable",
+       "id": null
+      },
+      "surface": null
+     },
+     "severity": "normal"
+    }
+   ],
+   "maple_sundial": null,
+   "member_dashboard_available": false,
+   "nimbus_quill": null,
+   "omelette_promotional": null,
+   "pace": null,
+   "promo_credits": null,
+   "seven_day": {
+    "limit_dollars": null,
+    "locked_reason": null,
+    "remaining_dollars": null,
+    "resets_at": "2027-01-24T16:59:59.412000+00:00",
+    "used_dollars": null,
+    "utilization": 88.0
+   },
+   "seven_day_cowork": null,
+   "seven_day_oauth_apps": null,
+   "seven_day_omelette": null,
+   "seven_day_opus": null,
+   "seven_day_sonnet": null,
+   "spend": {
+    "auto_reload": null,
+    "balance": null,
+    "can_purchase_credits": false,
+    "can_toggle": false,
+    "cap": {
+     "credits": {
+      "amount_minor": 5000,
+      "exponent": 2
+     },
+     "money": null
+    },
+    "disabled_reason": "out_of_credits",
+    "disclaimer": "Usage credits cover you when you hit your plan limits. [Learn more](https://support.claude.com/articles/12429409)",
+    "enabled": false,
+    "limit": {
+     "amount_minor": 5000,
+     "currency": "USD",
+     "exponent": 2
+    },
+    "percent": 0,
+    "severity": "normal",
+    "used": {
+     "amount_minor": 0,
+     "currency": "USD",
+     "exponent": 2
+    }
+   },
+   "starry_waterfall": null,
+   "tangelo": null,
+   "wattle_ember": null,
+   "weekly_scoped_shares": [
+    {
+     "allowance_percent_of_weekly": 45,
+     "limit_index": 1,
+     "used_percent_of_weekly": 18
+    }
+   ]
+  }
+ }
+}

@@ -510,7 +510,7 @@ func TestE2EClassBrainRefusalNoCacheFallback(t *testing.T) {
 	msg := assertHonestAt(t, resp, at, "seven_day", 2*86400)
 	for _, want := range []string{"class frontier is unavailable", "c/lane:fable: maxplan spent (Fable)",
 		"Options: enable usage credits on maxplan", "add gpt/credits to c/gpt/gpt-6.1-sol's pay",
-		"buy an immediate allowance reset on gpt"} {
+		"Immediate reset (paid) on gpt, for a fee"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message missing %q: %s", want, msg)
 		}

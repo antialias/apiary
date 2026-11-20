@@ -44,12 +44,22 @@ type checkWindow struct {
 	Aliases *windowAliases `json:"aliases"`
 }
 
-// resetOptions are an allowance's own ways to reset early (§1.3): the codex
-// reset credits on hand, and whether an immediate reset may be bought. nil
-// fields: no reading says. Only the unavailable reply's options read them.
-type resetOptions struct {
-	ResetCredits     *float64 `json:"reset_credits"`
-	PurchaseEligible *bool    `json:"purchase_eligible"`
+// allowanceEvent is one of an allowance's events (quota-model 69 §2.2): a way
+// its use comes back other than the clock, a reset grant or a bought reset.
+// Only the unavailable reply's options read it, and only what they need: the
+// valuation is the brain's alone, and the proxy never redeems one.
+type allowanceEvent struct {
+	ID      string `json:"id"`
+	Label   string `json:"label"`
+	Trigger string `json:"trigger"` // owner | owner_pays | provider
+	Usable  struct {
+		Now *bool `json:"now"` // the provider's own word; nil where it gives none
+	} `json:"usable"`
+	Effects []struct {
+		Window *string  `json:"window"` // nil: a window the brain could not name
+		Effect string   `json:"effect"` // refill | give_back | add_lot | limit
+		Points *float64 `json:"points"` // a give_back's points, nil when not stated
+	} `json:"effects"`
 }
 
 // moneyPot is one money pot's state. Open nil = no reading says (Kimi Extra
@@ -90,9 +100,9 @@ type acctStanding struct {
 	Allowance    struct {
 		// Open is the provider's own gate (codex rate_limit.allowed); nil
 		// where the windows alone decide (Anthropic, Kimi).
-		Open         *bool                  `json:"open"`
-		Windows      map[string]checkWindow `json:"windows"`
-		ResetOptions *resetOptions          `json:"reset_options,omitempty"`
+		Open    *bool                  `json:"open"`
+		Windows map[string]checkWindow `json:"windows"`
+		Events  []allowanceEvent       `json:"events,omitempty"`
 		// Entitlement is whether the plan includes the allowance at all:
 		// active, or what a reading says otherwise. A not_entitled record
 		// on the plan ends at a newer reading of it active (§2.6).

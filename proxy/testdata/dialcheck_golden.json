@@ -9791,10 +9791,29 @@
         "as_of": 1799999940
        }
       },
-      "reset_options": {
-       "reset_credits": 0,
-       "purchase_eligible": true,
-       "basis": "exact"
+      "events": [
+       {
+        "id": "codex_paid_reset",
+        "program": "codex_paid_reset",
+        "label": "Immediate reset (paid)",
+        "trigger": "owner_pays",
+        "effects": [
+         {
+          "window": "seven_day",
+          "effect": "refill",
+          "basis": "stated"
+         }
+        ],
+        "anchor": "kept",
+        "usable": {
+         "now": true,
+         "why_not": null
+        }
+       }
+      ],
+      "events_basis": {
+       "state": "read",
+       "why": null
       }
      },
      "money": {
@@ -9889,11 +9908,12 @@
       "action": "add gpt/credits to c/gpt/gpt-6.1-sol's pay"
      },
      {
-      "kind": "reset",
+      "kind": "event",
       "route": "c/gpt/gpt-6.1-sol",
       "account": "gpt",
       "pot": null,
-      "action": "buy an immediate allowance reset on gpt"
+      "event": "codex_paid_reset",
+      "action": "Immediate reset (paid) on gpt, for a fee"
      }
     ]
    }
@@ -10955,7 +10975,7 @@
    }
   },
   {
-   "name": "reset credits on hand are offered ahead of a purchase",
+   "name": "a usable event is offered, and a paid one with its fee",
    "routes": [
     {
      "id": "c/gpt/gpt-6.1-sol",
@@ -10984,10 +11004,47 @@
         "as_of": 1799999940
        }
       },
-      "reset_options": {
-       "reset_credits": 2,
-       "purchase_eligible": true,
-       "basis": "exact"
+      "events": [
+       {
+        "id": "codex_reset:credit-1",
+        "program": "codex_reset",
+        "label": "Full reset (Monthly)",
+        "trigger": "owner",
+        "effects": [
+         {
+          "window": "seven_day",
+          "effect": "refill",
+          "basis": "stated"
+         }
+        ],
+        "anchor": "kept",
+        "usable": {
+         "now": true,
+         "why_not": null
+        }
+       },
+       {
+        "id": "codex_paid_reset",
+        "program": "codex_paid_reset",
+        "label": "Immediate reset (paid)",
+        "trigger": "owner_pays",
+        "effects": [
+         {
+          "window": "seven_day",
+          "effect": "refill",
+          "basis": "stated"
+         }
+        ],
+        "anchor": "kept",
+        "usable": {
+         "now": true,
+         "why_not": null
+        }
+       }
+      ],
+      "events_basis": {
+       "state": "read",
+       "why": null
       }
      },
      "money": {
@@ -11032,11 +11089,957 @@
       "action": "add money to gpt/credits, and add gpt/credits to c/gpt/gpt-6.1-sol's pay"
      },
      {
-      "kind": "reset",
+      "kind": "event",
       "route": "c/gpt/gpt-6.1-sol",
       "account": "gpt",
       "pot": null,
-      "action": "redeem one of 2 allowance reset credits on gpt"
+      "event": "codex_reset:credit-1",
+      "action": "Full reset (Monthly) on gpt"
+     },
+     {
+      "kind": "event",
+      "route": "c/gpt/gpt-6.1-sol",
+      "account": "gpt",
+      "pot": null,
+      "event": "codex_paid_reset",
+      "action": "Immediate reset (paid) on gpt, for a fee"
+     }
+    ]
+   }
+  },
+  {
+   "name": "an unusable event is not offered",
+   "routes": [
+    {
+     "id": "c/gpt/gpt-6.1-sol",
+     "pay": [],
+     "stop_at": null,
+     "scope": null,
+     "accounts": [
+      "gpt"
+     ]
+    }
+   ],
+   "standings": {
+    "gpt": {
+     "provider": "gpt",
+     "as_of": 1799999940,
+     "next_poll_at": 1800000240,
+     "allowance": {
+      "open": false,
+      "windows": {
+       "seven_day": {
+        "used_pct": 100.0,
+        "resets_at": 1800345600,
+        "period": "7d",
+        "scope": null,
+        "reset_basis": "early_possible",
+        "as_of": 1799999940
+       }
+      },
+      "events": [
+       {
+        "id": "codex_reset:credit-1",
+        "program": "codex_reset",
+        "label": "Full reset (Monthly)",
+        "trigger": "owner",
+        "effects": [
+         {
+          "window": "seven_day",
+          "effect": "refill",
+          "basis": "stated"
+         }
+        ],
+        "anchor": "kept",
+        "usable": {
+         "now": false,
+         "why_not": "unavailable"
+        }
+       }
+      ],
+      "events_basis": {
+       "state": "read",
+       "why": null
+      }
+     },
+     "money": {
+      "credits": {
+       "open": false,
+       "balance": 120.0,
+       "unit": "codex_credit"
+      }
+     }
+    }
+   },
+   "pots": {},
+   "ledger": null,
+   "request": null,
+   "given": {},
+   "want": {
+    "members": [
+     {
+      "route": "c/gpt/gpt-6.1-sol",
+      "accounts": [
+       {
+        "account": "gpt",
+        "check": "no",
+        "why": "spent",
+        "until": 1800345600,
+        "basis": "fresh",
+        "window": "seven_day"
+       }
+      ]
+     }
+    ],
+    "available_at": 1800345600,
+    "available_basis": "early_possible",
+    "retry_after_s": 345600,
+    "retryable": true,
+    "options": [
+     {
+      "kind": "fund",
+      "route": "c/gpt/gpt-6.1-sol",
+      "account": "gpt",
+      "pot": "gpt/credits",
+      "action": "add money to gpt/credits, and add gpt/credits to c/gpt/gpt-6.1-sol's pay"
+     }
+    ]
+   }
+  },
+  {
+   "name": "events unread: no option",
+   "routes": [
+    {
+     "id": "c/gpt/gpt-6.1-sol",
+     "pay": [],
+     "stop_at": null,
+     "scope": null,
+     "accounts": [
+      "gpt"
+     ]
+    }
+   ],
+   "standings": {
+    "gpt": {
+     "provider": "gpt",
+     "as_of": 1799999940,
+     "next_poll_at": 1800000240,
+     "allowance": {
+      "open": false,
+      "windows": {
+       "seven_day": {
+        "used_pct": 100.0,
+        "resets_at": 1800345600,
+        "period": "7d",
+        "scope": null,
+        "reset_basis": "early_possible",
+        "as_of": 1799999940
+       }
+      },
+      "events": [],
+      "events_basis": {
+       "state": "unread",
+       "why": "HTTP 401"
+      }
+     },
+     "money": {
+      "credits": {
+       "open": false,
+       "balance": 120.0,
+       "unit": "codex_credit"
+      }
+     }
+    }
+   },
+   "pots": {},
+   "ledger": null,
+   "request": null,
+   "given": {},
+   "want": {
+    "members": [
+     {
+      "route": "c/gpt/gpt-6.1-sol",
+      "accounts": [
+       {
+        "account": "gpt",
+        "check": "no",
+        "why": "spent",
+        "until": 1800345600,
+        "basis": "fresh",
+        "window": "seven_day"
+       }
+      ]
+     }
+    ],
+    "available_at": 1800345600,
+    "available_basis": "early_possible",
+    "retry_after_s": 345600,
+    "retryable": true,
+    "options": [
+     {
+      "kind": "fund",
+      "route": "c/gpt/gpt-6.1-sol",
+      "account": "gpt",
+      "pot": "gpt/credits",
+      "action": "add money to gpt/credits, and add gpt/credits to c/gpt/gpt-6.1-sol's pay"
+     }
+    ]
+   }
+  },
+  {
+   "name": "an event on another window's scope is not offered: the weekly's reset is, the Fable cap's is not",
+   "routes": [
+    {
+     "id": "frontier/lane:opus",
+     "pay": [],
+     "stop_at": null,
+     "scope": "Opus",
+     "accounts": [
+      "maxplan"
+     ]
+    }
+   ],
+   "standings": {
+    "maxplan": {
+     "provider": "anthropic",
+     "as_of": 1799999940,
+     "next_poll_at": 1800000240,
+     "allowance": {
+      "open": null,
+      "windows": {
+       "five_hour": {
+        "used_pct": 40.0,
+        "resets_at": 1800003600,
+        "period": "5h",
+        "scope": null,
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       },
+       "seven_day": {
+        "used_pct": 100.0,
+        "resets_at": 1800259200,
+        "period": "7d",
+        "scope": null,
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       },
+       "scoped:Fable": {
+        "used_pct": 50.0,
+        "resets_at": 1800172800,
+        "period": "7d",
+        "scope": "Fable",
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       }
+      },
+      "events": [
+       {
+        "id": "cedar_ember:full-reset",
+        "program": "cedar_ember",
+        "label": "One full limit reset",
+        "trigger": "owner",
+        "effects": [
+         {
+          "window": "seven_day",
+          "effect": "refill",
+          "basis": "stated"
+         },
+         {
+          "window": "scoped:Fable",
+          "effect": "refill",
+          "basis": "stated"
+         }
+        ],
+        "anchor": "kept",
+        "usable": {
+         "now": true,
+         "why_not": null
+        }
+       },
+       {
+        "id": "cedar_ember:fable-reset",
+        "program": "cedar_ember",
+        "label": "One Fable reset",
+        "trigger": "owner",
+        "effects": [
+         {
+          "window": "scoped:Fable",
+          "effect": "refill",
+          "basis": "stated"
+         }
+        ],
+        "anchor": "kept",
+        "usable": {
+         "now": true,
+         "why_not": null
+        }
+       }
+      ],
+      "events_basis": {
+       "state": "read",
+       "why": null
+      }
+     },
+     "money": {
+      "credits": {
+       "open": false,
+       "balance": null,
+       "unit": null
+      }
+     }
+    }
+   },
+   "pots": {},
+   "ledger": null,
+   "request": null,
+   "given": {},
+   "want": {
+    "members": [
+     {
+      "route": "frontier/lane:opus",
+      "accounts": [
+       {
+        "account": "maxplan",
+        "check": "no",
+        "why": "spent",
+        "until": 1800259200,
+        "basis": "fresh",
+        "window": "seven_day"
+       }
+      ]
+     }
+    ],
+    "available_at": 1800259200,
+    "available_basis": "exact",
+    "retry_after_s": 259200,
+    "retryable": true,
+    "options": [
+     {
+      "kind": "enable",
+      "route": "frontier/lane:opus",
+      "account": "maxplan",
+      "pot": "maxplan/credits",
+      "action": "enable usage credits on maxplan, and add maxplan/credits to frontier/lane:opus's pay"
+     },
+     {
+      "kind": "event",
+      "route": "frontier/lane:opus",
+      "account": "maxplan",
+      "pot": null,
+      "event": "cedar_ember:full-reset",
+      "action": "One full limit reset on maxplan"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a Fable reset whose share of the weekly is 0 is not offered to an Opus lane walled on the weekly",
+   "routes": [
+    {
+     "id": "frontier/lane:opus",
+     "pay": [],
+     "stop_at": null,
+     "scope": "Opus",
+     "accounts": [
+      "maxplan"
+     ]
+    }
+   ],
+   "standings": {
+    "maxplan": {
+     "provider": "anthropic",
+     "as_of": 1799999940,
+     "next_poll_at": 1800000240,
+     "allowance": {
+      "open": null,
+      "windows": {
+       "five_hour": {
+        "used_pct": 40.0,
+        "resets_at": 1800003600,
+        "period": "5h",
+        "scope": null,
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       },
+       "seven_day": {
+        "used_pct": 100.0,
+        "resets_at": 1800259200,
+        "period": "7d",
+        "scope": null,
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       },
+       "scoped:Fable": {
+        "used_pct": 50.0,
+        "resets_at": 1800172800,
+        "period": "7d",
+        "scope": "Fable",
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       }
+      },
+      "events": [
+       {
+        "id": "cedar_ember:fable-reset",
+        "program": "cedar_ember",
+        "label": "One Fable reset",
+        "trigger": "owner",
+        "effects": [
+         {
+          "window": "scoped:Fable",
+          "effect": "refill",
+          "basis": "stated"
+         },
+         {
+          "window": "seven_day",
+          "effect": "give_back",
+          "basis": "inferred",
+          "share_of": "scoped:Fable",
+          "points": 0
+         }
+        ],
+        "anchor": "kept",
+        "usable": {
+         "now": true,
+         "why_not": null
+        }
+       }
+      ],
+      "events_basis": {
+       "state": "read",
+       "why": null
+      }
+     },
+     "money": {
+      "credits": {
+       "open": false,
+       "balance": null,
+       "unit": null
+      }
+     }
+    }
+   },
+   "pots": {},
+   "ledger": null,
+   "request": null,
+   "given": {},
+   "want": {
+    "members": [
+     {
+      "route": "frontier/lane:opus",
+      "accounts": [
+       {
+        "account": "maxplan",
+        "check": "no",
+        "why": "spent",
+        "until": 1800259200,
+        "basis": "fresh",
+        "window": "seven_day"
+       }
+      ]
+     }
+    ],
+    "available_at": 1800259200,
+    "available_basis": "exact",
+    "retry_after_s": 259200,
+    "retryable": true,
+    "options": [
+     {
+      "kind": "enable",
+      "route": "frontier/lane:opus",
+      "account": "maxplan",
+      "pot": "maxplan/credits",
+      "action": "enable usage credits on maxplan, and add maxplan/credits to frontier/lane:opus's pay"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a Fable reset whose share is not stated is not offered to an Opus lane walled on the weekly",
+   "routes": [
+    {
+     "id": "frontier/lane:opus",
+     "pay": [],
+     "stop_at": null,
+     "scope": "Opus",
+     "accounts": [
+      "maxplan"
+     ]
+    }
+   ],
+   "standings": {
+    "maxplan": {
+     "provider": "anthropic",
+     "as_of": 1799999940,
+     "next_poll_at": 1800000240,
+     "allowance": {
+      "open": null,
+      "windows": {
+       "five_hour": {
+        "used_pct": 40.0,
+        "resets_at": 1800003600,
+        "period": "5h",
+        "scope": null,
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       },
+       "seven_day": {
+        "used_pct": 100.0,
+        "resets_at": 1800259200,
+        "period": "7d",
+        "scope": null,
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       },
+       "scoped:Fable": {
+        "used_pct": 50.0,
+        "resets_at": 1800172800,
+        "period": "7d",
+        "scope": "Fable",
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       }
+      },
+      "events": [
+       {
+        "id": "cedar_ember:fable-reset",
+        "program": "cedar_ember",
+        "label": "One Fable reset",
+        "trigger": "owner",
+        "effects": [
+         {
+          "window": "scoped:Fable",
+          "effect": "refill",
+          "basis": "stated"
+         },
+         {
+          "window": "seven_day",
+          "effect": "give_back",
+          "basis": "inferred",
+          "share_of": "scoped:Fable",
+          "points": null
+         }
+        ],
+        "anchor": "kept",
+        "usable": {
+         "now": true,
+         "why_not": null
+        }
+       }
+      ],
+      "events_basis": {
+       "state": "read",
+       "why": null
+      }
+     },
+     "money": {
+      "credits": {
+       "open": false,
+       "balance": null,
+       "unit": null
+      }
+     }
+    }
+   },
+   "pots": {},
+   "ledger": null,
+   "request": null,
+   "given": {},
+   "want": {
+    "members": [
+     {
+      "route": "frontier/lane:opus",
+      "accounts": [
+       {
+        "account": "maxplan",
+        "check": "no",
+        "why": "spent",
+        "until": 1800259200,
+        "basis": "fresh",
+        "window": "seven_day"
+       }
+      ]
+     }
+    ],
+    "available_at": 1800259200,
+    "available_basis": "exact",
+    "retry_after_s": 259200,
+    "retryable": true,
+    "options": [
+     {
+      "kind": "enable",
+      "route": "frontier/lane:opus",
+      "account": "maxplan",
+      "pot": "maxplan/credits",
+      "action": "enable usage credits on maxplan, and add maxplan/credits to frontier/lane:opus's pay"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a Fable reset with a share of the weekly above 0 is offered to an Opus lane walled on the weekly",
+   "routes": [
+    {
+     "id": "frontier/lane:opus",
+     "pay": [],
+     "stop_at": null,
+     "scope": "Opus",
+     "accounts": [
+      "maxplan"
+     ]
+    }
+   ],
+   "standings": {
+    "maxplan": {
+     "provider": "anthropic",
+     "as_of": 1799999940,
+     "next_poll_at": 1800000240,
+     "allowance": {
+      "open": null,
+      "windows": {
+       "five_hour": {
+        "used_pct": 40.0,
+        "resets_at": 1800003600,
+        "period": "5h",
+        "scope": null,
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       },
+       "seven_day": {
+        "used_pct": 100.0,
+        "resets_at": 1800259200,
+        "period": "7d",
+        "scope": null,
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       },
+       "scoped:Fable": {
+        "used_pct": 50.0,
+        "resets_at": 1800172800,
+        "period": "7d",
+        "scope": "Fable",
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       }
+      },
+      "events": [
+       {
+        "id": "cedar_ember:fable-reset",
+        "program": "cedar_ember",
+        "label": "One Fable reset",
+        "trigger": "owner",
+        "effects": [
+         {
+          "window": "scoped:Fable",
+          "effect": "refill",
+          "basis": "stated"
+         },
+         {
+          "window": "seven_day",
+          "effect": "give_back",
+          "basis": "inferred",
+          "share_of": "scoped:Fable",
+          "points": 25
+         }
+        ],
+        "anchor": "kept",
+        "usable": {
+         "now": true,
+         "why_not": null
+        }
+       }
+      ],
+      "events_basis": {
+       "state": "read",
+       "why": null
+      }
+     },
+     "money": {
+      "credits": {
+       "open": false,
+       "balance": null,
+       "unit": null
+      }
+     }
+    }
+   },
+   "pots": {},
+   "ledger": null,
+   "request": null,
+   "given": {},
+   "want": {
+    "members": [
+     {
+      "route": "frontier/lane:opus",
+      "accounts": [
+       {
+        "account": "maxplan",
+        "check": "no",
+        "why": "spent",
+        "until": 1800259200,
+        "basis": "fresh",
+        "window": "seven_day"
+       }
+      ]
+     }
+    ],
+    "available_at": 1800259200,
+    "available_basis": "exact",
+    "retry_after_s": 259200,
+    "retryable": true,
+    "options": [
+     {
+      "kind": "enable",
+      "route": "frontier/lane:opus",
+      "account": "maxplan",
+      "pot": "maxplan/credits",
+      "action": "enable usage credits on maxplan, and add maxplan/credits to frontier/lane:opus's pay"
+     },
+     {
+      "kind": "event",
+      "route": "frontier/lane:opus",
+      "account": "maxplan",
+      "pot": null,
+      "event": "cedar_ember:fable-reset",
+      "action": "One Fable reset on maxplan"
+     }
+    ]
+   }
+  },
+  {
+   "name": "a lane refused by its scoped cap is not offered a reset that refills only the weekly",
+   "routes": [
+    {
+     "id": "c/lane:fable",
+     "pay": [],
+     "stop_at": null,
+     "scope": "Fable",
+     "accounts": [
+      "maxplan"
+     ]
+    }
+   ],
+   "standings": {
+    "maxplan": {
+     "provider": "anthropic",
+     "as_of": 1799999940,
+     "next_poll_at": 1800000240,
+     "allowance": {
+      "open": null,
+      "windows": {
+       "five_hour": {
+        "used_pct": 40.0,
+        "resets_at": 1800003600,
+        "period": "5h",
+        "scope": null,
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       },
+       "seven_day": {
+        "used_pct": 60.0,
+        "resets_at": 1800259200,
+        "period": "7d",
+        "scope": null,
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       },
+       "scoped:Fable": {
+        "used_pct": 100.0,
+        "resets_at": 1800172800,
+        "period": "7d",
+        "scope": "Fable",
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       }
+      },
+      "events": [
+       {
+        "id": "cedar_ember:weekly-reset",
+        "program": "cedar_ember",
+        "label": "One weekly reset",
+        "trigger": "owner",
+        "effects": [
+         {
+          "window": "seven_day",
+          "effect": "refill",
+          "basis": "stated"
+         }
+        ],
+        "anchor": "kept",
+        "usable": {
+         "now": true,
+         "why_not": null
+        }
+       }
+      ],
+      "events_basis": {
+       "state": "read",
+       "why": null
+      }
+     },
+     "money": {
+      "credits": {
+       "open": false,
+       "balance": null,
+       "unit": null
+      }
+     }
+    }
+   },
+   "pots": {},
+   "ledger": null,
+   "request": null,
+   "given": {},
+   "want": {
+    "members": [
+     {
+      "route": "c/lane:fable",
+      "accounts": [
+       {
+        "account": "maxplan",
+        "check": "no",
+        "why": "spent",
+        "until": 1800172800,
+        "basis": "fresh",
+        "window": "scoped:Fable"
+       }
+      ]
+     }
+    ],
+    "available_at": 1800172800,
+    "available_basis": "exact",
+    "retry_after_s": 172800,
+    "retryable": true,
+    "options": [
+     {
+      "kind": "enable",
+      "route": "c/lane:fable",
+      "account": "maxplan",
+      "pot": "maxplan/credits",
+      "action": "enable usage credits on maxplan, and add maxplan/credits to c/lane:fable's pay"
+     }
+    ]
+   }
+  },
+  {
+   "name": "the Fable cap's reset is offered to the Fable lane it binds",
+   "routes": [
+    {
+     "id": "c/lane:fable",
+     "pay": [],
+     "stop_at": null,
+     "scope": "Fable",
+     "accounts": [
+      "maxplan"
+     ]
+    }
+   ],
+   "standings": {
+    "maxplan": {
+     "provider": "anthropic",
+     "as_of": 1799999940,
+     "next_poll_at": 1800000240,
+     "allowance": {
+      "open": null,
+      "windows": {
+       "five_hour": {
+        "used_pct": 40.0,
+        "resets_at": 1800003600,
+        "period": "5h",
+        "scope": null,
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       },
+       "seven_day": {
+        "used_pct": 60.0,
+        "resets_at": 1800259200,
+        "period": "7d",
+        "scope": null,
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       },
+       "scoped:Fable": {
+        "used_pct": 100.0,
+        "resets_at": 1800172800,
+        "period": "7d",
+        "scope": "Fable",
+        "reset_basis": "exact",
+        "as_of": 1799999940
+       }
+      },
+      "events": [
+       {
+        "id": "cedar_ember:fable-reset",
+        "program": "cedar_ember",
+        "label": "One Fable reset",
+        "trigger": "owner",
+        "effects": [
+         {
+          "window": "scoped:Fable",
+          "effect": "refill",
+          "basis": "stated"
+         }
+        ],
+        "anchor": "kept",
+        "usable": {
+         "now": true,
+         "why_not": null
+        }
+       }
+      ],
+      "events_basis": {
+       "state": "read",
+       "why": null
+      }
+     },
+     "money": {
+      "credits": {
+       "open": false,
+       "balance": null,
+       "unit": null
+      }
+     }
+    }
+   },
+   "pots": {},
+   "ledger": null,
+   "request": null,
+   "given": {},
+   "want": {
+    "members": [
+     {
+      "route": "c/lane:fable",
+      "accounts": [
+       {
+        "account": "maxplan",
+        "check": "no",
+        "why": "spent",
+        "until": 1800172800,
+        "basis": "fresh",
+        "window": "scoped:Fable"
+       }
+      ]
+     }
+    ],
+    "available_at": 1800172800,
+    "available_basis": "exact",
+    "retry_after_s": 172800,
+    "retryable": true,
+    "options": [
+     {
+      "kind": "enable",
+      "route": "c/lane:fable",
+      "account": "maxplan",
+      "pot": "maxplan/credits",
+      "action": "enable usage credits on maxplan, and add maxplan/credits to c/lane:fable's pay"
+     },
+     {
+      "kind": "event",
+      "route": "c/lane:fable",
+      "account": "maxplan",
+      "pot": null,
+      "event": "cedar_ember:fable-reset",
+      "action": "One Fable reset on maxplan"
      }
     ]
    }
@@ -11924,10 +12927,29 @@
         "as_of": 1799999940
        }
       },
-      "reset_options": {
-       "reset_credits": 0,
-       "purchase_eligible": true,
-       "basis": "exact"
+      "events": [
+       {
+        "id": "codex_paid_reset",
+        "program": "codex_paid_reset",
+        "label": "Immediate reset (paid)",
+        "trigger": "owner_pays",
+        "effects": [
+         {
+          "window": "seven_day",
+          "effect": "refill",
+          "basis": "stated"
+         }
+        ],
+        "anchor": "kept",
+        "usable": {
+         "now": true,
+         "why_not": null
+        }
+       }
+      ],
+      "events_basis": {
+       "state": "read",
+       "why": null
       }
      },
      "money": {
@@ -12030,11 +13052,12 @@
       "action": "raise gpt/credits's budget"
      },
      {
-      "kind": "reset",
+      "kind": "event",
       "route": "c/gpt/gpt-6.1-sol",
       "account": "gpt",
       "pot": null,
-      "action": "buy an immediate allowance reset on gpt"
+      "event": "codex_paid_reset",
+      "action": "Immediate reset (paid) on gpt, for a fee"
      }
     ]
    }
@@ -13360,7 +14383,7 @@
    }
   },
   {
-   "name": "images, gpt blocked over a spent window with reset credits: blocked wins, no time, no option",
+   "name": "images, gpt blocked over a spent window with a usable reset: blocked wins, no time, no option",
    "routes": [
     {
      "id": "images/gpt/gpt-image-2",
@@ -13391,8 +14414,29 @@
         "as_of": 1799999940
        }
       },
-      "reset_options": {
-       "reset_credits": 2
+      "events": [
+       {
+        "id": "codex_reset:credit-1",
+        "program": "codex_reset",
+        "label": "Full reset (Monthly)",
+        "trigger": "owner",
+        "effects": [
+         {
+          "window": "seven_day",
+          "effect": "refill",
+          "basis": "stated"
+         }
+        ],
+        "anchor": "kept",
+        "usable": {
+         "now": true,
+         "why_not": null
+        }
+       }
+      ],
+      "events_basis": {
+       "state": "read",
+       "why": null
       }
      },
      "money": {

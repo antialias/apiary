@@ -2408,11 +2408,11 @@ def _key_fingerprint(key):
 #   {provider, kind, as_of, source, ok,
 #    plan    {label, basis},
 #    pots    [{id, type, draw, entitlement {state, basis}, open, open_basis,
-#              limits [...], unit?, unit_usd?, reset_options?}],
+#              limits [...], unit?, unit_usd?, events?, events_basis?, events_used?}],
 #    beside  [{kind, limit, on_exceed, basis}],      concurrency (Kimi parallel)
 #    models  {<model>: {available, ..., basis}}}     a provider's model_usage
 #
-# A window limit is {id, kind "window", period, period_s, opens, scope,
+# A window limit is {id, kind "window", period, period_s, refill, anchor, scope,
 # aliases, used_pct, resets_at, reset_basis, basis, as_of}, plus what the
 # provider states besides: used/limit/remaining, its own gate `open` (an OpenAI plan's
 # additional_rate_limits), and the Anthropic limits[] entries it was read from
@@ -2446,10 +2446,14 @@ def _num(v):
 
 
 def _window(wid, period_s, used_pct, resets_at, as_of, scope=None, aliases=None,
-            opens=None, reset_basis="exact", **facts):
-    """One window limit of a reading. basis says whether its use is known."""
+            refill=None, anchor=None, reset_basis="exact", **facts):
+    """One window limit of a reading. basis says whether its use is known.
+    refill is how the clock brings use back (at_once: all of it at resets_at;
+    sliding; continuous), anchor what sets its schedule (fixed: a time of the
+    provider's choosing; first_use: the first request after the last period
+    ended; moved_by_events); None where the adapter does not know (69 §2.1)."""
     w = {"id": wid, "kind": "window", "period": _period_label(period_s),
-         "period_s": int(period_s) if period_s else None, "opens": opens,
+         "period_s": int(period_s) if period_s else None, "refill": refill, "anchor": anchor,
          "scope": scope, "aliases": aliases, "used_pct": used_pct,
          "resets_at": round(resets_at) if resets_at is not None else None,
          "reset_basis": reset_basis if resets_at is not None else None,
@@ -2470,15 +2474,6 @@ def _slot_id(period_s, taken):
     while wid in taken:
         wid, n = f"window:{_period_label(period_s)}#{n}", n + 1
     return wid, period_s
-
-
-def _allowance_pot(windows, open_=None, open_basis=None, others=(), **facts):
-    pot = {"id": ALLOWANCE_POT, "type": "allowance", "draw": 1,
-           "entitlement": {"state": "active", "basis": "derived"},
-           "open": open_, "open_basis": open_basis,
-           "limits": list(windows) + list(others)}
-    pot.update(facts)
-    return pot
 
 
 def _reading_pot(reading, pid):
@@ -2509,51 +2504,440 @@ def _reading_limit(pot, lid):
 # weekly cap; any other kind is read too and binds (A-D7), by its group's
 # length where the group names one.
 _ANTHROPIC_SLOTS = {"session": ("five_hour", 18000, "first_use"),
-                    "weekly_all": ("seven_day", 604800, "anchored")}
+                    "weekly_all": ("seven_day", 604800, "fixed")}
 _ANTHROPIC_GROUP_PERIODS = {"session": 18000, "weekly": 604800}
+
+
+def _allowance_pot(windows, open_=None, open_basis=None, others=(), events=None,
+                   events_basis=None, **facts):
+    """A reading's allowance pot. events are the ways its use comes back other
+    than the clock (69 §2.2), and events_basis says whether they were read
+    (read), could not be (unread, with why) or there is none to read (none):
+    an adapter that reads no reset mechanism leaves both to their default."""
+    pot = {"id": ALLOWANCE_POT, "type": "allowance", "draw": 1,
+           "entitlement": {"state": "active", "basis": "derived"},
+           "open": open_, "open_basis": open_basis,
+           "limits": list(windows) + list(others),
+           "events": list(events or []),
+           "events_basis": events_basis or {"state": "none", "why": "no reset mechanism read"}}
+    pot.update(facts)
+    return pot
+
+
+# ---- events (quota-model 69 §2.2) ---------------------------------------------
+#
+# An event changes a pot other than the clock: a reset grant, a bought reset.
+# It sits on the pot it acts on (pots[*].events[]):
+#   {id, program, label, trigger, effects [...], anchor, anchor_basis,
+#    supply {left, total, from, to, order, cooldown_until, per_period, basis},
+#    usable {now, why_not, only_at_limit, min_used_pct, not_while_closed,
+#            not_with_overage, paused, basis},
+#    auto_use, provider_name}
+# trigger is owner (the owner redeems it) or owner_pays (the owner buys it);
+# an effect is {window, effect, basis} with effect refill (the window's use
+# goes to 0), give_back (points, or share_of's share, come off it), add_lot
+# ({lot}, on a money pot) or limit ({factor | points, until}); a provider's
+# window the adapter cannot name is {window: null, provider_name, effect,
+# basis: unknown}. basis is stated (the response says it), inferred (from the
+# provider's documentation or a match, the rule beside it) or unknown.
+_EVENT_TRIGGERS = ("owner", "owner_pays", "provider")
+_EVENT_EFFECTS = ("refill", "give_back", "add_lot", "limit")
+_EVENT_ANCHORS = ("kept", "restarts_now", "restarts_at_use", "unknown")
+_EVENT_BASES = ("stated", "inferred", "unknown")
+_EVENTS_STATES = ("read", "unread", "none")
+
+
+def _event_problem(ev):
+    """Why one event is not in the reading's shape, or None."""
+    if not isinstance(ev, dict):
+        return "an event must be an object"
+    if not (isinstance(ev.get("id"), str) and ev["id"]):
+        return "an event's id must be a string"
+    if ev.get("trigger") not in _EVENT_TRIGGERS:
+        return f"{ev['id']}: trigger must be one of {', '.join(_EVENT_TRIGGERS)}"
+    if ev.get("anchor") not in _EVENT_ANCHORS:
+        return f"{ev['id']}: anchor must be one of {', '.join(_EVENT_ANCHORS)}"
+    if not isinstance(ev.get("label"), (str, type(None))):
+        return f"{ev['id']}: label must be a string, or null"
+    effects = ev.get("effects")
+    if not isinstance(effects, list):
+        return f"{ev['id']}: effects must be a list"
+    for e in effects:
+        if not isinstance(e, dict) or e.get("effect") not in _EVENT_EFFECTS:
+            return f"{ev['id']}: an effect must be one of {', '.join(_EVENT_EFFECTS)}"
+        if e.get("basis") not in _EVENT_BASES:
+            return f"{ev['id']}: an effect's basis must be one of {', '.join(_EVENT_BASES)}"
+        if e.get("window") is None:
+            if e["basis"] != "unknown" or not isinstance(e.get("provider_name"), str):
+                return f"{ev['id']}: an unnamed window is unknown and carries its provider_name"
+        elif not isinstance(e["window"], str):
+            return f"{ev['id']}: an effect's window must be a window id, or null"
+        if e["effect"] == "give_back" and e.get("points") is None and e.get("share_of") is None \
+                and e["basis"] != "unknown":
+            return f"{ev['id']}: a give_back states its points or share_of, or is unknown"
+        if e["effect"] == "limit" and e.get("factor") is None and e.get("points") is None:
+            return f"{ev['id']}: a limit effect carries its factor or points"
+    sup, use = ev.get("supply"), ev.get("usable")
+    if not isinstance(sup, dict) or not isinstance(use, dict):
+        return f"{ev['id']}: supply and usable must be objects"
+    for k in ("left", "total", "from", "to", "order", "cooldown_until"):
+        if sup.get(k) is not None and _num(sup[k]) is None:
+            return f"{ev['id']}: supply.{k} must be a number, or null"
+    if use.get("now") not in (True, False, None):
+        return f"{ev['id']}: usable.now must be true, false or null"
+    if not isinstance(use.get("not_while_closed", []), list):
+        return f"{ev['id']}: usable.not_while_closed must be a list of window ids"
+    return None
+
+
+def _events_problem(pot):
+    """Why a pot's events are not in the reading's shape, or None: each event
+    as _event_problem, ids unique, and events_basis {state, why}."""
+    events, basis = pot.get("events"), pot.get("events_basis")
+    if not isinstance(events, list):
+        return "events must be a list"
+    if not isinstance(basis, dict) or basis.get("state") not in _EVENTS_STATES:
+        return f"events_basis.state must be one of {', '.join(_EVENTS_STATES)}"
+    if basis["state"] == "none" and events:
+        return "events listed under events_basis none"
+    seen = set()
+    for ev in events:
+        why = _event_problem(ev)
+        if why:
+            return why
+        if ev["id"] in seen:
+            return f"{ev['id']}: listed twice"
+        seen.add(ev["id"])
+    return None
+
+
+def _checked_events(reading, name):
+    """The reading with each pot's events checked: a pot whose events are not
+    in the shape (_events_problem) keeps none, says unread with the reason,
+    and the log names it. The reading is changed in place and returned."""
+    for pot in (reading or {}).get("pots") or []:
+        if "events" not in pot and "events_basis" not in pot:
+            continue
+        why = _events_problem(pot)
+        if why:
+            log(f"{name}: {pot.get('id')} events refused: {why}")
+            pot["events"] = []
+            pot["events_basis"] = {"state": "unread", "why": f"invalid: {why}"}
+    return reading
+
+
+def _epoch_s(v):
+    """An ISO time or epoch seconds as whole epoch seconds, or None."""
+    t = _iso_to_epoch(v) if isinstance(v, str) else _num(v)
+    return round(t) if t is not None else None
+
+
+# Anthropic's reset programs, in /api/oauth/usage?cedar_ember=1 (69 §3.1).
+# cedar_ember is the reset grants: {eligible, ineligible_reason, at_limit,
+# exhausted[], grants[], next_grant_id, weekly_resets_at, cooldown_until}.
+# The provider offers grants only to a client version it supports: a
+# User-Agent below it reads `ineligible_reason: "cli_version"` and no grants,
+# which the reading says as events unread, never as an account offered none.
+# A grant's `type` is the provider's vocabulary and not what it clears; the
+# adapter reads clears[] and gives_back_weekly. juniper_tide is the weekly
+# 5-hour reset, read to the client's field names (eligible, ineligible_reason,
+# next_available_at, arm): its shape on the server is not yet confirmed, so a
+# block of any other shape is unread, never guessed.
+_ANTHROPIC_CLEARS = {"five_hour": "five_hour", "seven_day": "seven_day"}
+_JUNIPER_WAITS = ("not_at_wall", "weekly_limit", "extra_usage")
+# Program blocks in the response the adapter reads none of: the first
+# non-null value of each is named in the log once, so a new offer is seen.
+_ANTHROPIC_PROGRAMS_UNREAD = (
+    "amber_cistern", "amber_gauge", "amber_ladder", "brass_thimble", "cinder_cove", "copper_kite",
+    "granite_teacup", "harbor_lantern", "iguana_necktie", "indicator", "maple_sundial",
+    "nimbus_quill", "omelette_promotional", "pace", "promo_credits", "starry_waterfall",
+    "tangelo", "wattle_ember")
+_programs_seen = set()
+
+
+def _anthropic_programs_seen(raw):
+    """Name, once per process, each unread program block that carries a value."""
+    new = [k for k in _ANTHROPIC_PROGRAMS_UNREAD if raw.get(k) is not None and k not in _programs_seen]
+    if new:
+        _programs_seen.update(new)
+        log(f"anthropic: usage carries program blocks the brain does not read: {', '.join(new)}")
+
+
+def _scope_model_name(sc):
+    """A limits[] entry's scope.model.display_name, or None for any other shape."""
+    model = sc.get("model") if isinstance(sc, dict) else None
+    dn = model.get("display_name") if isinstance(model, dict) else None
+    return dn if isinstance(dn, str) and dn else None
+
+
+def _anthropic_scoped_index(raw):
+    """{scoped window id: its index in limits[]}: the index weekly_scoped_shares
+    names a scoped window by."""
+    out = {}
+    for i, lim in enumerate(raw.get("limits") or []):
+        if isinstance(lim, dict) and lim.get("kind") == "weekly_scoped":
+            sc = lim.get("scope")
+            dn = _scope_model_name(sc)
+            if dn:
+                out.setdefault(f"scoped:{dn}", i)
+    return out
+
+
+def _anthropic_window_of(name, percent_used, windows):
+    """The window id a cedar_ember window name stands for, or None. five_hour
+    and seven_day by name; any other name is the one scoped window whose
+    used_pct equals the grant's percent_used for it (INFERRED: the provider's
+    seven_day_overage_included is the weekly Fable cap, matched so on every
+    account read). None when no scoped window, or more than one, matches."""
+    if name in _ANTHROPIC_CLEARS:
+        return _ANTHROPIC_CLEARS[name]
+    pct = _num((percent_used or {}).get(name)) if isinstance(percent_used, dict) else None
+    if pct is None:
+        return None
+    hits = [wid for wid, w in windows.items()
+            if wid.startswith("scoped:") and w.get("used_pct") is not None and w["used_pct"] == pct]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _grant_shape_problem(g):
+    """Why one cedar_ember grant is not in the shape the adapter reads, or None."""
+    if not isinstance(g, dict):
+        return "not an object"
+    if not (isinstance(g.get("id"), str) and g["id"]):
+        return "id is not a string"
+    for k in ("clears", "blocking"):
+        v = g.get(k)
+        if v is not None and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+            return f"{k} is not a list of names"
+    if g.get("percent_used") is not None and not isinstance(g["percent_used"], dict):
+        return "percent_used is not an object"
+    for k in ("resets_left", "resets_total"):
+        if g.get(k) is not None and _num(g[k]) is None:
+            return f"{k} is not a number"
+    for k in ("label", "unavailable_reason", "starts_at", "ends_at"):
+        if g.get(k) is not None and not isinstance(g[k], str):
+            return f"{k} is not a string"
+    return None
+
+
+def _anthropic_shares(raw):
+    """{limit_index: used_percent_of_weekly} of weekly_scoped_shares; an
+    entry of another shape is left out, and a list of another shape is none."""
+    shares = raw.get("weekly_scoped_shares")
+    out = {}
+    for s in shares if isinstance(shares, list) else ():
+        if isinstance(s, dict) and isinstance(s.get("limit_index"), int) \
+                and not isinstance(s["limit_index"], bool):
+            out[s["limit_index"]] = _num(s.get("used_percent_of_weekly"))
+    return out
+
+
+def _cedar_event(g, block, raw, windows):
+    """One cedar_ember grant with uses left -> its event (69 §3.1)."""
+    pu = g.get("percent_used")
+    effects, scoped = [], []
+    for name in g.get("clears") or []:
+        wid = _anthropic_window_of(name, pu, windows)
+        if wid is None:
+            effects.append({"window": None, "provider_name": str(name), "effect": "refill",
+                            "basis": "unknown"})
+            continue
+        effects.append({"window": wid, "effect": "refill", "basis": "stated"})
+        if wid.startswith("scoped:"):
+            scoped.append(wid)
+    if g.get("gives_back_weekly") is True:
+        # The scoped window's share of the weekly comes back to the weekly;
+        # the provider states that share as weekly_scoped_shares, by the
+        # scoped window's index in limits[].
+        idx = _anthropic_scoped_index(raw)
+        shares = _anthropic_shares(raw)
+        for wid in scoped or [None]:
+            pts = shares.get(idx.get(wid)) if wid is not None else None
+            effects.append({"window": "seven_day", "effect": "give_back", "share_of": wid,
+                            "points": pts, "basis": "inferred" if wid else "unknown",
+                            "points_basis": "stated" if pts is not None else "unknown"})
+        # The provider documents that such a reset also refills a 5-hour
+        # window the account has; clears[] does not list it. With no 5-hour
+        # window read (idle), there is nothing to refill.
+        if "five_hour" in windows and not any(e["window"] == "five_hour" for e in effects):
+            effects.append({"window": "five_hour", "effect": "refill", "basis": "inferred"})
+    weekly = _epoch_s(block.get("weekly_resets_at"))
+    seven = (windows.get("seven_day") or {}).get("resets_at")
+    blocking = [w for w in (_anthropic_window_of(n, pu, windows) for n in g.get("blocking") or [])
+                if w is not None]
+    why = g.get("unavailable_reason")
+    if not blocking and isinstance(why, str) and why.startswith("blocked_"):
+        w = _anthropic_window_of(why[len("blocked_"):], pu, windows)
+        blocking = [w] if w is not None else []
+    usable_now = g.get("usable_now")
+    return {"id": f"cedar_ember:{g.get('id')}", "program": "cedar_ember",
+            "label": g.get("label") if isinstance(g.get("label"), str) else None,
+            "trigger": "owner", "effects": effects,
+            # The provider documents that weekly limits keep their day and
+            # time; stated when the block's weekly_resets_at is the weekly's.
+            "anchor": "kept",
+            "anchor_basis": "stated" if weekly is not None and seven is not None
+                            and abs(weekly - seven) <= 1 else "inferred",
+            "supply": {"left": _num(g.get("resets_left")), "total": _num(g.get("resets_total")),
+                       "from": _epoch_s(g.get("starts_at")), "to": _epoch_s(g.get("ends_at")),
+                       "order": 1 if g.get("id") == block.get("next_grant_id") else None,
+                       "cooldown_until": _epoch_s(block.get("cooldown_until")),
+                       "per_period": None, "basis": "stated"},
+            "usable": {"now": usable_now if isinstance(usable_now, bool) else None,
+                       "why_not": why if isinstance(why, str) else None,
+                       "only_at_limit": g.get("use_requires_limit") is True,
+                       "min_used_pct": None, "not_while_closed": blocking,
+                       "not_with_overage": False, "paused": g.get("paused") is True,
+                       "basis": "stated"},
+            "auto_use": None,
+            "provider_name": {"clears": list(g.get("clears") or []), "type": g.get("type"),
+                              "percent_used": pu if isinstance(pu, dict) else None,
+                              "blocking": list(g.get("blocking") or [])}}
+
+
+def _juniper_event(block):
+    """juniper_tide (the weekly 5-hour reset) -> (event or None, unread why or
+    None). Read to the client's field names; a block without a boolean
+    `eligible` is a shape the adapter cannot read."""
+    if not isinstance(block, dict) or not isinstance(block.get("eligible"), bool):
+        return None, "juniper_tide shape"
+    why = block.get("ineligible_reason")
+    if not block["eligible"] and why not in _JUNIPER_WAITS:
+        return None, None  # not offered to this account
+    return {"id": "juniper_tide", "program": "juniper_tide", "label": "Reset your 5-hour limit",
+            "trigger": "owner",
+            # Documented: it clears the 5-hour window and still counts toward
+            # the weekly, so the weekly is untouched.
+            "effects": [{"window": "five_hour", "effect": "refill", "basis": "stated"}],
+            "anchor": "unknown", "anchor_basis": "unknown",
+            "supply": {"left": 1 if block["eligible"] else None, "total": 1, "from": None,
+                       "to": None, "order": None,
+                       "cooldown_until": _epoch_s(block.get("next_available_at")),
+                       "per_period": "7d", "basis": "inferred"},
+            "usable": {"now": block["eligible"], "why_not": why if isinstance(why, str) else None,
+                       "only_at_limit": True, "min_used_pct": None,
+                       "not_while_closed": ["seven_day"], "not_with_overage": True,
+                       "paused": False, "basis": "inferred"},
+            "auto_use": None,
+            "provider_name": {"arm": block.get("arm"), "ineligible_reason": why}}, None
+
+
+def _anthropic_events(raw, windows, name="anthropic"):
+    """The allowance's events from the reset programs (69 §3.1): {events,
+    events_basis, events_used}. A grant with no use left is history, counted
+    in events_used, not an event."""
+    events, used, unread = [], 0, []
+    read, none_why = False, None
+    shares = raw.get("weekly_scoped_shares")
+    if shares is not None and len(_anthropic_shares(raw)) != (len(shares) if isinstance(shares, list) else -1):
+        unread.append("weekly_scoped_shares shape")
+        log(f"{name}: weekly_scoped_shares of a shape the brain does not read; events unread")
+    ce = raw.get("cedar_ember")
+    if isinstance(ce, dict):
+        if ce.get("eligible") is True and isinstance(ce.get("grants"), list):
+            read = True
+            for i, g in enumerate(ce["grants"]):
+                why = _grant_shape_problem(g)
+                if why is None:
+                    left, total = _num(g.get("resets_left")), _num(g.get("resets_total"))
+                    if left is not None and left <= 0:
+                        if total is not None:
+                            used += int(max(0.0, total - left))
+                        continue
+                    try:
+                        ev = _cedar_event(g, ce, raw, windows)
+                    except (TypeError, ValueError, AttributeError, KeyError, OverflowError) as e:
+                        why = f"{type(e).__name__}: {e}"
+                    else:
+                        if total is not None:
+                            used += int(max(0.0, total - left))
+                        events.append(ev)
+                        continue
+                unread.append("cedar_ember shape")
+                log(f"{name}: cedar_ember grants[{i}] not read ({why}); events unread")
+        elif ce.get("eligible") is False:
+            why = ce.get("ineligible_reason")
+            if why == "cli_version":
+                unread.append("cli_version")
+            else:
+                none_why = str(why) if why else "ineligible"
+        else:
+            unread.append("cedar_ember shape")
+            log(f"{name}: cedar_ember block of a shape the brain does not read; events unread")
+    elif ce is not None:
+        unread.append("cedar_ember shape")
+        log(f"{name}: cedar_ember block of a shape the brain does not read; events unread")
+    jt = raw.get("juniper_tide")
+    if jt is not None:
+        ev, why = _juniper_event(jt)
+        if why:
+            unread.append(why)
+            log(f"{name}: juniper_tide block of a shape the brain does not read; events unread")
+        elif ev is not None:
+            read = True
+            events.append(ev)
+    if unread:
+        # What could be read is kept; unread says the list may be short.
+        return {"events": events,
+                "events_basis": {"state": "unread", "why": "; ".join(dict.fromkeys(unread))},
+                "events_used": used if read else None}
+    if read:
+        return {"events": events, "events_basis": {"state": "read", "why": None},
+                "events_used": used}
+    return {"events": [], "events_basis": {"state": "none",
+                                           "why": none_why or "no reset program in the reading"},
+            "events_used": None}
 
 
 def _anthropic_reading(raw, as_of, tier=""):
     """GET /api/oauth/usage -> the §1.5 reading of one Anthropic subscription."""
     raw = raw if isinstance(raw, dict) else {}
     windows = {}
-    for wid, period_s, opens in (("five_hour", 18000, "first_use"),
-                                 ("seven_day", 604800, "anchored")):
+    for wid, period_s, anchor in (("five_hour", 18000, "first_use"),
+                                  ("seven_day", 604800, "fixed")):
         w = raw.get(wid)
         if isinstance(w, dict):
             windows[wid] = _window(wid, period_s, _num(w.get("utilization")),
                                    _iso_to_epoch(w.get("resets_at")), as_of,
-                                   opens=opens, sources=[])
+                                   refill="at_once", anchor=anchor, sources=[])
     for lim in raw.get("limits") or []:
         if not isinstance(lim, dict):
             continue
         kind, group = str(lim.get("kind") or ""), str(lim.get("group") or "")
         sc = lim.get("scope")
-        dn = ((sc.get("model") or {}).get("display_name")) if isinstance(sc, dict) else None
+        dn = _scope_model_name(sc)
         sev = lim.get("severity")
         src = {"kind": kind, "group": group, "scope_model": dn or "",
                "percent": _num(lim.get("percent")), "severity": sev if isinstance(sev, str) else None,
                "is_active": lim.get("is_active") is True,
                "resets_at": _iso_to_epoch(lim.get("resets_at"))}
+        refill = "at_once"
         if kind in _ANTHROPIC_SLOTS and not dn:
-            wid, period_s, opens = _ANTHROPIC_SLOTS[kind]
+            wid, period_s, anchor = _ANTHROPIC_SLOTS[kind]
         elif kind == "weekly_scoped" and dn:
             # A scoped cap is weekly and shares the account's 7d reset (10 §2).
-            wid, period_s, opens = f"scoped:{dn}", 604800, "anchored"
+            wid, period_s, anchor = f"scoped:{dn}", 604800, "fixed"
         else:
             wid = f"limit:{kind or 'unnamed'}" + (f":{dn}" if dn else "")
-            period_s, opens = _ANTHROPIC_GROUP_PERIODS.get(group), None
+            period_s, refill, anchor = _ANTHROPIC_GROUP_PERIODS.get(group), None, None
         if wid not in windows:
             windows[wid] = _window(wid, period_s, src["percent"], src["resets_at"], as_of,
                                    scope=dn, aliases=SCOPE_ALIASES.get(dn) if dn else None,
-                                   opens=opens, sources=[])
+                                   refill=refill, anchor=anchor, sources=[])
         windows[wid]["sources"].append(src)
     # A window is carried only where the body reports it, top-level or in
     # limits[]. A null or absent five_hour with no session entry is a window
     # not reported: the 5h window is null while idle and opens at first use
     # (10 §2), so it binds nothing and is not unknown. A reported window whose
     # utilization is null is unknown, never 0 (§1.5).
-    pots = [_allowance_pot(windows.values())]
+    _anthropic_programs_seen(raw)
+    try:
+        events = _anthropic_events(raw, windows)
+    except Exception as e:  # noqa: BLE001 — a reset block never costs the windows
+        log(f"anthropic: reset programs not read ({type(e).__name__}: {e}); events unread")
+        events = {"events": [], "events_basis": {"state": "unread", "why": "reset programs shape"},
+                  "events_used": None}
+    pots = [_allowance_pot(windows.values(), **events)]
     extra = raw.get("extra_usage")
     if isinstance(extra, dict):
         # Usage credits (10 §5): on or off by is_enabled; how much is left is
@@ -2682,6 +3066,28 @@ def _readings_snapshot(t):
                 for r in t.state.values() if r.get("good_ts") and r.get("reading")]
 
 
+_OPENS_ANCHOR = {"first_use": "first_use", "anchored": "fixed"}
+
+
+def _restored_reading(rd, name):
+    """A saved reading in today's shape, in place: one saved before C17 has
+    its allowance's reset_options dropped and its events unread (the next
+    poll reads them), and each window's opens becomes its anchor, with refill
+    unknown. Then its events are checked as a poll's are (_checked_events)."""
+    for pot in rd.get("pots") or [] if isinstance(rd, dict) else ():
+        if not isinstance(pot, dict) or pot.get("type") != "allowance":
+            continue
+        pot.pop("reset_options", None)
+        if "events" not in pot:
+            pot.update(events=[], events_basis={"state": "unread", "why": "saved before events"},
+                       events_used=None)
+        for w in pot.get("limits") or []:
+            if isinstance(w, dict) and w.get("kind") == "window" and "refill" not in w:
+                opens = w.pop("opens", None)
+                w["refill"], w["anchor"] = None, _OPENS_ANCHOR.get(opens)
+    return _checked_events(rd, name)
+
+
 def _restore_readings(t, readings):
     """Seed _state from saved readings at startup: each is served with its true
     age (good_ts) and marked stale until this process polls the account, so
@@ -2704,6 +3110,7 @@ def _restore_readings(t, readings):
                 continue
             if r["name"] not in configured or r["name"] in t.state:
                 continue
+            _restored_reading(r["reading"], r["name"])
             t.state[r["name"]] = dict(r, ok=0, ts=r["good_ts"], stale=1, http=0, retry_after=None,
                                      err="restored at restart; not polled since")
             n += 1
@@ -3377,8 +3784,8 @@ def _reply_options(route, account, standing, c, pots, ledger, now, request=None)
     """The owner actions that would make this (route, account) serve sooner
     (§2.8 item 1): its money pot, where permitting, funding or enabling it
     would serve, raising each budget the route has reached on it (§1.9), and
-    the allowance's reset options while the allowance is what holds it. Each
-    names its action in words."""
+    the allowance's events while the allowance is what holds it
+    (_event_options). Each names its action in words."""
     if c["check"] != "no":
         return []
     out = []
@@ -3405,14 +3812,47 @@ def _reply_options(route, account, standing, c, pots, ledger, now, request=None)
                         "action": f"raise {pid}'s budget" if which == "pot"
                         else f"raise {rid}'s route budget on {pid}"})
     if c["reason"] in ("pay", "spent", "budget"):
-        ro = (standing.get("allowance") or {}).get("reset_options") or {}
-        credits = ro.get("reset_credits")
-        if _is_time(credits) and credits > 0:
-            out.append({"kind": "reset", "route": rid, "account": account, "pot": None,
-                        "action": f"redeem one of {credits} allowance reset credits on {account}"})
-        elif ro.get("purchase_eligible") is True:
-            out.append({"kind": "reset", "route": rid, "account": account, "pot": None,
-                        "action": f"buy an immediate allowance reset on {account}"})
+        out.extend(_event_options(route, account, standing, now))
+    return out
+
+
+def _event_gain(e, windows):
+    """Does this effect give use back? A refill of a window the standing
+    carries with use on it (or use unknown), or a give_back of more than 0
+    points. A give_back with no points stated (no share read) or 0 gives
+    nothing the reply can promise."""
+    w = windows.get(e.get("window"))
+    if e.get("effect") == "refill":
+        return w is not None and (w.get("used_pct") is None or w["used_pct"] > 0)
+    if e.get("effect") == "give_back":
+        pts = _num(e.get("points"))
+        return w is not None and pts is not None and pts > 0
+    return False
+
+
+def _event_options(route, account, standing, now):
+    """The allowance's events the owner could use now that would let this
+    route serve (69 §6.2): each with trigger owner or owner_pays, usable now
+    by the provider's word, with an effect that gives use back (_event_gain)
+    to a window that refused the route (a binding window closed now), or to
+    any window when the account's own gate is closed. A bought one says so;
+    none is valued here, which is the fleet's."""
+    allowance = standing.get("allowance") or {}
+    windows = allowance.get("windows") or {}
+    closed = allowance.get("open") is False
+    refused = {name for name, w in _binding_windows(standing, route.get("scope")).items()
+               if _window_closed(w, now)}
+    out = []
+    for ev in allowance.get("events") or []:
+        if ev.get("trigger") not in ("owner", "owner_pays") or \
+                (ev.get("usable") or {}).get("now") is not True:
+            continue
+        if not any((closed or e.get("window") in refused) and _event_gain(e, windows)
+                   for e in ev.get("effects") or []):
+            continue
+        fee = ", for a fee" if ev["trigger"] == "owner_pays" else ""
+        out.append({"kind": "event", "route": route["id"], "account": account, "pot": None,
+                    "event": ev["id"], "action": f"{ev.get('label') or ev['id']} on {account}{fee}"})
     return out
 
 
@@ -5053,13 +5493,13 @@ def _report_window(wid):
     the reading's shape: five_hour, seven_day and scoped:<scope>, with their
     period and scope (the proxy's windowFor). None for any other id."""
     if wid == "five_hour":
-        return _window(wid, 18000, None, None, None, opens="first_use")
+        return _window(wid, 18000, None, None, None, refill="at_once", anchor="first_use")
     if wid == "seven_day":
-        return _window(wid, 604800, None, None, None, opens="anchored")
+        return _window(wid, 604800, None, None, None, refill="at_once", anchor="fixed")
     if wid.startswith("scoped:") and len(wid) > len("scoped:"):
         sc = wid[len("scoped:"):]
         return _window(wid, 604800, None, None, None, scope=sc, aliases=SCOPE_ALIASES.get(sc),
-                       opens="anchored")
+                       refill="at_once", anchor="fixed")
     return None
 
 
@@ -8668,6 +9108,7 @@ def _poll_pass(t):
                     log(f"{name}: discarded poll of a removed account")
                     continue
             if res["ok"]:
+                _checked_events(res["reading"], name)
                 line = _reading_line(res)
                 pot = _money_pot(res.get("provider"))
                 credits = _reading_pot(res["reading"], pot)

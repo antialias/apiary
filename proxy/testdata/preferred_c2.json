@@ -53,6 +53,12 @@
       "basis": "derived",
       "state": "active"
      },
+     "events": [],
+     "events_basis": {
+      "state": "none",
+      "why": "no reset program in the reading"
+     },
+     "events_used": null,
      "limits": {},
      "open": null,
      "open_basis": null,
@@ -60,12 +66,13 @@
      "windows": {
       "five_hour": {
        "aliases": null,
+       "anchor": "first_use",
        "as_of": 1800000000.0,
        "basis": "exact",
        "kind": "window",
-       "opens": "first_use",
        "period": "5h",
        "period_s": 18000,
+       "refill": "at_once",
        "reset_basis": "exact",
        "resets_at": 4088944800,
        "scope": null,
@@ -74,12 +81,13 @@
       },
       "scoped:Opus": {
        "aliases": null,
+       "anchor": "fixed",
        "as_of": 1800000000.0,
        "basis": "exact",
        "kind": "window",
-       "opens": "anchored",
        "period": "7d",
        "period_s": 604800,
+       "refill": "at_once",
        "reset_basis": "exact",
        "resets_at": 4089225600,
        "scope": "Opus",
@@ -98,12 +106,13 @@
       },
       "seven_day": {
        "aliases": null,
+       "anchor": "fixed",
        "as_of": 1800000000.0,
        "basis": "exact",
        "kind": "window",
-       "opens": "anchored",
        "period": "7d",
        "period_s": 604800,
+       "refill": "at_once",
        "reset_basis": "exact",
        "resets_at": 4089225600,
        "scope": null,
@@ -162,6 +171,12 @@
       "basis": "derived",
       "state": "active"
      },
+     "events": [],
+     "events_basis": {
+      "state": "none",
+      "why": "no reset program in the reading"
+     },
+     "events_used": null,
      "limits": {},
      "open": null,
      "open_basis": null,
@@ -169,12 +184,13 @@
      "windows": {
       "five_hour": {
        "aliases": null,
+       "anchor": "first_use",
        "as_of": 1799997300.0,
        "basis": "exact",
        "kind": "window",
-       "opens": "first_use",
        "period": "5h",
        "period_s": 18000,
+       "refill": "at_once",
        "reset_basis": null,
        "resets_at": null,
        "scope": null,
@@ -183,12 +199,13 @@
       },
       "seven_day": {
        "aliases": null,
+       "anchor": "fixed",
        "as_of": 1799997300.0,
        "basis": "exact",
        "kind": "window",
-       "opens": "anchored",
        "period": "7d",
        "period_s": 604800,
+       "refill": "at_once",
        "reset_basis": null,
        "resets_at": null,
        "scope": null,
@@ -271,26 +288,80 @@
       "basis": "derived",
       "state": "active"
      },
+     "events": [
+      {
+       "anchor": "restarts_at_use",
+       "anchor_basis": "inferred",
+       "auto_use": {
+        "basis": "unknown",
+        "setting": "Allow your assistant to use resets",
+        "threshold_pct": 10
+       },
+       "effects": [
+        {
+         "basis": "inferred",
+         "effect": "refill",
+         "window": "seven_day"
+        },
+        {
+         "basis": "inferred",
+         "effect": "refill",
+         "window": "five_hour"
+        }
+       ],
+       "id": "codex_reset:RateLimitResetCredit_0001",
+       "label": "Full reset (Monthly)",
+       "program": "codex_reset_credit",
+       "provider_name": {
+        "is_supported_by_plan": true,
+        "reset_type": "codex_rate_limits",
+        "status": "available"
+       },
+       "supply": {
+        "basis": "stated",
+        "cooldown_until": null,
+        "from": 1799568000,
+        "left": 1,
+        "order": null,
+        "per_period": null,
+        "to": 1802160000,
+        "total": 1
+       },
+       "trigger": "owner",
+       "usable": {
+        "basis": "inferred",
+        "min_used_pct": 20,
+        "not_while_closed": [],
+        "not_with_overage": false,
+        "now": true,
+        "only_at_limit": false,
+        "paused": false,
+        "why_not": null
+       }
+      }
+     ],
+     "events_basis": {
+      "state": "read",
+      "why": null
+     },
+     "events_last_used_at": null,
+     "events_used": 0,
      "limit_reached": false,
      "limits": {},
      "open": false,
      "open_basis": "exact",
-     "reset_options": {
-      "basis": "exact",
-      "purchase_eligible": true,
-      "reset_credits": 0
-     },
      "type": "allowance",
      "windows": {
       "five_hour": {
        "aliases": null,
+       "anchor": "first_use",
        "as_of": 1800000000.0,
        "basis": "exact",
        "kind": "window",
        "limit": 100.0,
-       "opens": "first_use",
        "period": "5h",
        "period_s": 18000,
+       "refill": "at_once",
        "remaining": 50.0,
        "reset_basis": "early_possible",
        "resets_at": 1800009000,
@@ -300,13 +371,14 @@
       },
       "seven_day": {
        "aliases": null,
+       "anchor": "first_use",
        "as_of": 1800000000.0,
        "basis": "exact",
        "kind": "window",
        "limit": 100.0,
-       "opens": "first_use",
        "period": "7d",
        "period_s": 604800,
+       "refill": "at_once",
        "remaining": 40.0,
        "reset_basis": "early_possible",
        "resets_at": 1800604800,
@@ -380,6 +452,11 @@
       "basis": "derived",
       "state": "active"
      },
+     "events": [],
+     "events_basis": {
+      "state": "none",
+      "why": "no reset mechanism read"
+     },
      "limits": {
       "total_quota": {
        "as_of": 1800000000.0,
@@ -400,13 +477,14 @@
      "windows": {
       "five_hour": {
        "aliases": null,
+       "anchor": "first_use",
        "as_of": 1800000000.0,
        "basis": "exact",
        "kind": "window",
        "limit": 100.0,
-       "opens": "first_use",
        "period": "5h",
        "period_s": 18000,
+       "refill": "at_once",
        "remaining": 92.0,
        "reset_basis": "exact",
        "resets_at": 1800018000,
@@ -416,13 +494,14 @@
       },
       "seven_day": {
        "aliases": null,
+       "anchor": "fixed",
        "as_of": 1800000000.0,
        "basis": "exact",
        "kind": "window",
        "limit": 100.0,
-       "opens": "anchored",
        "period": "7d",
        "period_s": 604800,
+       "refill": "at_once",
        "remaining": 98.0,
        "reset_basis": "exact",
        "resets_at": 1800604800,

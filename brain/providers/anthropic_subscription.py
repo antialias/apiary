@@ -46,8 +46,12 @@ from providers import register, register_route
 
 
 ACCOUNTS_FILE = "accounts.json"  # in each tenant's dir
-CC_VERSION = os.environ.get("CLAUDE_CODE_VERSION", "2.1.207")
+# The client version the polls name. The provider offers reset grants only to a
+# client version it supports (cedar_ember says ineligible_reason "cli_version"
+# below it), so this follows a current Claude Code release.
+CC_VERSION = os.environ.get("CLAUDE_CODE_VERSION", "2.1.329")
 API = "https://api.anthropic.com"
+USAGE_PATH = "/api/oauth/usage?cedar_ember=1"
 TOKEN_URL = "https://api.anthropic.com/v1/oauth/token"
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 REFRESH_MARGIN = 120  # refresh this many seconds before the access token expires
@@ -296,8 +300,9 @@ def poll_account(t, name, known_meta=None):
         except Exception as e:  # noqa: BLE001
             core.log(f"{name}: profile lookup failed ({e}); labeling by config name")
     try:
-        out["reading"] = core._anthropic_reading(_get("/api/oauth/usage", token), out["ts"],
-                                            out["tier"])
+        # ?cedar_ember=1 adds the reset programs to the same read; never
+        # at_wall=1, which asks the provider for the at-limit offer.
+        out["reading"] = core._anthropic_reading(_get(USAGE_PATH, token), out["ts"], out["tier"])
         out["ok"] = 1
     except urllib.error.HTTPError as e:
         out["http"] = e.code

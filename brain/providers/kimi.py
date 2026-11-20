@@ -93,7 +93,7 @@ _KIMI_TIME_UNITS = {"TIME_UNIT_SECOND": 1, "TIME_UNIT_MINUTE": 60,
 
 def _kimi_window(wid, period_s, parsed, as_of):
     return core._window(wid, period_s, parsed.get("utilization"), parsed.get("resets_at"), as_of,
-                   opens="first_use" if period_s == 18000 else None,
+                   refill="at_once", anchor="first_use" if period_s == 18000 else None,
                    **{k: parsed[k] for k in ("used", "limit", "remaining") if k in parsed})
 
 
@@ -118,7 +118,7 @@ def _kimi_reading(raw, as_of):
     if isinstance(usage, dict) and usage:
         wid = "seven_day" if "seven_day" not in windows else "window:7d#usage"
         windows[wid] = dict(_kimi_window(wid, 604800, _parse_kimi_window(usage), as_of),
-                            opens="anchored")
+                            anchor="fixed")
     others = []
     total = raw.get("totalQuota")
     if isinstance(total, dict) and total:

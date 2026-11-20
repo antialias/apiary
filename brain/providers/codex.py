@@ -32,7 +32,7 @@ from providers import register, register_route
 # apart from accounts.json so account pruning can never touch it. Quota comes
 # from two FREE reads, the ones the codex CLI's /status makes: GET wham/usage
 # (windows, rate_limit.allowed, credits, spend_control) and GET
-# wham/rate-limit-reset-credits (the reset options). Both answer headless with no
+# wham/rate-limit-reset-credits (the allowance's events). Both answer headless with no
 # Cloudflare challenge (quota-model 11 S6/S8). They replace
 # a POST /responses inference that was billed in credits whenever the window was
 # spent (quota-model 11 D5).
@@ -49,9 +49,13 @@ from providers import register, register_route
 #     credits {has_credits, unlimited, overage_limit_reached,
 #              balance (decimal STRING, in credits), approx_*_messages}
 #     spend_control {reached, individual_limit}
+#     rate_limit_reset_credits {available_count, applicable_available_count}
 #
 #   wham/rate-limit-reset-credits
-#     available_count, total_earned_count, immediate_reset_purchase_eligible
+#     available_count, total_earned_count, immediate_reset_purchase_eligible,
+#     credits [{id, reset_type, status, granted_at, expires_at, title,
+#               description, is_supported_by_plan, redeem_started_at,
+#               redeemed_at}]
 #
 # Neither is an inference, so neither draws on the window or on credits.
 OPENAI_CODEX_CREDS_FILE = "openai-codex.json"  # in each tenant's dir
@@ -331,8 +335,8 @@ def _codex_windows(rl, as_of, taken, scope=None, gate=None, prefix=None):
         facts = {"used": pct, "limit": 100.0, "remaining": max(0.0, 100.0 - pct)}
         if prefix is not None:
             facts.update(open=gate, open_basis="exact" if gate is not None else None)
-        w = core._window(wid, period_s, pct, resets, as_of, scope=scope, opens="first_use",
-                    reset_basis="early_possible", **facts)
+        w = core._window(wid, period_s, pct, resets, as_of, scope=scope, refill="at_once",
+                         anchor="first_use", reset_basis="early_possible", **facts)
         taken[wid] = w
         out.append(w)
     return out
@@ -376,21 +380,114 @@ def _codex_credits_pot(raw, spend_control):
                  "basis": "exact" if spend_control is not None else "unknown"}]}
 
 
-def _codex_reset_options(raw):
-    """wham/rate-limit-reset-credits → the allowance's reset options. They are
-    offered when a class is unavailable and never feed capacity; how a reset is
-    redeemed or bought is UNKNOWN (11 S8)."""
-    out = {"reset_credits": None, "purchase_eligible": None, "basis": "exact"}
-    if isinstance(raw, dict):
-        if isinstance(raw.get("available_count"), (int, float)):
-            out["reset_credits"] = int(raw["available_count"])
-        if isinstance(raw.get("immediate_reset_purchase_eligible"), bool):
-            out["purchase_eligible"] = raw["immediate_reset_purchase_eligible"]
-    return out
+# The reset credits (69 §3.2). Each available credit refills every unscoped
+# window of the allowance (the provider reports it raises each covered
+# allowance to full and leaves separate allowances alone); the new period
+# starts with the first request after it. The usage read's
+# applicable_available_count says, per account, whether a credit may be used
+# now: every available credit carries that one answer. The provider reports a
+# covered window must have used more than 20 % (below 80 % remaining), and an
+# owner's setting that lets the assistant redeem one itself at 10 % left,
+# which no read shows. A paid immediate reset, where offered, applies even
+# with use left; its price is not published.
+CODEX_AUTO_USE = (("setting", "Allow your assistant to use resets"), ("threshold_pct", 10),
+                  ("basis", "unknown"))
 
 
-def _codex_reading(raw, reset_options, as_of, name="gpt"):
-    """wham/usage (+ the reset-credits options) -> (reading, err).
+def _codex_event_effects(windows):
+    return [{"window": w["id"], "effect": "refill", "basis": "inferred"}
+            for w in windows if w.get("scope") is None]
+
+
+def _codex_unread(why):
+    return {"events": [], "events_basis": {"state": "unread", "why": why},
+            "events_used": None, "events_last_used_at": None}
+
+
+def _codex_events(credits_raw, usage_raw, windows, err=None, name="gpt"):
+    """wham/rate-limit-reset-credits (+ wham/usage) -> {events, events_basis,
+    events_used, events_last_used_at}. err is why the credits read failed:
+    the events are then unread, which never fails the poll; so is a body of
+    a shape the adapter cannot read, with a log line. A credit not
+    available (redeemed, or a redemption started) is history: counted, and
+    its newest redeemed_at kept."""
+    if err is not None or not isinstance(credits_raw, dict):
+        return _codex_unread(err or ("reset credits shape" if credits_raw is not None
+                                     else "reset credits not read"))
+    try:
+        return _codex_events_read(credits_raw, usage_raw, windows, name)
+    except Exception as e:  # noqa: BLE001 — the events never cost the windows
+        core.log(f"{name}: codex reset credits not read ({type(e).__name__}: {e}); events unread")
+        return _codex_unread("reset credits shape")
+
+
+def _codex_events_read(credits_raw, usage_raw, windows, name):
+    credits = credits_raw.get("credits")
+    count = core._num(credits_raw.get("available_count"))
+    if credits is not None and not isinstance(credits, list):
+        core.log(f"{name}: codex reset credits list of a shape the brain does not read; events unread")
+        return _codex_unread("reset credits shape")
+    unread = None
+    rc = (usage_raw or {}).get("rate_limit_reset_credits") if isinstance(usage_raw, dict) else None
+    applicable = core._num((rc or {}).get("applicable_available_count")) if isinstance(rc, dict) else None
+    now = None if applicable is None else applicable > 0
+    effects = _codex_event_effects(windows)
+    events, used, last = [], 0, None
+    for i, c in enumerate(credits or []):
+        if not isinstance(c, dict) or not (isinstance(c.get("id"), str) and c["id"]):
+            core.log(f"{name}: codex reset credits[{i}] of a shape the brain does not read; events unread")
+            unread = "reset credits shape"
+            continue
+        if c.get("status") != "available" or c.get("redeem_started_at") or c.get("redeemed_at"):
+            used += 1
+            at = core._epoch_s(c.get("redeemed_at"))
+            if at is not None and (last is None or at > last):
+                last = at
+            continue
+        supported = c.get("is_supported_by_plan")
+        events.append({
+            "id": f"codex_reset:{c['id']}", "program": "codex_reset_credit",
+            "label": c.get("title") if isinstance(c.get("title"), str) else None,
+            "trigger": "owner", "effects": [dict(e) for e in effects],
+            "anchor": "restarts_at_use", "anchor_basis": "inferred",
+            # The server may choose which credit a redemption takes: no order.
+            "supply": {"left": 1, "total": 1, "from": core._epoch_s(c.get("granted_at")),
+                       "to": core._epoch_s(c.get("expires_at")), "order": None,
+                       "cooldown_until": None, "per_period": None, "basis": "stated"},
+            "usable": {"now": False if supported is False else now, "why_not": None,
+                       "only_at_limit": False, "min_used_pct": 20, "not_while_closed": [],
+                       "not_with_overage": False, "paused": False, "basis": "inferred"},
+            "auto_use": dict(CODEX_AUTO_USE),
+            "provider_name": {"reset_type": c.get("reset_type"), "status": c.get("status"),
+                              "is_supported_by_plan": supported}})
+    if credits_raw.get("immediate_reset_purchase_eligible") is True:
+        events.append({
+            "id": "codex_paid_reset", "program": "codex_paid_reset",
+            "label": "Immediate reset (paid)", "trigger": "owner_pays",
+            "effects": [dict(e) for e in effects],
+            "anchor": "restarts_at_use", "anchor_basis": "inferred",
+            "supply": {"left": None, "total": None, "from": None, "to": None, "order": None,
+                       "cooldown_until": None, "per_period": None, "basis": "stated"},
+            "usable": {"now": True, "why_not": None, "only_at_limit": False, "min_used_pct": None,
+                       "not_while_closed": [], "not_with_overage": False, "paused": False,
+                       "basis": "stated"},
+            "auto_use": None,
+            "provider_name": {"immediate_reset_purchase_eligible": True}})
+    if unread is None and (credits is None or (count is not None and count > 0 and
+                                               not any(e["trigger"] == "owner" for e in events))):
+        # The provider counts credits it does not list: the list is short.
+        core.log(f"{name}: codex available_count {count} with no credit listed; events unread")
+        unread = "credits not listed"
+    if unread is not None:
+        return {"events": events, "events_basis": {"state": "unread", "why": unread},
+                "events_used": used, "events_last_used_at": last}
+    return {"events": events, "events_basis": {"state": "read", "why": None},
+            "events_used": used, "events_last_used_at": last}
+
+
+def _codex_reading(raw, credits_raw, as_of, name="gpt", credits_err=None):
+    """wham/usage (+ wham/rate-limit-reset-credits, None when not read, with
+    credits_err its failure) -> (reading, err).
 
     The allowance's `open` is rate_limit.allowed, the provider's own gate
     (exact). Its windows are slotted by limit_window_seconds. Each
@@ -430,8 +527,8 @@ def _codex_reading(raw, reset_options, as_of, name="gpt"):
                          "basis": "unknown_semantics"}
     plan = raw.get("plan_type")
     pots = [core._allowance_pot(windows, open_=rl["allowed"], open_basis="exact",
-                           limit_reached=rl.get("limit_reached") is True,
-                           reset_options=reset_options)]
+                                limit_reached=rl.get("limit_reached") is True,
+                                **_codex_events(credits_raw, raw, windows, credits_err, name))]
     credits = _codex_credits_pot(raw.get("credits"), raw.get("spend_control"))
     if credits is not None:
         pots.append(credits)
@@ -519,19 +616,20 @@ def poll_gpt(t, prev=None, account=None):
     if reading is None:
         out["err"] = err
         return out
-    # The second read only offers options; it never gates. A failure leaves them
-    # unknown, says why, and does not fail the poll that already measured.
+    # The second read only lists events; it never gates. A failure leaves them
+    # unread, says why, and does not fail the poll that already measured.
+    credits_raw, credits_err = None, None
     try:
-        options = _codex_reset_options(_get_codex_reset_credits(tok, account_id))
+        credits_raw = _get_codex_reset_credits(tok, account_id)
     except urllib.error.HTTPError as e:
-        options = {"reset_credits": None, "purchase_eligible": None,
-                   "basis": "unknown", "err": f"HTTP {e.code}"}
-        core.log(f"{out['name']}: codex reset-credits read HTTP {e.code}; options unknown")
+        credits_err = f"HTTP {e.code}"
+        core.log(f"{out['name']}: codex reset-credits read HTTP {e.code}; events unread")
     except Exception as e:  # noqa: BLE001
-        options = {"reset_credits": None, "purchase_eligible": None,
-                   "basis": "unknown", "err": type(e).__name__}
-        core.log(f"{out['name']}: codex reset-credits read {type(e).__name__}; options unknown")
-    core._reading_pot(reading, core.ALLOWANCE_POT)["reset_options"] = options
+        credits_err = type(e).__name__
+        core.log(f"{out['name']}: codex reset-credits read {type(e).__name__}; events unread")
+    pot = core._reading_pot(reading, core.ALLOWANCE_POT)
+    pot.update(_codex_events(credits_raw, raw, [w for w in pot["limits"] if w.get("kind") == "window"],
+                             credits_err, out["name"]))
     out["reading"] = reading
     out["ok"] = 1
     return out

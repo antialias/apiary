@@ -109,10 +109,11 @@ type unavailMember struct {
 
 // unavailOption is one owner action that would serve sooner (§2.8 item 1).
 type unavailOption struct {
-	Kind    string  `json:"kind"` // permit | enable | fund | reset
+	Kind    string  `json:"kind"` // permit | enable | fund | budget | event
 	Route   string  `json:"route"`
 	Account string  `json:"account"`
 	Pot     *string `json:"pot"`
+	Event   string  `json:"event,omitempty"` // the event's id, on an event option
 	Action  string  `json:"action"`
 }
 
@@ -215,7 +216,7 @@ func potOf(st *acctStanding, account string) (string, *moneyPot) {
 // replyOptions are the owner actions that would make this (route, account)
 // serve sooner: its money pot, where permitting, funding or enabling it would
 // serve, raising each budget the route has reached on it (§1.9), and the
-// allowance's reset options while the allowance holds it. req is the request
+// allowance's events while the allowance holds it (eventOptions). req is the request
 // checked for. Mirrors the brain's _reply_options.
 func replyOptions(r routePolicy, account string, st *acctStanding, c dialCheck, pots map[string]potSettings, l *checkLedger, now float64, req checkRequest) []unavailOption {
 	if !c.no() {
@@ -256,17 +257,71 @@ func replyOptions(r routePolicy, account string, st *acctStanding, c dialCheck, 
 		}
 	}
 	if (c.Reason == "pay" || c.Reason == "spent" || c.Reason == "budget") && st != nil {
-		if ro := st.Allowance.ResetOptions; ro != nil {
-			switch {
-			case ro.ResetCredits != nil && *ro.ResetCredits > 0:
-				out = append(out, unavailOption{Kind: "reset", Route: r.ID, Account: account,
-					Action: "redeem one of " + strconv.FormatFloat(*ro.ResetCredits, 'f', -1, 64) +
-						" allowance reset credits on " + account})
-			case ro.PurchaseEligible != nil && *ro.PurchaseEligible:
-				out = append(out, unavailOption{Kind: "reset", Route: r.ID, Account: account,
-					Action: "buy an immediate allowance reset on " + account})
+		out = append(out, eventOptions(r, account, st, now)...)
+	}
+	return out
+}
+
+// eventGain is whether one of an event's effects gives use back: a refill of
+// a window the standing carries with use on it (or use unknown), or a
+// give_back of more than 0 points. Mirrors the brain's _event_gain.
+func eventGain(window *string, effect string, points *float64, windows map[string]checkWindow) bool {
+	if window == nil {
+		return false
+	}
+	w, ok := windows[*window]
+	if !ok {
+		return false
+	}
+	switch effect {
+	case "refill":
+		return w.UsedPct == nil || *w.UsedPct > 0
+	case "give_back":
+		return points != nil && *points > 0
+	}
+	return false
+}
+
+// eventOptions are the allowance's events the owner could use now that would
+// let this route serve (quota-model 69 §6.2): each with trigger owner or
+// owner_pays, usable now by the provider's word, with an effect that gives use
+// back (eventGain) to a window that refused the route (a binding window closed
+// now), or to any window when the account's own gate is closed. A bought one
+// says so. Mirrors the brain's _event_options.
+func eventOptions(r routePolicy, account string, st *acctStanding, now float64) []unavailOption {
+	var out []unavailOption
+	closed := st.Allowance.Open != nil && !*st.Allowance.Open
+	refused := map[string]bool{}
+	for name, w := range st.Allowance.Windows {
+		if scopeBinds(w.Scope, r.Scope) && windowClosed(w, now) {
+			refused[name] = true
+		}
+	}
+	for _, ev := range st.Allowance.Events {
+		if (ev.Trigger != "owner" && ev.Trigger != "owner_pays") || ev.Usable.Now == nil || !*ev.Usable.Now {
+			continue
+		}
+		gives := false
+		for _, e := range ev.Effects {
+			if (closed || (e.Window != nil && refused[*e.Window])) &&
+				eventGain(e.Window, e.Effect, e.Points, st.Allowance.Windows) {
+				gives = true
+				break
 			}
 		}
+		if !gives {
+			continue
+		}
+		label := ev.Label
+		if label == "" {
+			label = ev.ID
+		}
+		action := label + " on " + account
+		if ev.Trigger == "owner_pays" {
+			action += ", for a fee"
+		}
+		out = append(out, unavailOption{Kind: "event", Route: r.ID, Account: account, Event: ev.ID,
+			Action: action})
 	}
 	return out
 }

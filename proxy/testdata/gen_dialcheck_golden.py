@@ -19,8 +19,32 @@ def aged(st, ages):
         w["as_of"] = (ages or {}).get(name, st["as_of"])
     return st
 
+def event(eid, label, windows, trigger="owner", now=True, gives_back=None):
+    """An allowance event in the standing (quota-model 69 §2.2), as much of it
+    as the dial check's options read: its trigger, the provider's usable.now,
+    and its effects: a refill of each window named, and with gives_back
+    ({share_of, points}) a give_back on seven_day."""
+    effects = [{"window": w, "effect": "refill", "basis": "stated"} for w in windows]
+    if gives_back is not None:
+        effects.append({"window": "seven_day", "effect": "give_back", "basis": "inferred",
+                        **gives_back})
+    return {"id": eid, "program": eid.split(":")[0], "label": label, "trigger": trigger,
+            "effects": effects, "anchor": "kept",
+            "usable": {"now": now, "why_not": None if now else "unavailable"}}
+
+def with_events(st, events, state="read", why=None):
+    st["allowance"]["events"] = events
+    st["allowance"]["events_basis"] = {"state": state, "why": why}
+    return st
+
+CREDIT = event("codex_reset:credit-1", "Full reset (Monthly)", ["seven_day"])
+PAID = event("codex_paid_reset", "Immediate reset (paid)", ["seven_day"], trigger="owner_pays")
+FULL_RESET = event("cedar_ember:full-reset", "One full limit reset", ["seven_day", "scoped:Fable"])
+FABLE_RESET = event("cedar_ember:fable-reset", "One Fable reset", ["scoped:Fable"])
+
 def anth(five=40.0, seven=60.0, fable=50.0, credits=False, as_of=NOW - 60,
-         five_reset=NOW + H, seven_reset=NOW + 3 * D, fable_reset=NOW + 2 * D, money=True, ages=None):
+         five_reset=NOW + H, seven_reset=NOW + 3 * D, fable_reset=NOW + 2 * D, money=True, ages=None,
+         events=None):
     st = {"provider": "anthropic", "as_of": as_of, "next_poll_at": NOW + 240,
           "allowance": {"open": None, "windows": {
               "five_hour": win(five, five_reset, "5h"),
@@ -29,17 +53,19 @@ def anth(five=40.0, seven=60.0, fable=50.0, credits=False, as_of=NOW - 60,
           "money": {}}
     if money:
         st["money"] = {"credits": {"open": credits, "balance": None, "unit": None}}
+    if events is not None:
+        with_events(st, events)
     return aged(st, ages)
 
 def codex(used=30.0, allowed=True, credits=True, as_of=NOW - 60, reset=NOW + 4 * D, balance=120.0,
-          ages=None, reset_options=None):
+          ages=None, events=None):
     st = aged({"provider": "gpt", "as_of": as_of, "next_poll_at": NOW + 240,
                "allowance": {"open": allowed,
                              "windows": {"seven_day": win(used, reset, "7d", basis="early_possible")}},
                "money": {"credits": {"open": credits, "balance": balance, "unit": "codex_credit"}}},
               ages)
-    if reset_options is not None:
-        st["allowance"]["reset_options"] = reset_options
+    if events is not None:
+        with_events(st, events)
     return st
 
 def runway(balance=500.0, used=10.0, limit=50.0, as_of=NOW - 60, windows=None):
@@ -604,6 +630,10 @@ def body(members, at, at_basis, options, retryable=None):
 def opt(kind, rid, account, pot, action):
     return {"kind": kind, "route": rid, "account": account, "pot": pot, "action": action}
 
+def ev_opt(rid, account, ev, fee=""):
+    return {"kind": "event", "route": rid, "account": account, "pot": None, "event": ev["id"],
+            "action": f"{ev['label']} on {account}{fee}"}
+
 FABLE_LANE = "c/lane:fable"
 C_GPT = "c/gpt/gpt-6.1-sol"
 ANTH3 = ["maxplan", "ghost", "personal"]
@@ -615,8 +645,7 @@ def fable_member():
 def enable_opts():
     return [opt("enable", FABLE_LANE, a, a + "/credits",
                 f"enable usage credits on {a}, and add {a}/credits to {FABLE_LANE}'s pay") for a in ANTH3]
-GPT_CLOSED = codex(used=100.0, allowed=False, reset_options={"reset_credits": 0, "purchase_eligible": True,
-                                                               "basis": "exact"})
+GPT_CLOSED = codex(used=100.0, allowed=False, events=[PAID])
 
 ucase("the §2.8 example: Fable spent everywhere, codex closed with credits open and pay []",
       [urt(FABLE_LANE, ANTH3, scope="Fable"), urt(C_GPT, ["gpt"])],
@@ -624,7 +653,7 @@ ucase("the §2.8 example: Fable spent everywhere, codex closed with credits open
       body([fable_member(), {"route": C_GPT, "accounts": [acc("gpt", "pay", NOW + 4 * D, "seven_day")]}],
            NOW + 2 * D, "exact",
            enable_opts() + [opt("permit", C_GPT, "gpt", "gpt/credits", f"add gpt/credits to {C_GPT}'s pay"),
-                            opt("reset", C_GPT, "gpt", None, "buy an immediate allowance reset on gpt")]))
+                            ev_opt(C_GPT, "gpt", PAID, ", for a fee")]))
 ucase("the Fable lane alone gives the same reply without the codex line",
       [urt(FABLE_LANE, ANTH3, scope="Fable")], fable_spent(),
       body([fable_member()], NOW + 2 * D, "exact", enable_opts()))
@@ -687,14 +716,70 @@ ucase("stop_at holds the route until its window resets; no money option",
       [urt(C_GPT, ["gpt"], stop_at={"window": "7d", "level": 60})], {"gpt": codex(used=70.0)},
       body([{"route": C_GPT, "accounts": [acc("gpt", "stop_at", NOW + 4 * D, "seven_day")]}], NOW + 4 * D,
            "early_possible", []))
-ucase("reset credits on hand are offered ahead of a purchase",
+# The allowance's events (quota-model 69 §6.2): on a spent, pay or budget
+# refusal, each event the owner could use now whose effects name a window the
+# route's scope binds, or any window while the account's own gate is closed.
+GPT_SPENT = [{"route": C_GPT, "accounts": [acc("gpt", "spent", NOW + 4 * D, "seven_day")]}]
+FUND_GPT = opt("fund", C_GPT, "gpt", "gpt/credits", f"add money to gpt/credits, and add gpt/credits to {C_GPT}'s pay")
+ucase("a usable event is offered, and a paid one with its fee",
+      [urt(C_GPT, ["gpt"])],
+      {"gpt": codex(used=100.0, allowed=False, credits=False, events=[CREDIT, PAID])},
+      body(GPT_SPENT, NOW + 4 * D, "early_possible",
+           [FUND_GPT, ev_opt(C_GPT, "gpt", CREDIT), ev_opt(C_GPT, "gpt", PAID, ", for a fee")]))
+ucase("an unusable event is not offered",
       [urt(C_GPT, ["gpt"])],
       {"gpt": codex(used=100.0, allowed=False, credits=False,
-                    reset_options={"reset_credits": 2, "purchase_eligible": True, "basis": "exact"})},
-      body([{"route": C_GPT, "accounts": [acc("gpt", "spent", NOW + 4 * D, "seven_day")]}], NOW + 4 * D,
-           "early_possible",
-           [opt("fund", C_GPT, "gpt", "gpt/credits", f"add money to gpt/credits, and add gpt/credits to {C_GPT}'s pay"),
-            opt("reset", C_GPT, "gpt", None, "redeem one of 2 allowance reset credits on gpt")]))
+                    events=[event("codex_reset:credit-1", "Full reset (Monthly)", ["seven_day"], now=False)])},
+      body(GPT_SPENT, NOW + 4 * D, "early_possible", [FUND_GPT]))
+ucase("events unread: no option",
+      [urt(C_GPT, ["gpt"])],
+      {"gpt": with_events(codex(used=100.0, allowed=False, credits=False), [], "unread", "HTTP 401")},
+      body(GPT_SPENT, NOW + 4 * D, "early_possible", [FUND_GPT]))
+ucase("an event on another window's scope is not offered: the weekly's reset is, the Fable cap's is not",
+      [urt(LANE_OPUS, ["maxplan"], scope="Opus")],
+      {"maxplan": anth(seven=100.0, events=[FULL_RESET, FABLE_RESET])},
+      body([{"route": LANE_OPUS, "accounts": [acc("maxplan", "spent", NOW + 3 * D, "seven_day")]}],
+           NOW + 3 * D, "exact",
+           [opt("enable", LANE_OPUS, "maxplan", "maxplan/credits",
+                f"enable usage credits on maxplan, and add maxplan/credits to {LANE_OPUS}'s pay"),
+            ev_opt(LANE_OPUS, "maxplan", FULL_RESET)]))
+# An event is offered only where it gives use back to the window that refused
+# the route: a give_back of 0 points, or of none stated, gives an Opus lane
+# walled on the weekly nothing; one of more than 0 does.
+OPUS_WALLED = [{"route": LANE_OPUS, "accounts": [acc("maxplan", "spent", NOW + 3 * D, "seven_day")]}]
+ENABLE_OPUS = opt("enable", LANE_OPUS, "maxplan", "maxplan/credits",
+                  f"enable usage credits on maxplan, and add maxplan/credits to {LANE_OPUS}'s pay")
+def fable_back(points):
+    return event("cedar_ember:fable-reset", "One Fable reset", ["scoped:Fable"],
+                 gives_back={"share_of": "scoped:Fable", "points": points})
+ucase("a Fable reset whose share of the weekly is 0 is not offered to an Opus lane walled on the weekly",
+      [urt(LANE_OPUS, ["maxplan"], scope="Opus")],
+      {"maxplan": anth(seven=100.0, events=[fable_back(0)])},
+      body(OPUS_WALLED, NOW + 3 * D, "exact", [ENABLE_OPUS]))
+ucase("a Fable reset whose share is not stated is not offered to an Opus lane walled on the weekly",
+      [urt(LANE_OPUS, ["maxplan"], scope="Opus")],
+      {"maxplan": anth(seven=100.0, events=[fable_back(None)])},
+      body(OPUS_WALLED, NOW + 3 * D, "exact", [ENABLE_OPUS]))
+ucase("a Fable reset with a share of the weekly above 0 is offered to an Opus lane walled on the weekly",
+      [urt(LANE_OPUS, ["maxplan"], scope="Opus")],
+      {"maxplan": anth(seven=100.0, events=[fable_back(25)])},
+      body(OPUS_WALLED, NOW + 3 * D, "exact", [ENABLE_OPUS, ev_opt(LANE_OPUS, "maxplan", fable_back(25))]))
+ucase("a lane refused by its scoped cap is not offered a reset that refills only the weekly",
+      [urt(FABLE_LANE, ["maxplan"], scope="Fable")],
+      {"maxplan": anth(fable=100.0, events=[event("cedar_ember:weekly-reset", "One weekly reset",
+                                                  ["seven_day"])])},
+      body([{"route": FABLE_LANE, "accounts": [acc("maxplan", "spent", NOW + 2 * D, "scoped:Fable")]}],
+           NOW + 2 * D, "exact",
+           [opt("enable", FABLE_LANE, "maxplan", "maxplan/credits",
+                f"enable usage credits on maxplan, and add maxplan/credits to {FABLE_LANE}'s pay")]))
+ucase("the Fable cap's reset is offered to the Fable lane it binds",
+      [urt(FABLE_LANE, ["maxplan"], scope="Fable")],
+      {"maxplan": anth(fable=100.0, events=[FABLE_RESET])},
+      body([{"route": FABLE_LANE, "accounts": [acc("maxplan", "spent", NOW + 2 * D, "scoped:Fable")]}],
+           NOW + 2 * D, "exact",
+           [opt("enable", FABLE_LANE, "maxplan", "maxplan/credits",
+                f"enable usage credits on maxplan, and add maxplan/credits to {FABLE_LANE}'s pay"),
+            ev_opt(FABLE_LANE, "maxplan", FABLE_RESET)]))
 ucase("a model record's end is a record time",
       [urt(C_GPT, ["gpt"])], {"gpt": model_record(codex(used=60.0, credits=False))},
       body([{"route": C_GPT, "accounts": [acc("gpt", "spent", NOW + 2 * H, "model:m1")]}], NOW + 2 * H,
@@ -765,11 +850,10 @@ ucase("images with no codex account: no body, the typed 503",
 # option is raising each budget the route has reached, beside the reset options.
 ucase("a budget reached: the allowance reset, the option to raise it, and the reset",
       [urt(C_GPT, ["gpt"], pay=["gpt/credits"])],
-      {"gpt": codex(used=100.0, allowed=False,
-                    reset_options={"reset_credits": 0, "purchase_eligible": True, "basis": "exact"})},
+      {"gpt": codex(used=100.0, allowed=False, events=[PAID])},
       body([{"route": C_GPT, "accounts": [acc("gpt", "budget", NOW + 4 * D, "seven_day")]}], NOW + 4 * D,
            "early_possible", [opt("budget", C_GPT, "gpt", "gpt/credits", "raise gpt/credits's budget"),
-                              opt("reset", C_GPT, "gpt", None, "buy an immediate allowance reset on gpt")]),
+                              ev_opt(C_GPT, "gpt", PAID, ", for a fee")]),
       pots=B100, ledger=ledger(spend=100.0))
 ucase("a budget reached with no reset known: Retry-After the period's end, exact",
       [urt(C_GPT, ["gpt"], pay=["gpt/credits"])], {"gpt": codex(used=100.0, allowed=False, reset=None)},
@@ -847,9 +931,9 @@ ucase("images, gpt blocked beside runway's refill: the refill's time, retryable"
            "derived", [opt("fund", RW_C, "runway", RW_POT, f"add money to {RW_POT}")]),
       pots=TOPUP_ON, given={IMG: {"gpt": BLOCKED}}, request=req(5))
 
-ucase("images, gpt blocked over a spent window with reset credits: blocked wins, no time, no option",
+ucase("images, gpt blocked over a spent window with a usable reset: blocked wins, no time, no option",
       [urt(IMG, ["gpt"], pay=["gpt/credits"])],
-      {"gpt": codex(used=100.0, allowed=False, credits=False, reset_options={"reset_credits": 2})},
+      {"gpt": codex(used=100.0, allowed=False, credits=False, events=[CREDIT])},
       body([{"route": IMG, "accounts": [acc("gpt", "blocked", None, None)]}], None, None, [],
            retryable=False),
       given={IMG: {"gpt": BLOCKED}}, request=req(None))

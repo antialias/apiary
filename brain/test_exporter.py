@@ -118,7 +118,7 @@ def _reset_subscription():
 # dispatches to by provider id; a suite whose edition brings more drivers adds its own.
 RESET_HOOKS = [_reset_subscription]
 READERS = {
-    "gpt": lambda r, raw, as_of: pcodex._codex_reading(raw, r.get("reset_options"), as_of, r["name"])[0],
+    "gpt": lambda r, raw, as_of: pcodex._codex_reading(raw, r.get("reset_credits"), as_of, r["name"])[0],
 }
 
 
@@ -917,7 +917,7 @@ class TestKimiPollNormalization(unittest.TestCase):
             self.assertEqual(list(w), ["five_hour", "seven_day"])
             self.assertEqual(w["seven_day"]["used"], 2.0)
             self.assertEqual(w["seven_day"]["used_pct"], 2.0)
-            self.assertEqual(w["seven_day"]["opens"], "anchored")
+            self.assertEqual((w["seven_day"]["refill"], w["seven_day"]["anchor"]), ("at_once", "fixed"))
             self.assertEqual(w["five_hour"]["used"], 8.0)
             self.assertEqual(w["five_hour"]["used_pct"], 8.0)
             self.assertEqual(w["five_hour"]["period_s"], 18000)
@@ -5234,6 +5234,15 @@ def wham_reset_credits(available=0, eligible=True):
             "immediate_reset_purchase_eligible": eligible, "history_enabled": False}
 
 
+def codex_credit(cid, status="available", redeemed_at=None, granted="2027-01-04T10:00:00Z",
+                 expires="2027-02-03T10:00:00Z"):
+    """One credit of a wham/rate-limit-reset-credits body, made up."""
+    return {"id": cid, "reset_type": "codex_rate_limits", "status": status,
+            "granted_at": granted, "expires_at": expires, "title": "Full reset (Monthly)",
+            "description": "A free rate limit reset.", "is_supported_by_plan": True,
+            "redeem_started_at": redeemed_at, "redeemed_at": redeemed_at}
+
+
 def patch_codex_reads(test, usage, reset_credits=None):
     """Serve both codex reads from fixtures for the life of `test`. Each value
     may be a body or a callable(tok, acct_id) that returns one or raises."""
@@ -5310,7 +5319,7 @@ def gpt_result(weekly=12.0, ok=1, good_age=0, http=0, err="", ts=None, name="gpt
     return read({"name": name, "kind": "provider", "provider": "gpt", "ok": ok,
                  "ts": now, "good_ts": now - good_age, "stale": 1 if good_age else 0,
                  "http": http, "err": err, "retry_after": None, "raw": raw,
-                 "reset_options": pcodex._codex_reset_options(wham_reset_credits()),
+                 "reset_credits": wham_reset_credits(),
                  "source": "GET wham/usage + GET wham/rate-limit-reset-credits"})
 
 
@@ -5343,7 +5352,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
         self.assertEqual(wk["period_s"], 604800)
         self.assertEqual(wk["resets_at"], 1790000000)
         self.assertEqual(wk["reset_basis"], "early_possible")
-        self.assertEqual(wk["opens"], "first_use")
+        self.assertEqual((wk["refill"], wk["anchor"]), ("at_once", "first_use"))
         pot = ex._reading_pot(res["reading"], ex.ALLOWANCE_POT)
         self.assertEqual((pot["open"], pot["open_basis"]), (True, "exact"))
         self.assertEqual(res["reading"]["plan"], {"label": "pro", "basis": "exact"})
@@ -5492,11 +5501,13 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
         self.assertEqual(list(self.windows(res)), ["seven_day"])
         self.assertTrue(any("additional_rate_limits[0]" in ln for ln in self.logged))
 
-    def test_reset_options_come_from_the_second_read(self):
-        patch_codex_reads(self, wham_usage(), wham_reset_credits(available=2, eligible=False))
+    def test_events_come_from_the_second_read(self):
+        body = wham_reset_credits(eligible=False)
+        body["credits"] = [codex_credit("RateLimitResetCredit_0001")]
+        patch_codex_reads(self, wham_usage(), body)
         pot = ex._reading_pot(pcodex.poll_gpt(T)["reading"], ex.ALLOWANCE_POT)
-        self.assertEqual(pot["reset_options"],
-                         {"reset_credits": 2, "purchase_eligible": False, "basis": "exact"})
+        self.assertEqual([e["id"] for e in pot["events"]], ["codex_reset:RateLimitResetCredit_0001"])
+        self.assertEqual(pot["events_basis"], {"state": "read", "why": None})
 
     def test_reset_read_failure_leaves_options_unknown_not_the_poll(self):
         def boom(tok, acct_id):
@@ -5504,9 +5515,9 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
         patch_codex_reads(self, wham_usage(primary=12.0), boom)
         res = pcodex.poll_gpt(T)
         self.assertEqual(res["ok"], 1, "the usage read already measured")
-        ro = ex._reading_pot(res["reading"], ex.ALLOWANCE_POT)["reset_options"]
-        self.assertEqual((ro["basis"], ro["reset_credits"], ro["err"]),
-                         ("unknown", None, "HTTP 503"))
+        pot = ex._reading_pot(res["reading"], ex.ALLOWANCE_POT)
+        self.assertEqual((pot["events"], pot["events_basis"]),
+                         ([], {"state": "unread", "why": "HTTP 503"}))
         self.assertTrue(any("reset-credits" in ln for ln in self.logged))
 
     def test_missing_rate_limit_is_failure(self):
@@ -5567,7 +5578,7 @@ class TestGptPollNormalization(_LogCapture, unittest.TestCase):
         self.assertEqual(seen["tok"], "at-refreshed", "the second read rides the new token")
         self.assertEqual(res["ok"], 1)
         self.assertEqual(ex._reading_pot(res["reading"], ex.ALLOWANCE_POT)
-                         ["reset_options"]["err"], "HTTP 401")
+                         ["events_basis"], {"state": "unread", "why": "HTTP 401"})
 
     def test_both_reads_are_free_gets_with_the_codex_headers(self):
         """The wire: two GETs, no body, bearer + workspace id + codex-cli pair."""
@@ -5749,15 +5760,16 @@ class TestGptPreferredMoney(HTTPBase):
     def setUp(self):
         r = gpt_result(weekly=100.0, allowed=False, spend_reached=False,
                        credits={"has_credits": True, "balance": 250.5})
-        r["reset_options"] = {"reset_credits": 0, "purchase_eligible": True, "basis": "exact"}
+        r["reset_credits"] = wham_reset_credits(eligible=True)
         reset(r, kimi_result())
 
     def test_accounts_carry_allowance_and_money(self):
         _, p = self.get("/preferred")
         a = p["accounts"]["gpt"]["allowance"]
         self.assertEqual((a["open"], a["open_basis"], a["limit_reached"]), (False, "exact", True))
-        self.assertEqual(a["reset_options"],
-                         {"reset_credits": 0, "purchase_eligible": True, "basis": "exact"})
+        self.assertEqual(([e["id"] for e in a["events"]], a["events_basis"]["state"]),
+                         (["codex_paid_reset"], "read"))
+        self.assertNotIn("reset_options", a)
         m = p["accounts"]["gpt"]["money"]["credits"]
         self.assertEqual((m["unit"], m["open"], m["open_basis"], m["balance"]),
                          ("codex_credit", True, "derived", 250.5))
@@ -8164,7 +8176,7 @@ class TestStanding(PayBase):
         self.assertEqual(g["provider"], "gpt")
         self.assertIs(g["allowance"]["open"], True)
         self.assertEqual(g["allowance"]["open_basis"], "exact")
-        self.assertEqual(g["allowance"]["reset_options"]["basis"], "exact")
+        self.assertEqual(g["allowance"]["events_basis"]["state"], "read")
         cr = g["money"]["credits"]
         self.assertEqual((cr["open"], cr["open_basis"], cr["balance"], cr["unit"]),
                          (True, "derived", 12.5, "codex_credit"))
@@ -8542,7 +8554,7 @@ class TestClassBindUnavailableHTTP(PayBase, HTTPBase):
         budget. A budget of 0 is reached with nothing spent (§1.9)."""
         gpt = gpt_on_credits(pct=100.0)
         gpt["raw"]["rate_limit"]["primary_window"].update(reset_at=None, reset_after_seconds=None)
-        gpt["reset_options"] = None  # no reset-credits read: the budget option alone
+        gpt["reset_credits"] = None  # no reset-credits read: the budget option alone
         classes_reset(gpt, cfg=[{"class": "frontier", "members": [
             {"priority": 1, "kind": "provider", "provider": "gpt", "model": "gpt-5.6",
              "context_window": 400000, "anthropic_token_ratio": 0.6, "pay": ["gpt/credits"]}]}])
@@ -8608,7 +8620,7 @@ class TestBindAndPinOnChecks(PayBase):
         non-retryable money reply: only the owner's permit would serve."""
         gpt = gpt_on_credits()
         gpt["raw"]["rate_limit"]["primary_window"].update(reset_at=None, reset_after_seconds=None)
-        gpt["reset_options"] = None  # no reset-credits read: the permit option alone
+        gpt["reset_credits"] = None  # no reset-credits read: the permit option alone
         cfg = [{"class": "frontier", "members": [
             {"priority": 1, "kind": "provider", "provider": "gpt", "model": "gpt-5.6",
              "context_window": 400000, "anthropic_token_ratio": 0.6}]}]
@@ -8628,7 +8640,7 @@ class TestBindAndPinOnChecks(PayBase):
         for topup in ("off", "on"):
             with self.subTest(topup=topup):
                 gpt = gpt_on_credits(has_credits=False)
-                gpt["reset_options"] = None  # no reset-credits read: the fund option alone
+                gpt["reset_credits"] = None  # no reset-credits read: the fund option alone
                 cfg = [{"class": "frontier", "members": [
                     {"priority": 1, "kind": "provider", "provider": "gpt", "model": "gpt-5.6",
                      "context_window": 400000, "anthropic_token_ratio": 0.6, "pay": ["gpt/credits"]}]}]
@@ -9431,6 +9443,25 @@ class TestReadingsSurviveRestart(PayBase):
         self.assertEqual(st[ACCT_A]["as_of"], before[ACCT_A][0])
         self.assertEqual(route_check("lane:opus", ACCT_A)["check"], "included")
 
+    def test_a_reading_saved_before_events_restores_in_todays_shape(self):
+        reset(acct(ACCT_A, 30, good_age=600))
+        with T.lock:
+            pot = ex._reading_pot(T.state[ACCT_A]["reading"], ex.ALLOWANCE_POT)
+            for k in ("events", "events_basis", "events_used"):
+                pot.pop(k)
+            pot["reset_options"] = {"reset_credits": 1, "purchase_eligible": False, "basis": "exact"}
+            for w in pot["limits"]:
+                w.pop("refill")
+                w["opens"] = "anchored" if w.pop("anchor") == "fixed" else "first_use"
+        self.restart()
+        with T.lock:
+            pot = ex._reading_pot(T.state[ACCT_A]["reading"], ex.ALLOWANCE_POT)
+        self.assertNotIn("reset_options", pot)
+        self.assertEqual((pot["events"], pot["events_basis"]["state"]), ([], "unread"))
+        w = ex._reading_windows(T.state[ACCT_A]["reading"])["seven_day"]
+        self.assertNotIn("opens", w)
+        self.assertEqual((w["refill"], w["anchor"]), (None, "fixed"))
+
     def test_an_old_reading_restores_stale(self):
         a = acct(ACCT_A, 30, good_age=ex.STALE_MAX + 600)
         a["raw"]["extra_usage"] = {"is_enabled": True}
@@ -9599,8 +9630,8 @@ class TestAnthropicReading(unittest.TestCase):
         self.assertEqual([s["kind"] for s in w["seven_day"]["sources"]], ["weekly_all"])
         self.assertEqual(w["seven_day"]["sources"][0]["severity"], "warning")
         self.assertEqual((w["five_hour"]["used_pct"], w["five_hour"]["period_s"],
-                          w["five_hour"]["opens"]), (22.0, 18000, "first_use"))
-        self.assertEqual((w["seven_day"]["used_pct"], w["seven_day"]["opens"]), (61.0, "anchored"))
+                          w["five_hour"]["anchor"]), (22.0, 18000, "first_use"))
+        self.assertEqual((w["seven_day"]["used_pct"], w["seven_day"]["anchor"]), (61.0, "fixed"))
         self.assertEqual(w["seven_day"]["resets_at"], round(ex._iso_to_epoch("2099-08-01T16:00:00Z")))
 
     def test_a_scoped_window_carries_its_aliases(self):
@@ -9692,16 +9723,428 @@ class TestAnthropicReading(unittest.TestCase):
     def test_poll_account_emits_the_reading(self):
         orig = psub._get
         self.addCleanup(setattr, psub, "_get", orig)
-        psub._get = lambda path, token: (anthropic_body() if path == "/api/oauth/usage"
-                                       else {"account": {"email_address": ACCT_A},
-                                             "organization": {"organization_type": "claude_max"}})
+        paths = []
+
+        def get(path, token):
+            paths.append(path)
+            return (anthropic_body() if path.startswith("/api/oauth/usage")
+                    else {"account": {"email_address": ACCT_A},
+                          "organization": {"organization_type": "claude_max"}})
+        psub._get = get
         psub._st(T).creds[ACCT_A] = {"refresh_token": "r", "access_token": "tok",
                              "expires_at": time.time() + 9999}
         res = psub.poll_account(T, ACCT_A)
         self.assertEqual(res["ok"], 1, res["err"])
+        # One read carries the reset programs too; never the at-limit read.
+        self.assertIn("/api/oauth/usage?cedar_ember=1", paths)
+        self.assertFalse(any("at_wall" in p for p in paths))
         self.assertNotIn("usage", res)
         self.assertEqual(res["reading"]["provider"], "anthropic")
         self.assertEqual(ex._reading_windows(res["reading"])["seven_day"]["used_pct"], 61.0)
+
+
+RESETS_ANTHROPIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata",
+                                "resets_anthropic.json")
+RESETS_CODEX = os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata", "resets_codex.json")
+
+
+def resets_body(name):
+    """One made-up /api/oauth/usage?cedar_ember=1 body of testdata/resets_anthropic.json."""
+    with open(RESETS_ANTHROPIC) as f:
+        return json.load(f)["bodies"][name]
+
+
+def resets_codex():
+    """(reset-credits body, usage body) of testdata/resets_codex.json."""
+    with open(RESETS_CODEX) as f:
+        d = json.load(f)
+    return d["reset_credits"], d["usage"]
+
+
+# The weekly 5-hour reset in the client's field names (quota-model 69 §3.1). TO BE
+# CAPTURED: no live block has been seen; this case is checked against the live
+# shape when an account's 5-hour window is active and one is read.
+JUNIPER_CLIENT_SHAPE = {"eligible": True, "ineligible_reason": None,
+                        "next_available_at": None, "in_experiment": True, "arm": "reset"}
+
+
+class TestAnthropicEvents(_LogCapture, unittest.TestCase):
+    """quota-model 69 §3.1: cedar_ember's grants and juniper_tide as the
+    allowance's events, from bodies in the provider's shape."""
+
+    def setUp(self):
+        self.capture_log()
+        ex._programs_seen.clear()
+
+    def pot(self, raw):
+        rd = ex._anthropic_reading(raw, 1_800_000_000.0, "")
+        pot = ex._reading_pot(rd, ex.ALLOWANCE_POT)
+        self.assertIsNone(ex._events_problem(pot), "every adapter's events pass the validator")
+        return pot
+
+    def event(self, pot, eid):
+        return next(e for e in pot["events"] if e["id"] == eid)
+
+    def test_a_used_grant_is_history_and_the_one_left_is_an_event(self):
+        pot = self.pot(resets_body("used_and_usable"))
+        self.assertEqual([e["id"] for e in pot["events"]], ["cedar_ember:launch-2612-fable-extra"])
+        self.assertEqual(pot["events_basis"], {"state": "read", "why": None})
+        self.assertEqual(pot["events_used"], 3)
+        ev = pot["events"][0]
+        self.assertEqual((ev["trigger"], ev["program"], ev["label"]),
+                         ("owner", "cedar_ember", "New model launch: one more Fable reset"))
+        self.assertEqual(ev["usable"]["now"], True)
+        self.assertEqual(ev["supply"]["order"], 1, "the provider names it next")
+        self.assertEqual(ev["supply"]["to"], round(ex._iso_to_epoch("2027-04-20T06:59:00+00:00")))
+        self.assertEqual(ev["provider_name"]["type"], "full", "type is kept, never read")
+
+    def test_clears_map_by_table_and_by_percent_used(self):
+        pot = self.pot(resets_body("two_usable"))
+        full = self.event(pot, "cedar_ember:full-reset-2701")
+        self.assertEqual(full["effects"], [
+            {"window": "seven_day", "effect": "refill", "basis": "stated"},
+            {"window": "scoped:Fable", "effect": "refill", "basis": "stated"}])
+        self.assertEqual((full["supply"]["order"], full["anchor"], full["anchor_basis"]),
+                         (1, "kept", "stated"))
+        fable = self.event(pot, "cedar_ember:launch-2612-fable")
+        self.assertEqual((fable["supply"]["left"], fable["supply"]["total"], fable["supply"]["order"]),
+                         (2.0, 2.0, None), "a grant of several uses; not next")
+        self.assertEqual(pot["events_used"], 1)
+
+    def test_a_name_no_scoped_window_or_two_match_is_unmapped(self):
+        raw = resets_body("used_and_usable")
+        raw["limits"][1]["percent"] = 41  # no scoped window at the grant's 40
+        ev = self.pot(raw)["events"][0]
+        self.assertIn({"window": None, "provider_name": "seven_day_overage_included",
+                       "effect": "refill", "basis": "unknown"}, ev["effects"])
+        raw = resets_body("used_and_usable")
+        twin = copy.deepcopy(raw["limits"][1])
+        twin["scope"]["model"]["display_name"] = "Opus"
+        raw["limits"].append(twin)  # two scoped windows at 40
+        ev = self.pot(raw)["events"][0]
+        self.assertIsNone(ev["effects"][0]["window"])
+        self.assertEqual(ev["effects"][1], {"window": "seven_day", "effect": "give_back", "share_of": None,
+                                            "points": None, "basis": "unknown",
+                                            "points_basis": "unknown"})
+
+    def test_gives_back_weekly_with_and_without_the_share(self):
+        ev = self.pot(resets_body("used_and_usable"))["events"][0]
+        self.assertEqual(ev["effects"], [
+            {"window": "scoped:Fable", "effect": "refill", "basis": "stated"},
+            {"window": "seven_day", "effect": "give_back", "share_of": "scoped:Fable", "points": 18.0,
+             "basis": "inferred", "points_basis": "stated"}])
+        raw = resets_body("used_and_usable")
+        raw["weekly_scoped_shares"] = []
+        give = self.pot(raw)["events"][0]["effects"][1]
+        self.assertEqual((give["share_of"], give["points"], give["points_basis"]),
+                         ("scoped:Fable", None, "unknown"))
+
+    def test_the_inferred_five_hour_refill_only_with_a_five_hour_window(self):
+        raw = resets_body("used_and_usable")
+        self.assertNotIn("five_hour", [e["window"] for e in self.pot(raw)["events"][0]["effects"]])
+        raw["five_hour"] = {"utilization": 35.0, "resets_at": "2027-01-20T14:00:00+00:00"}
+        effects = self.pot(raw)["events"][0]["effects"]
+        self.assertEqual(effects[-1], {"window": "five_hour", "effect": "refill", "basis": "inferred"})
+        # A grant that does not give back the weekly adds none.
+        raw = resets_body("two_usable")
+        raw["five_hour"] = {"utilization": 35.0, "resets_at": "2027-01-20T14:00:00+00:00"}
+        full = self.event(self.pot(raw), "cedar_ember:full-reset-2701")
+        self.assertNotIn("five_hour", [e["window"] for e in full["effects"]])
+
+    def test_the_anchor_is_inferred_when_the_weekly_moved(self):
+        raw = resets_body("two_usable")
+        raw["cedar_ember"]["weekly_resets_at"] = "2027-01-25T17:00:00+00:00"
+        self.assertEqual(self.pot(raw)["events"][0]["anchor_basis"], "inferred")
+
+    def test_blocking_windows_are_named_as_clears_are(self):
+        raw = resets_body("two_usable")
+        g = raw["cedar_ember"]["grants"][1]
+        g.update(blocking=["seven_day"], usable_now=False, unavailable_reason="blocked_seven_day")
+        ev = self.event(self.pot(raw), "cedar_ember:launch-2612-fable")
+        self.assertEqual((ev["usable"]["now"], ev["usable"]["why_not"], ev["usable"]["not_while_closed"]),
+                         (False, "blocked_seven_day", ["seven_day"]))
+        g["blocking"] = []
+        ev = self.event(self.pot(raw), "cedar_ember:launch-2612-fable")
+        self.assertEqual(ev["usable"]["not_while_closed"], ["seven_day"], "from the reason")
+
+    def test_all_used_is_read_with_no_event(self):
+        pot = self.pot(resets_body("all_used"))
+        self.assertEqual((pot["events"], pot["events_basis"]["state"], pot["events_used"]), ([], "read", 1))
+
+    def test_a_client_version_below_the_providers_is_unread(self):
+        pot = self.pot(resets_body("cli_version"))
+        self.assertEqual((pot["events"], pot["events_basis"]),
+                         ([], {"state": "unread", "why": "cli_version"}))
+
+    def test_another_reason_is_none(self):
+        raw = resets_body("cli_version")
+        raw["cedar_ember"]["ineligible_reason"] = "tier"
+        self.assertEqual(self.pot(raw)["events_basis"], {"state": "none", "why": "tier"})
+
+    def test_a_null_block_is_no_event(self):
+        raw = resets_body("all_used")
+        raw["cedar_ember"] = None
+        pot = self.pot(raw)
+        self.assertEqual((pot["events"], pot["events_basis"]["state"]), ([], "none"))
+        pot = self.pot(anthropic_body())
+        self.assertEqual((pot["events"], pot["events_basis"]["state"]), ([], "none"))
+
+    def test_juniper_tide_in_the_clients_shape(self):
+        # TO BE CAPTURED: a hand-written block (JUNIPER_CLIENT_SHAPE).
+        raw = resets_body("all_used")
+        raw["juniper_tide"] = dict(JUNIPER_CLIENT_SHAPE)
+        pot = self.pot(raw)
+        ev = self.event(pot, "juniper_tide")
+        self.assertEqual(ev["effects"], [{"window": "five_hour", "effect": "refill", "basis": "stated"}])
+        self.assertEqual((ev["anchor"], ev["supply"]["per_period"], ev["usable"]["now"],
+                          ev["usable"]["only_at_limit"], ev["usable"]["not_while_closed"],
+                          ev["usable"]["not_with_overage"]),
+                         ("unknown", "7d", True, True, ["seven_day"], True))
+        raw["juniper_tide"].update(eligible=False, ineligible_reason="not_at_wall",
+                                   next_available_at="2027-01-22T10:00:00+00:00")
+        ev = self.event(self.pot(raw), "juniper_tide")
+        self.assertEqual((ev["usable"]["now"], ev["usable"]["why_not"], ev["supply"]["left"]),
+                         (False, "not_at_wall", None))
+        raw["juniper_tide"]["ineligible_reason"] = "tier"
+        self.assertEqual(self.pot(raw)["events"], [], "not offered to this account")
+
+    def test_juniper_tide_of_another_shape_is_unread_and_logged(self):
+        raw = resets_body("two_usable")
+        raw["juniper_tide"] = {"state": "offered"}
+        pot = self.pot(raw)
+        self.assertEqual(pot["events_basis"], {"state": "unread", "why": "juniper_tide shape"})
+        self.assertEqual(len(pot["events"]), 2, "the grants read are kept")
+        self.assertTrue(any("juniper_tide" in ln for ln in self.logged))
+
+    def test_a_wrongly_typed_field_costs_the_events_never_the_windows(self):
+        def grants(k, v):
+            def f(b):
+                for g in b["cedar_ember"]["grants"]:
+                    g[k] = v
+            return f
+
+        def limit_index(b):
+            b["weekly_scoped_shares"] = [{"limit_index": [1], "used_percent_of_weekly": 3}]
+        for label, mut, why in (
+                ("clears a number", grants("clears", 5), "cedar_ember shape"),
+                ("blocking a number", grants("blocking", 3), "cedar_ember shape"),
+                ("id missing", grants("id", None), "cedar_ember shape"),
+                ("cedar_ember a string", lambda b: b.__setitem__("cedar_ember", "x"), "cedar_ember shape"),
+                ("weekly_scoped_shares a number", lambda b: b.__setitem__("weekly_scoped_shares", 7),
+                 "weekly_scoped_shares shape"),
+                ("limit_index a list", limit_index, "weekly_scoped_shares shape")):
+            with self.subTest(label):
+                self.logged.clear()
+                raw = resets_body("two_usable")
+                mut(raw)
+                rd = ex._anthropic_reading(raw, 1_800_000_000.0, "")
+                w = ex._reading_windows(rd)
+                self.assertEqual((w["seven_day"]["used_pct"], w["scoped:Fable"]["used_pct"]), (100.0, 64.0))
+                pot = ex._reading_pot(rd, ex.ALLOWANCE_POT)
+                self.assertEqual(pot["events_basis"]["state"], "unread")
+                self.assertIn(why, pot["events_basis"]["why"])
+                self.assertTrue(self.logged, "a log line says why")
+
+    def test_unknown_program_blocks_are_named_once(self):
+        raw = resets_body("two_usable")
+        raw["copper_kite"] = {"offer": 1}
+        self.pot(raw)
+        self.pot(raw)
+        named = [ln for ln in self.logged if "copper_kite" in ln]
+        self.assertEqual(len(named), 1)
+
+    def test_windows_say_how_they_refill(self):
+        w = ex._reading_windows(ex._anthropic_reading(resets_body("two_usable"), 1.0, ""))
+        self.assertEqual({k: (v["refill"], v["anchor"]) for k, v in w.items()},
+                         {"seven_day": ("at_once", "fixed"), "scoped:Fable": ("at_once", "fixed")})
+        self.assertNotIn("opens", w["seven_day"])
+
+    def test_the_standing_carries_them_and_the_reply_offers_them(self):
+        raw = resets_body("two_usable")
+        rd = ex._anthropic_reading(raw, 1_800_000_000.0, "")
+        pot = ex._standing_pot(ex._reading_pot(rd, ex.ALLOWANCE_POT))
+        self.assertEqual([e["id"] for e in pot["events"]],
+                         ["cedar_ember:full-reset-2701", "cedar_ember:launch-2612-fable"])
+        self.assertNotIn("reset_options", pot)
+        pot["windows"] = ex._reading_windows(rd)
+        st = {"provider": "anthropic", "allowance": pot}
+        fable = ex._event_options({"id": "c/lane:fable", "scope": "Fable"}, "a", st, 1_800_000_000.0)
+        self.assertEqual([o["event"] for o in fable],
+                         ["cedar_ember:full-reset-2701", "cedar_ember:launch-2612-fable"])
+        self.assertEqual(fable[0]["action"], "One full limit reset (January 2027) on a")
+        opus = ex._event_options({"id": "c/lane:opus", "scope": "Opus"}, "a", st, 1_800_000_000.0)
+        self.assertEqual([o["event"] for o in opus], ["cedar_ember:full-reset-2701",
+                                                      "cedar_ember:launch-2612-fable"],
+                         "the Fable reset gives back the weekly, which binds every lane")
+
+
+class TestCodexEvents(_LogCapture, unittest.TestCase):
+    """quota-model 69 §3.2: the reset credits and the paid reset as events."""
+
+    def pot(self, credits, usage, err=None):
+        rd, why = pcodex._codex_reading(usage, credits, 1_800_000_000.0, "gpt", credits_err=err)
+        self.assertEqual(why, "")
+        pot = ex._reading_pot(rd, ex.ALLOWANCE_POT)
+        self.assertIsNone(ex._events_problem(pot))
+        return pot
+
+    def test_an_available_credit_is_an_event_and_a_redeemed_one_history(self):
+        credits, usage = resets_codex()
+        pot = self.pot(credits, usage)
+        self.assertEqual([e["id"] for e in pot["events"]],
+                         ["codex_reset:RateLimitResetCredit_3f9c2a71b0d84e6aa5c1d7e0f2b4c689"])
+        self.assertEqual(pot["events_used"], 1)
+        self.assertEqual(pot["events_last_used_at"],
+                         round(ex._iso_to_epoch("2026-12-19T21:41:11.902664Z")))
+        ev = pot["events"][0]
+        self.assertEqual((ev["trigger"], ev["label"], ev["anchor"]),
+                         ("owner", "Full reset (Monthly)", "restarts_at_use"))
+        self.assertEqual(ev["effects"], [{"window": "seven_day", "effect": "refill", "basis": "inferred"}])
+        self.assertEqual((ev["supply"]["from"], ev["supply"]["to"], ev["supply"]["order"]),
+                         (round(ex._iso_to_epoch("2027-01-03T11:20:05.204913Z")),
+                          round(ex._iso_to_epoch("2027-02-02T11:20:05.204913Z")), None))
+        self.assertEqual((ev["usable"]["min_used_pct"], ev["auto_use"]["threshold_pct"]), (20, 10))
+
+    def test_applicable_count_sets_every_credits_usable_now(self):
+        credits, usage = resets_codex()
+        second = dict(credits["credits"][0], id="RateLimitResetCredit_00000000000000000000000000000002")
+        credits["credits"].append(second)
+        self.assertEqual([e["usable"]["now"] for e in self.pot(credits, usage)["events"]], [False, False])
+        usage["rate_limit_reset_credits"]["applicable_available_count"] = 1
+        self.assertEqual([e["usable"]["now"] for e in self.pot(credits, usage)["events"]], [True, True])
+
+    def test_scoped_windows_are_not_refilled(self):
+        credits, usage = resets_codex()
+        usage["rate_limit"]["secondary_window"] = {"limit_window_seconds": 18000, "reset_after_seconds": 9000,
+                                                   "reset_at": 1800009000, "used_percent": 30}
+        usage["additional_rate_limits"] = [{"limit_name": "gpt-x", "metered_feature": "x",
+                                            "rate_limit": {"allowed": True, "primary_window": {
+                                                "limit_window_seconds": 604800, "used_percent": 5,
+                                                "reset_at": 1800300000}}}]
+        ev = self.pot(credits, usage)["events"][0]
+        self.assertEqual([e["window"] for e in ev["effects"]], ["seven_day", "five_hour"])
+
+    def test_the_paid_reset_on_and_off(self):
+        credits, usage = resets_codex()
+        self.assertNotIn("codex_paid_reset", [e["id"] for e in self.pot(credits, usage)["events"]])
+        credits["immediate_reset_purchase_eligible"] = True
+        paid = self.pot(credits, usage)["events"][-1]
+        self.assertEqual((paid["id"], paid["trigger"], paid["usable"]["now"], paid["supply"]["left"]),
+                         ("codex_paid_reset", "owner_pays", True, None))
+
+    def test_a_failed_second_read_is_unread(self):
+        _, usage = resets_codex()
+        pot = self.pot(None, usage, err="HTTP 401")
+        self.assertEqual((pot["events"], pot["events_basis"]),
+                         ([], {"state": "unread", "why": "HTTP 401"}))
+        pot = self.pot(["not", "an", "object"], usage)
+        self.assertEqual(pot["events_basis"], {"state": "unread", "why": "reset credits shape"})
+
+    def test_a_wrongly_typed_credits_body_costs_the_events_never_the_windows(self):
+        self.capture_log()
+        for label, mut in (("credits a number", lambda c: c.__setitem__("credits", 5)),
+                           ("credits an object", lambda c: c.__setitem__("credits", {"a": 1})),
+                           ("a credit's id a list", lambda c: c["credits"][0].__setitem__("id", [1]))):
+            with self.subTest(label):
+                self.logged.clear()
+                credits, usage = resets_codex()
+                mut(credits)
+                pot = self.pot(credits, usage)
+                self.assertEqual(ex._reading_windows({"pots": [pot]})["seven_day"]["used_pct"], 9.0)
+                self.assertEqual(pot["events_basis"], {"state": "unread", "why": "reset credits shape"})
+                self.assertTrue(self.logged)
+
+    def test_the_poll_survives_a_wrongly_typed_credits_body(self):
+        seed_openai_creds()
+        pcodex._st(T).pool = None
+        self.addCleanup(clear_openai_creds)
+        self.capture_log()
+        credits, usage = resets_codex()
+        credits["credits"] = 5
+        patch_codex_reads(self, usage, credits)
+        res = pcodex.poll_gpt(T)
+        self.assertEqual(res["ok"], 1)
+        self.assertEqual(ex._reading_windows(res["reading"])["seven_day"]["used_pct"], 9.0)
+        self.assertEqual(ex._reading_pot(res["reading"], ex.ALLOWANCE_POT)["events_basis"]["state"],
+                         "unread")
+
+    def test_a_count_with_no_credit_listed_is_unread(self):
+        self.capture_log()
+        credits, usage = resets_codex()
+        for listed in ([], None):
+            with self.subTest(listed=listed):
+                if listed is None:
+                    credits.pop("credits")
+                else:
+                    credits["credits"] = listed
+                pot = self.pot(credits, usage)
+                self.assertEqual(pot["events_basis"], {"state": "unread", "why": "credits not listed"})
+
+    def test_windows_say_how_they_refill(self):
+        credits, usage = resets_codex()
+        w = ex._reading_windows(pcodex._codex_reading(usage, credits, 1.0)[0])["seven_day"]
+        self.assertEqual((w["refill"], w["anchor"]), ("at_once", "first_use"))
+
+
+class TestEventsValidator(_LogCapture, unittest.TestCase):
+    """The reading's events are checked at the poll (69 §2.6): a pot whose
+    events are not in the shape keeps none and says so."""
+
+    def ok_event(self, **over):
+        ev = {"id": "x:1", "program": "x", "label": "a reset", "trigger": "owner",
+              "effects": [{"window": "seven_day", "effect": "refill", "basis": "stated"}],
+              "anchor": "kept", "supply": {"left": 1, "total": 1}, "usable": {"now": True}}
+        ev.update(over)
+        return ev
+
+    def test_the_shape(self):
+        P = ex._events_problem
+        basis = {"state": "read", "why": None}
+        self.assertIsNone(P({"events": [self.ok_event()], "events_basis": basis}))
+        lot = {"window": None, "provider_name": "pot", "effect": "add_lot", "basis": "unknown"}
+        self.assertIsNone(P({"events": [self.ok_event(effects=[lot])], "events_basis": basis}),
+                          "add_lot is in the schema though no adapter makes one")
+        limit = {"window": "seven_day", "effect": "limit", "factor": 1.5, "until": None, "basis": "stated"}
+        self.assertIsNone(P({"events": [self.ok_event(effects=[limit])], "events_basis": basis}))
+        for bad, why in (
+                ({"events": [self.ok_event(trigger="someone")], "events_basis": basis}, "trigger"),
+                ({"events": [self.ok_event(anchor="moved")], "events_basis": basis}, "anchor"),
+                ({"events": [self.ok_event(effects=[{"window": "seven_day", "effect": "zero",
+                                                      "basis": "stated"}])], "events_basis": basis},
+                 "effect"),
+                ({"events": [self.ok_event(effects=[{"window": None, "effect": "refill",
+                                                      "basis": "stated"}])], "events_basis": basis},
+                 "unnamed window"),
+                ({"events": [self.ok_event(effects=[{"window": "seven_day", "effect": "limit",
+                                                      "basis": "stated"}])], "events_basis": basis},
+                 "factor or points"),
+                ({"events": [self.ok_event(supply={"left": "one"})], "events_basis": basis}, "supply.left"),
+                ({"events": [self.ok_event(usable={"now": "yes"})], "events_basis": basis}, "usable.now"),
+                ({"events": [self.ok_event(), self.ok_event()], "events_basis": basis}, "twice"),
+                ({"events": [self.ok_event()], "events_basis": {"state": "none", "why": "x"}}, "none"),
+                ({"events": [], "events_basis": {"state": "maybe"}}, "events_basis.state"),
+                ({"events": {}, "events_basis": basis}, "list")):
+            with self.subTest(why):
+                self.assertIn(why, P(bad) or "")
+
+    def test_a_reading_with_bad_events_keeps_none_and_logs(self):
+        self.capture_log()
+        rd = {"pots": [ex._allowance_pot([], events=[self.ok_event(trigger="someone")],
+                                         events_basis={"state": "read", "why": None})]}
+        ex._checked_events(rd, "acct")
+        pot = rd["pots"][0]
+        self.assertEqual(pot["events"], [])
+        self.assertEqual(pot["events_basis"]["state"], "unread")
+        self.assertIn("trigger", pot["events_basis"]["why"])
+        self.assertTrue(any(ln.startswith("acct: allowance events refused") for ln in self.logged))
+
+    def test_every_adapter_without_a_mechanism_says_none(self):
+        for rd in (pkimi._kimi_reading(kimi_raw(five_hour=8.0, weekly=20.0), 1.0)[0],
+                   plocal._local_reading(1.0), papi._reading(1.0)):
+            pot = ex._reading_pot(rd, ex.ALLOWANCE_POT)
+            with self.subTest(rd["provider"]):
+                self.assertEqual((pot["events"], pot["events_basis"]),
+                                 ([], {"state": "none", "why": "no reset mechanism read"}))
 
 
 def ledger_entry(i, charge=1.0, route=GPT_ROUTE, at=None, **over):
