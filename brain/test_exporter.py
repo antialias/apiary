@@ -3049,7 +3049,8 @@ def fleet_standing(spec, now):
     st["allowance"]["windows"] = {
         wid: {"kind": "window", "period": ex._period_label(w["period_s"]), "period_s": w["period_s"],
               "scope": w.get("scope"), "used_pct": pct(w["used"]), "resets_at": resets(w),
-              "as_of": as_of, **({"open": w["open"]} if "open" in w else {})}
+              "as_of": as_of, **({"open": w["open"]} if "open" in w else {}),
+              **({"anchor": w["anchor"]} if "anchor" in w else {})}
         for wid, w in (spec.get("windows") or {}).items()}
     st["allowance"]["limits"] = {
         lid: {"kind": "cycle_pool", "period": p["period"], "used_pct": pct(p["used"]),
@@ -3079,6 +3080,12 @@ def fleet_case_figure(case):
               for a, h in case.get("health", {}).items()}
     return ex._fleet_figure(standings, routes, models, case["sizing"], limits, now, ex.STALE_MAX,
                             health)
+
+
+def fleet_clean(fleet):
+    """A figure without its clock-only fields (PREFERRED_CLOCK_ONLY: the pace
+    and the forecast, quota-model 69 §6.1), as the publisher compares it."""
+    return ex._strip_clock_only({"fleet": copy.deepcopy(fleet)})["fleet"]
 
 
 def fleet_view(windows, providers=None):
@@ -3129,15 +3136,16 @@ class TestFleetCases(unittest.TestCase):
         # minute apart on the same inputs are byte-identical.
         with open(FLEET_CASES) as f:
             case = json.load(f)["cases"][0]
-        first = json.dumps(fleet_case_figure(case))
+        first = json.dumps(fleet_clean(fleet_case_figure(case)))
         case["now"] += 60
         for spec in case["accounts"].values():
             spec["age"] = spec.get("age", 0) + 60
             for w in list((spec.get("windows") or {}).values()) + list((spec.get("pools") or {}).values()):
                 if w.get("resets_in") is not None:
                     w["resets_in"] -= 60
-        # The same readings, their resets the same moments, seen a minute later.
-        self.assertEqual(json.dumps(fleet_case_figure(case)), first)
+        # The same readings, their resets the same moments, seen a minute
+        # later: byte-identical but the clock-only pace and forecast (69 §6.1).
+        self.assertEqual(json.dumps(fleet_clean(fleet_case_figure(case))), first)
 
     def test_one_window_is_unit_free(self):
         # On one account and one window room / capacity is (cap - used) / cap
@@ -3409,14 +3417,14 @@ class TestFleetCoverage(unittest.TestCase):
 
     def test_the_counts_follow_no_clock(self):
         case = self.every_kind()
-        first = json.dumps(fleet_case_figure(case))
+        first = json.dumps(fleet_clean(fleet_case_figure(case)))
         case["now"] += 60
         for spec in case["accounts"].values():
             spec["age"] = spec.get("age", 0) + 60
             for w in (spec.get("windows") or {}).values():
                 if w.get("resets_in") is not None:
                     w["resets_in"] -= 60
-        self.assertEqual(json.dumps(fleet_case_figure(case)), first)
+        self.assertEqual(json.dumps(fleet_clean(fleet_case_figure(case))), first)
 
     def figure(self, accounts, sized, classes=None, limits=None):
         return fleet_case_figure(room_case(
@@ -13545,7 +13553,8 @@ class TestSizingPublication(HTTPBase, SizingBase):
         _, after = self.get("/preferred")
         for k in ("accounts", "routes", "classes", "lanes"):
             self.assertEqual(after[k], before[k])
-        self.assertEqual(after["fleet"], before["fleet"], "a read of /sizing moves nothing")
+        self.assertEqual(fleet_clean(after["fleet"]), fleet_clean(before["fleet"]),
+                         "a read of /sizing moves nothing but the clock-only pace")
 
     def test_sizing_is_a_pure_read(self):
         self.assertIn("/sizing", ex._PURE_READS)
@@ -13767,7 +13776,10 @@ class TestFleetDocument(SizingBase):
                 a = ex._preferred_payload(T)
             with mock.patch.object(ex.time, "time", return_value=t + 60):
                 b = ex._preferred_payload(T)
-        self.assertEqual(json.dumps(a["fleet"]), json.dumps(b["fleet"]))
+        self.assertEqual(json.dumps(fleet_clean(a["fleet"])), json.dumps(fleet_clean(b["fleet"])))
+        self.assertNotEqual(a["fleet"]["proxy"]["forecast"]["horizon_at"],
+                            b["fleet"]["proxy"]["forecast"]["horizon_at"],
+                            "the forecast follows the clock (69 §6.1)")
         self.assertEqual(ex._preferred_digest(a), ex._preferred_digest(b))
 
     def test_a_sample_close_marks_the_document(self):
@@ -13842,6 +13854,603 @@ class TestFleetDocument(SizingBase):
         for fam in ("fleet_capacity_api_usd", "fleet_room_api_usd", "fleet_left_pct"):
             self.assertIn(f"# TYPE {fam} gauge", t)
         self.assertIn("For an account, its main window's own (cap - used) / cap", t)
+
+
+# ---- quota-model 69 push 2: the pace and the forecast --------------------------------
+
+HOUR = 3600
+
+
+def burn_fleet(sels=None, accts=None, resting=()):
+    """A rendered figure's shape, as much of it as _burn_stamp reads:
+    {selection: {acct: room}} and {acct: room} at the proxy level."""
+    return {"selections": {k: {"accounts": {a: {"room": r, "refused": None} for a, r in v.items()},
+                               "resting": list(resting)}
+                           for k, v in (sels or {}).items()},
+            "proxy": {"resting": list(resting)},
+            "accounts": {a: {"room": r, "refused": None} for a, r in (accts or {}).items()}}
+
+
+class TestBurn(SizingBase):
+    """69 §4.2: hourly buckets of priced served dollars, per selection, per
+    account and for the proxy, over the hours each could serve."""
+
+    H0 = 1793736000  # an hour's start
+
+    def setUp(self):
+        super().setUp()
+        reset_sizing_memory()
+
+    def take(self, member, usd, at, acct=ACCT_A, now=None, selection=None):
+        with T.sizing_lock:
+            ex._burn_take(T, selection, member, acct, usd, at, now=at if now is None else now)
+
+    def classes(self, *names):
+        return mock.patch.object(T, "classes", [{"class": n} for n in names])
+
+    def stamp(self, now, sels=None, accts=None, resting=()):
+        ex._burn_stamp(T, burn_fleet(sels, accts, resting), now)
+
+    def pace(self, level, key, now):
+        with T.sizing_lock:
+            burn = T.sizing["burn"]
+            ring = burn["proxy"] if level == "proxy" else burn[level].get(key)
+            return ex._burn_pace(ring, now)
+
+    def test_buckets_by_selection_from_the_wire(self):
+        # The wire's values (the proxy's served_test.go): a class's event
+        # carries the class as its selection and a member id that is
+        # lane:<x> or <provider>/<model>; a bare lane's carries the model
+        # asked for as its selection.
+        t = self.H0 + 60
+        with self.classes("claude-frontier"):
+            self.take("lane:fable", 2.0, t, selection="claude-fable-5")
+            self.take("gpt/gpt-5.6", 3.0, t, selection="claude-frontier", acct=ACCT_B)
+            self.take("lane:fable", 4.0, t, selection="claude-frontier")
+            self.take("kimi/kimi-k3", 5.0, t, selection="kimi-k3", acct=ACCT_B)
+        burn = T.sizing["burn"]
+        h = t // HOUR
+        self.assertEqual(sorted(burn["selections"]), ["claude-frontier", "lane:fable"],
+                         "no ring for a provider's name")
+        self.assertEqual(burn["selections"]["lane:fable"]["hours"][h]["usd"], 2.0)
+        self.assertEqual(burn["selections"]["claude-frontier"]["hours"][h]["usd"], 7.0,
+                         "a class member's event is its class's")
+        self.assertEqual(burn["accounts"][ACCT_A]["hours"][h]["usd"], 6.0)
+        self.assertEqual(burn["accounts"][ACCT_B]["hours"][h]["usd"], 8.0,
+                         "no selection: counted for its account")
+        self.assertEqual(burn["proxy"]["hours"][h]["usd"], 14.0, "the proxy counts every one")
+        with self.classes("claude-frontier"):
+            self.assertEqual(ex._burn_selection(T, "claude-frontier", "gpt/gpt-5.6"),
+                             "claude-frontier")
+            self.assertEqual(ex._burn_selection(T, None, "lane:opus"), "lane:opus")
+            self.assertIsNone(ex._burn_selection(T, "gone-class", "gpt/gpt-5.6"))
+            self.assertIsNone(ex._burn_selection(T, None, "lane:"))
+            self.assertIsNone(ex._burn_selection(T, None, None))
+
+    def test_a_class_pace_counts_its_own_traffic_and_not_its_lanes(self):
+        # A class on the Fable lane and the bare Fable lane, both servable a
+        # day: each pace is its own traffic only.
+        with self.classes("claude-frontier"):
+            for i in range(24):
+                t = self.H0 + i * HOUR
+                self.stamp(t, sels={"claude-frontier": {ACCT_A: 10.0},
+                                    "lane:fable": {ACCT_A: 10.0}}, accts={ACCT_A: 10.0})
+                self.take("lane:fable", 3.0, t + 60, selection="claude-frontier")
+                self.take("lane:fable", 1.0, t + 120, selection="claude-fable-5")
+        end = self.H0 + 24 * HOUR
+        self.assertEqual(self.pace("selections", "claude-frontier", end)["rate"], 3.0)
+        self.assertEqual(self.pace("selections", "lane:fable", end)["rate"], 1.0)
+        self.assertEqual(self.pace("accounts", ACCT_A, end)["rate"], 4.0)
+
+    def test_unpriced_counted_beside(self):
+        t = self.H0 + 60
+        self.take("lane:opus", 4.0, t)
+        self.take("lane:opus", None, t)
+        b = T.sizing["burn"]["selections"]["lane:opus"]["hours"][t // HOUR]
+        self.assertEqual((b["usd"], b["n"], b["un"]), (4.0, 1, 1))
+        self.assertIsNone(self.pace("selections", "lane:opus", t)["unpriced"],
+                          "the current hour joins the pace when it ends")
+        self.assertEqual(self.pace("selections", "lane:opus", t + HOUR)["unpriced"], 0.5)
+
+    def test_servable_from_a_render_and_from_a_served_event(self):
+        t = self.H0 + 60
+        self.stamp(t, sels={"lane:opus": {ACCT_A: 10.0}, "lane:fable": {ACCT_A: 0.0}},
+                   accts={ACCT_A: 10.0})
+        burn = T.sizing["burn"]
+        h = t // HOUR
+        self.assertTrue(burn["selections"]["lane:opus"]["hours"][h]["s"])
+        self.assertFalse(burn["selections"]["lane:fable"]["hours"][h]["s"], "no room: not servable")
+        self.assertTrue(burn["proxy"]["hours"][h]["s"])
+        # A resting account is not one the proxy would serve from.
+        self.stamp(t + HOUR, sels={"lane:opus": {ACCT_A: 10.0}}, accts={ACCT_A: 10.0},
+                   resting=[ACCT_A])
+        self.assertFalse(burn["selections"]["lane:opus"]["hours"][h + 1]["s"])
+        # A served event makes its hour servable whatever the renders said.
+        self.take("lane:fable", 1.0, t + 30)
+        self.assertTrue(burn["selections"]["lane:fable"]["hours"][h]["s"])
+
+    def test_an_idle_hour_with_room_is_servable(self):
+        # One render with room, then nothing for 29 hours but one event:
+        # every hour keeps the last stamp, and the pace is the owner's.
+        self.stamp(self.H0, sels={"lane:opus": {ACCT_A: 10.0}}, accts={ACCT_A: 10.0})
+        self.take("lane:opus", 30.0, self.H0 + 20 * HOUR)
+        p = self.pace("selections", "lane:opus", self.H0 + 30 * HOUR)
+        self.assertEqual((p["servable_h"], p["rate"], p["basis"]), (30, 1.0, "learned"))
+
+    def test_no_pace_under_a_day_of_servable_hours(self):
+        self.stamp(self.H0, sels={"lane:opus": {ACCT_A: 10.0}}, accts={ACCT_A: 10.0})
+        self.take("lane:opus", 30.0, self.H0 + 60)
+        p = self.pace("selections", "lane:opus", self.H0 + 23 * HOUR + 1800)
+        self.assertEqual((p["servable_h"], p["rate"], p["rate_24h"], p["basis"]),
+                         (23, None, None, "no pace yet"))
+        self.assertEqual(self.pace("selections", "lane:opus", self.H0 + 24 * HOUR)["rate"], 1.25)
+        self.assertEqual(self.pace("selections", "nobody", self.H0)["servable_h"], 0,
+                         "a selection never seen has no pace")
+
+    def test_blocked_for_days(self):
+        # $2,400 over three days, then walled for four: $33/h over the 72
+        # hours it could serve, not $14/h over the week's 168, and the same
+        # before and after the four days.
+        for i in range(72):
+            t = self.H0 + i * HOUR
+            self.stamp(t, sels={"lane:opus": {ACCT_A: 100.0}}, accts={ACCT_A: 100.0})
+            self.take("lane:opus", 2400 / 72, t + 600)
+        before = self.pace("selections", "lane:opus", self.H0 + 72 * HOUR)
+        for i in range(72, 168):
+            self.stamp(self.H0 + i * HOUR, sels={"lane:opus": {ACCT_A: 0.0}}, accts={ACCT_A: 0.0})
+        after = self.pace("selections", "lane:opus", self.H0 + 168 * HOUR)
+        self.assertEqual((before["servable_h"], after["servable_h"]), (72, 72))
+        self.assertAlmostEqual(before["rate"], 33.3333, places=3)
+        self.assertAlmostEqual(after["rate"], 33.3333, places=3)
+        self.assertIsNone(after["rate_24h"], "no servable hour in the last day")
+        self.assertAlmostEqual(before["rate_24h"], 33.3333, places=3)
+
+    def test_a_hand_sum_over_the_complete_hours_matches(self):
+        # Mid-hour, the pace is the sum over the last 168 complete hours over
+        # their servable count; the current hour's dollars wait for its end.
+        dollars = {}
+        for i in range(40):
+            t = self.H0 + i * HOUR
+            self.stamp(t, sels={"lane:opus": {ACCT_A: 10.0}}, accts={ACCT_A: 10.0})
+            dollars[i] = 1.0 + (i % 7)
+            self.take("lane:opus", dollars[i], t + 60)
+        now = self.H0 + 39 * HOUR + 1800
+        p = self.pace("selections", "lane:opus", now)
+        self.assertEqual(p["servable_h"], 39)
+        self.assertEqual(p["rate"], round(sum(dollars[i] for i in range(39)) / 39, 4))
+        self.assertEqual(p["rate_24h"], round(sum(dollars[i] for i in range(15, 39)) / 24, 4))
+
+    def test_the_ring_rolls(self):
+        self.stamp(self.H0, sels={"lane:opus": {ACCT_A: 10.0}}, accts={ACCT_A: 10.0})
+        self.take("lane:opus", 50.0, self.H0 + 60)
+        late = self.H0 + (ex.BURN_HOURS + 1) * HOUR
+        self.stamp(late, sels={"lane:opus": {ACCT_A: 10.0}}, accts={ACCT_A: 10.0})
+        ring = T.sizing["burn"]["selections"]["lane:opus"]
+        self.assertNotIn(self.H0 // HOUR, ring["hours"], "the first hour rolled off")
+        self.assertIs(ring["carry"], True, "its stamp is carried")
+        p = self.pace("selections", "lane:opus", late)
+        self.assertEqual((p["servable_h"], p["rate"]), (168, 0.0), "the $50 left with its hour")
+        # An event older than the pace's hours counts nowhere.
+        self.take("lane:opus", 9.0, self.H0, now=late)
+        self.assertNotIn(self.H0 // HOUR, ring["hours"])
+
+    def test_a_ring_with_no_hours_left_goes(self):
+        self.stamp(self.H0, sels={"lane:gone": {ACCT_A: 10.0}}, accts={ACCT_A: 10.0})
+        self.stamp(self.H0 + (ex.BURN_HOURS + 1) * HOUR, accts={ACCT_A: 10.0})
+        self.assertNotIn("lane:gone", T.sizing["burn"]["selections"])
+
+    def test_a_served_event_lands_in_the_buckets(self):
+        t = time.time()
+        e = served(1, at=t - 5)
+        e["member"] = "lane:opus"
+        self.assertEqual(post_reports(e, now=t)[0], [("applied", None)])
+        usd, _ = ex._served_price(e["model"], e["speed"], e["tokens"], True)
+        h = int((t - 5) // HOUR)
+        self.assertAlmostEqual(T.sizing["burn"]["selections"]["lane:opus"]["hours"][h]["usd"], usd)
+        self.assertTrue(os.path.exists(T.sizing_file), "the first take is saved with its batch")
+        with open(T.sizing_file) as f:
+            self.assertIn("lane:opus", json.load(f)["burn"]["selections"])
+
+    def test_every_take_rides_the_next_save_without_a_save_each(self):
+        # Every take marks the rings unsaved. A batch with nothing else to
+        # save writes them only BURN_SAVE_S after the last save; a batch that
+        # saves for its own reasons carries them at once.
+        t = time.time()
+        with T.sizing_lock:
+            self.assertTrue(ex._sizing_save(T))
+        with mock.patch.object(ex, "_sizing_save", wraps=ex._sizing_save) as save:
+            self.take("lane:opus", 1.0, t, now=t)
+            self.assertTrue(T.sizing["burn_unsaved"], "the take is marked")
+            with T.sizing_lock:
+                ex._sizing_after(T, ACCT_A, False)
+            self.assertEqual(save.call_count, 0, "no save per event")
+            T.sizing["dirty"] = True
+            with T.sizing_lock:
+                ex._sizing_after(T, ACCT_A, False)
+            self.assertEqual(save.call_count, 1, "carried by the batch's save")
+            self.assertFalse(T.sizing["burn_unsaved"])
+            self.take("lane:opus", 1.0, t, now=t)
+            T.sizing["saved_at"] -= ex.BURN_SAVE_S
+            with T.sizing_lock:
+                ex._sizing_after(T, ACCT_A, False)
+            self.assertEqual(save.call_count, 2, "saved once BURN_SAVE_S has passed")
+        with open(T.sizing_file) as f:
+            hours = json.load(f)["burn"]["selections"]["lane:opus"]["hours"]
+        self.assertEqual(hours[0][1], 2.0, "both takes' dollars are on the file")
+
+    def test_round_trip(self):
+        t = time.time()
+        self.stamp(t - 3 * HOUR, sels={"lane:opus": {ACCT_A: 10.0}}, accts={ACCT_A: 10.0})
+        self.take("lane:opus", 7.5, t - 60, now=t)
+        self.take(None, None, t - 60, acct=ACCT_B, now=t)
+        before = copy.deepcopy(T.sizing["burn"])
+        with T.sizing_lock:
+            self.assertTrue(ex._sizing_save(T))
+        reset_sizing_memory()
+        ex._sizing_load(T)
+        self.assertEqual(T.sizing["burn"], before)
+        self.assertEqual(sizing_bad_files(), [])
+
+    def test_a_malformed_burn_is_dropped_and_the_rest_kept(self):
+        evs, _ = self.walk([(1, [1.0])] * 3)
+        self.feed(*evs)
+        with T.sizing_lock:
+            ex._sizing_save(T)
+        with open(T.sizing_file) as f:
+            doc = json.load(f)
+        self.assertEqual(doc["v"], 1, "the file's version stays")
+        doc["burn"]["proxy"]["hours"] = [["not an hour", 1, 0, 0, True, None]]
+        with open(T.sizing_file, "w") as f:
+            json.dump(doc, f)
+        reset_sizing_memory()
+        ex._sizing_load(T)
+        self.assertEqual(sizing_bad_files(), [], "never set aside for its burn")
+        self.assertEqual(len(T.sizing["windows"][(ACCT_A, "seven_day")]["samples"]), 3)
+        self.assertEqual(T.sizing["burn"], ex._sizing_fresh()["burn"])
+        self.assertTrue(any("pace's buckets" in ln and "burn.proxy.hours" in ln
+                            for ln in self.logged), self.logged)
+
+    def test_an_older_file_without_burn(self):
+        evs, _ = self.walk([(1, [1.0])] * 3)
+        self.feed(*evs)
+        with T.sizing_lock:
+            ex._sizing_save(T)
+        with open(T.sizing_file) as f:
+            doc = json.load(f)
+        del doc["burn"]
+        with open(T.sizing_file, "w") as f:
+            json.dump(doc, f)
+        reset_sizing_memory()
+        ex._sizing_load(T)
+        self.assertEqual(sizing_bad_files(), [])
+        self.assertEqual(len(T.sizing["windows"][(ACCT_A, "seven_day")]["samples"]), 3)
+        self.assertEqual(T.sizing["burn"], ex._sizing_fresh()["burn"])
+
+    def test_sizing_publishes_burn_and_its_constants(self):
+        t = time.time()
+        self.stamp(t - HOUR, sels={"lane:opus": {ACCT_A: 10.0}}, accts={ACCT_A: 10.0})
+        self.take("lane:opus", 2.0, t - HOUR, now=t)
+        s = ex.sizing_payload(T)
+        c = s["constants"]
+        self.assertEqual((c["burn_hours"], c["burn_min_servable_h"], c["forecast_h"]),
+                         (168, 24, 7 * 86400))
+        b = s["burn"]["selections"]["lane:opus"]
+        self.assertEqual(b["buckets"], [{"at": int(t // HOUR - 1) * HOUR, "usd": 2.0, "events": 1,
+                                         "unpriced": 0, "servable": True}])
+        self.assertEqual((b["servable_h"], b["rate"], b["basis"]), (1, None, "no pace yet"))
+        self.assertIn(ACCT_A, s["burn"]["accounts"])
+        self.assertEqual(s["burn"]["proxy"]["servable_h"], 1)
+
+    def test_a_render_stamps_and_the_document_carries_the_pace(self):
+        view = fleet_view({ACCT_A: {"seven_day": (1000.0, {"claude-opus-5-5": 1000.0})}})
+        with mock.patch.object(ex, "_sizing_fleet_view", return_value=view):
+            f = ex._preferred_payload(T)["fleet"]
+        h = int(time.time() // HOUR)
+        self.assertTrue(T.sizing["burn"]["selections"]["lane:opus"]["hours"][h]["s"])
+        self.assertTrue(T.sizing["burn"]["proxy"]["hours"][h]["s"])
+        self.assertEqual(f["selections"]["lane:opus"]["pace"]["basis"], "no pace yet")
+        # The live view reads the pace from the buckets, the current hour once
+        # it ends.
+        self.assertEqual(ex._sizing_fleet_view(T)["pace"]["selections"]["lane:opus"]["servable_h"],
+                         0)
+        ring = T.sizing["burn"]["selections"]["lane:opus"]
+        self.assertEqual(ex._burn_pace(ring, (h + 1) * HOUR)["servable_h"], 1)
+
+
+def walk_case(accounts, rate, preferred=None, proxy_rate=None, now=1795100000):
+    """A fleet figure on an Opus-lane class `c` (one member) over accounts
+    {acct: anth(...)}, each sized $3,000 a window in Opus dollars, with the
+    class's pace `rate` and the proxy's `proxy_rate` ($/h, None for none),
+    and the brain's preferred account for the class."""
+    def pace(r):
+        return {"rate": r, "rate_24h": r, "unit": "api_usd/h", "hours": 168,
+                "servable_h": 100 if r is not None else 0, "unpriced": None,
+                "basis": "learned" if r is not None else "no pace yet"}
+    sizing = fleet_view({a: {wid: (3000.0, {"claude-opus-5-5": 3000.0})
+                             for wid in spec["windows"]} for a, spec in accounts.items()})
+    sizing["pace"] = {"selections": {"c": pace(rate)}, "proxy": pace(proxy_rate)}
+    case = room_case(accounts, classes=[{"class": "c", "members": [
+        {"kind": "anthropic", "lane": "opus", "model": "claude-opus-5-5", "priority": 1}]}],
+        sizing=sizing, now=now)
+    standings = {a: fleet_standing(s, now) for a, s in accounts.items()}
+    roster = {a: s["provider"] for a, s in accounts.items()}
+    classes = [{"class": "c", "request_kind": "chat", "members": [dict({"pay": [], "stop_at": None},
+                                                                       **m) for m in case["classes"][0]["members"]]}]
+    routes = ex._routes(classes, {}, roster)
+    models = {f"c/{ex._member_id(m)}": m["model"] for m in classes[0]["members"]}
+    return ex._fleet_figure(standings, routes, models, sizing, {}, now, ex.STALE_MAX, {},
+                            {"c": preferred} if preferred else None)
+
+
+class TestForecastWalk(unittest.TestCase):
+    """69 §4.3, the walk on paper: $3,000 a window, cap 100, $40/h unless
+    said, H = now + 7 d."""
+
+    NOW = 1795100000
+    D = 86400
+
+    def fc(self, accounts, rate=40.0, **kw):
+        f = walk_case(accounts, rate, now=self.NOW, **kw)
+        return f["selections"]["c"]["forecast"], f
+
+    def at(self, hours):
+        return int(math.ceil(self.NOW + hours * HOUR))
+
+    def test_nothing_has_room_for_days(self):
+        # 69 §5.2 case 3: all spent; A refills in 6 d, B in 7 d, C in 5 d.
+        # Dry now to 5 d, then C's $3,000 lasts 75 h, past H; A's refill at
+        # 6 d comes while C carries, and B's lands on H itself: neither counts.
+        fc, _ = self.fc({"max-a": anth(seven=100, seven_in=6 * self.D),
+                         "max-b": anth(seven=100, seven_in=7 * self.D),
+                         "max-c": anth(seven=100, seven_in=5 * self.D)})
+        self.assertEqual(fc["spells"], [{"from": self.NOW, "to": self.at(120)}])
+        self.assertEqual((fc["dry_at"], fc["back_at"], fc["dry_s"]),
+                         (self.NOW, self.at(120), 120 * HOUR))
+        self.assertEqual(fc["unmet"], 4800.0)
+        self.assertEqual(fc["walls"], {"max-a": self.NOW, "max-b": self.NOW, "max-c": self.NOW})
+        self.assertEqual((fc["horizon_at"], fc["rate"], fc["rate_basis"], fc["basis"]),
+                         (self.NOW + 7 * self.D, 40.0, "learned", "learned"))
+
+    def test_preferred_first_then_the_listing_order(self):
+        # 69 §5.2 case 1: A 92 % used ($240, preferred), B 30 % ($2,100), C
+        # spent, back in 2 d; A resets in 5 d. A dry at 6 h, B carries to
+        # 58.5 h, C (refilled at 48 h) to 133.5 h, then A (refilled at 120 h)
+        # past H: no drought.
+        accts = {"max-a": anth(seven=92, seven_in=5 * self.D),
+                 "max-b": anth(seven=30, seven_in=6 * self.D),
+                 "max-c": anth(seven=100, seven_in=2 * self.D)}
+        fc, _ = self.fc(accts, preferred="max-a")
+        self.assertEqual((fc["spells"], fc["dry_at"], fc["dry_s"], fc["unmet"]), ([], None, 0, 0.0))
+        self.assertEqual(fc["walls"], {"max-a": self.at(6), "max-b": self.at(58.5),
+                                       "max-c": self.NOW})
+        # Preferring B: the order is B, then A and C as listed. B to 52.5 h,
+        # A's $240 to 58.5 h, then C (refilled at 48 h).
+        fc, _ = self.fc(accts, preferred="max-b")
+        self.assertEqual(fc["walls"], {"max-a": self.at(58.5), "max-b": self.at(52.5),
+                                       "max-c": self.NOW})
+        self.assertEqual(fc["spells"], [])
+
+    def test_no_switching_back_when_an_earlier_one_refills(self):
+        # A ($400) runs dry at 10 h; B carries; A refills at 20 h, but S stays
+        # on B ($3,000 to 85 h), then back to A, the next with room.
+        fc, _ = self.fc({"max-a": anth(seven=100 - 400 / 30, seven_in=20 * HOUR),
+                         "max-b": anth(seven=0, seven_in=6 * self.D)}, preferred="max-a")
+        self.assertEqual(fc["walls"]["max-a"], self.at(10))
+        self.assertEqual(fc["walls"]["max-b"], self.at(85))
+        self.assertEqual(fc["spells"], [])
+
+    def test_a_second_spell_inside_the_week_and_nothing_past_it(self):
+        # One account, $400 left, back in 2 d: dry 10 h -> 48 h, then $3,000
+        # lasts 75 h, dry again from 123 h to H; its next refill (216 h) is
+        # past the week.
+        fc, _ = self.fc({"max-a": anth(seven=100 - 400 / 30, seven_in=2 * self.D)})
+        self.assertEqual(fc["spells"], [{"from": self.at(10), "to": self.at(48)},
+                                        {"from": self.at(123), "to": self.NOW + 7 * self.D}])
+        self.assertEqual((fc["dry_at"], fc["back_at"]), (self.at(10), self.at(48)))
+        self.assertAlmostEqual(fc["dry_s"], (38 + 45) * HOUR, delta=2)
+
+    def test_a_longer_window_refills_only_inside_the_week(self):
+        # A 30-day window spent, back in 10 days: the whole week is dry.
+        acct = {"provider": "anthropic", "gate": None, "age": 0, "windows": {
+            "window:30d": {"period_s": 30 * self.D, "used": 100, "resets_in": 10 * self.D}}}
+        fc, _ = self.fc({"gpt": acct})
+        self.assertEqual(fc["spells"], [{"from": self.NOW, "to": self.NOW + 7 * self.D}])
+        self.assertIsNone(fc["back_at"], "no refill before H")
+        self.assertEqual(fc["dry_s"], 7 * self.D)
+
+    def test_a_first_use_window_past_its_reset_starts_at_the_first_draw(self):
+        # A codex-style weekly window (first use) that expired 3 days ago
+        # with $3,000 room, at $30/h: its next period starts at the walk's
+        # first draw, now, so it refills at +168 h, past H. Dry from 100 h
+        # to H, not refilled on the stale schedule at +96 h.
+        def acct(resets_in, anchor="first_use"):
+            w = {"period_s": WEEK, "used": 0, "resets_in": resets_in}
+            if anchor:
+                w["anchor"] = anchor
+            return {"provider": "anthropic", "gate": None, "age": 0, "windows": {"seven_day": w}}
+        fc, _ = self.fc({"gpt": acct(-3 * self.D)}, rate=30.0)
+        self.assertEqual(fc["spells"], [{"from": self.at(100), "to": self.NOW + 7 * self.D}])
+        self.assertEqual(fc["walls"], {"gpt": self.at(100)})
+        # Not running at all (resets_at null): the same.
+        fc, _ = self.fc({"gpt": acct(None)}, rate=30.0)
+        self.assertEqual(fc["spells"], [{"from": self.at(100), "to": self.NOW + 7 * self.D}])
+        # A fixed window on the same stale reset keeps its schedule: back at
+        # +96 h, so the $3,000 lasts past H.
+        fc, _ = self.fc({"gpt": acct(-3 * self.D, anchor=None)}, rate=30.0)
+        self.assertEqual(fc["spells"], [], "refilled at 96 h, before it ran dry")
+
+    def test_a_first_use_window_restarts_at_the_draw_after_its_refill(self):
+        # A first-use window spent, back in 2 d, on the only account: in the
+        # drought the draw is at once, so the next period runs 48 h -> 216 h,
+        # past H. $3,000 at $40/h runs dry at 123 h and stays dry to H.
+        acct = {"provider": "anthropic", "gate": None, "age": 0, "windows": {"seven_day": {
+            "period_s": WEEK, "used": 100, "resets_in": 2 * self.D, "anchor": "first_use"}}}
+        fc, _ = self.fc({"gpt": acct})
+        self.assertEqual(fc["spells"], [{"from": self.NOW, "to": self.at(48)},
+                                        {"from": self.at(123), "to": self.NOW + 7 * self.D}])
+        # Refilled while another account carries the selection, it waits for
+        # its draw: B ($3,000) carries 0 -> 75 h, then A, refilled at 48 h
+        # but idle until 75 h, carries to 150 h (its next refill is at 75 +
+        # 168 h, past H); B's fixed weekly is back at 144 h and carries from
+        # 150 h past H. Nothing dry.
+        fc, _ = self.fc({"max-a": acct, "max-b": anth(seven=0, seven_in=6 * self.D)},
+                        preferred="max-b")
+        self.assertEqual(fc["walls"], {"max-a": self.NOW, "max-b": self.at(75)})
+        self.assertEqual(fc["spells"], [])
+
+    def test_two_counted_windows_reset_on_their_own_times(self):
+        # The main weekly at 50 % ($1,500 room, back in 6 d) and the scoped
+        # Opus weekly at 90 % ($300, back in 1 d), at $30/h: dry at 10 h on
+        # the scoped one; it refills at 24 h to $3,000 while the main holds
+        # $1,200, so the account runs dry again at 64 h; the main refills at
+        # 144 h to $3,000 while the scoped holds $1,800, which lasts past H.
+        fc, _ = self.fc({"max-a": anth(seven=50, seven_in=6 * self.D, opus=90,
+                                       scoped_in=self.D)}, rate=30.0)
+        self.assertEqual(fc["spells"], [{"from": self.at(10), "to": self.at(24)},
+                                        {"from": self.at(64), "to": self.at(144)}])
+        self.assertEqual(fc["walls"], {"max-a": self.at(10)})
+
+    def test_a_refill_sets_room_and_never_adds(self):
+        # $2,900 left, back in 1 h: at the reset room is $3,000, not $5,860;
+        # it runs dry at 76 h and stays dry to H (next refill at 169 h).
+        fc, _ = self.fc({"max-a": anth(seven=100 - 2900 / 30, seven_in=HOUR)})
+        self.assertEqual(fc["walls"], {"max-a": self.at(76)})
+        self.assertEqual(fc["spells"], [{"from": self.at(76), "to": self.NOW + 7 * self.D}])
+
+    def test_a_resting_account_waits_for_its_rest(self):
+        # The preferred account rests on its 5-hour window for 3 h with room;
+        # S starts on B ($40, one hour), is dry 1 h -> 3 h, then on A to 78
+        # h, then B (refilled at 48 h) to 153 h, then A (refilled at 144 h).
+        fc, f = self.fc({"max-a": anth(seven=0, five=100, five_in=3 * HOUR, seven_in=6 * self.D),
+                         "max-b": anth(seven=100 - 40 / 30, seven_in=2 * self.D)},
+                        preferred="max-a")
+        self.assertIn("max-a", f["selections"]["c"]["resting"])
+        self.assertEqual(fc["spells"], [{"from": self.at(1), "to": self.at(3)}])
+        self.assertEqual(fc["walls"], {"max-a": self.at(78), "max-b": self.at(1)},
+                         "a resting account holds its room: dry once spent, not while it rests")
+
+    def test_a_refused_account_waits_for_its_reset(self):
+        # Spent, so refused until its reset in 2 h, where its window refills;
+        # its $3,000 lasts to 77 h, and the next reset is past the week.
+        fc, _ = self.fc({"max-a": anth(seven=100, seven_in=2 * HOUR)})
+        self.assertEqual(fc["spells"], [{"from": self.NOW, "to": self.at(2)},
+                                        {"from": self.at(77), "to": self.NOW + 7 * self.D}])
+        self.assertEqual(fc["walls"], {"max-a": self.NOW})
+
+    def test_no_pace(self):
+        # 69 §4.3: no projection; only the accounts dry now, and the horizon.
+        fc, f = self.fc({"max-a": anth(seven=100, seven_in=2 * self.D),
+                         "max-b": anth(seven=30)}, rate=None)
+        self.assertEqual(fc, {"dry_at": None, "back_at": None, "dry_s": None, "unmet": None,
+                              "spells": None, "walls": {"max-a": self.NOW, "max-b": None},
+                              "horizon_at": self.NOW + 7 * self.D, "rate": None,
+                              "rate_basis": "no pace yet", "basis": "no pace"})
+        self.assertEqual(f["selections"]["c"]["pace"]["basis"], "no pace yet")
+
+    def test_a_pace_of_zero_never_runs_dry(self):
+        fc, _ = self.fc({"max-a": anth(seven=90)}, rate=0.0)
+        self.assertEqual((fc["spells"], fc["dry_s"], fc["dry_at"]), ([], 0, None))
+
+    def test_nothing_counted(self):
+        # Every account listed (no size learned): nothing to walk.
+        accts = {"max-a": anth(seven=30)}
+        sizing = fleet_view({})
+        sizing["pace"] = {"selections": {"c": {"rate": 40.0}}, "proxy": {"rate": 40.0}}
+        f = fleet_case_figure(room_case(accts, classes=[{"class": "c", "members": [
+            {"kind": "anthropic", "lane": "opus", "model": "claude-opus-5-5", "priority": 1}]}],
+            sizing=sizing, now=self.NOW))
+        fc = f["selections"]["c"]["forecast"]
+        self.assertEqual((fc["basis"], fc["spells"], fc["walls"]), ("nothing counted", None, {}))
+
+    def test_the_proxy_walks_the_listing_order_at_its_own_pace(self):
+        # The class prefers B; the proxy has no preferred account and draws
+        # A first, at its own $100/h: A's $400 lasts 4 h, B's $3,000 30 h.
+        accts = {"max-a": anth(seven=100 - 400 / 30, seven_in=6 * self.D),
+                 "max-b": anth(seven=0, seven_in=6 * self.D)}
+        f = walk_case(accts, 40.0, preferred="max-b", proxy_rate=100.0, now=self.NOW)
+        p = f["proxy"]["forecast"]
+        self.assertEqual(p["walls"], {"max-a": self.at(4), "max-b": self.at(34)})
+        self.assertEqual(p["spells"], [{"from": self.at(34), "to": self.at(144)}])
+        self.assertEqual((p["rate"], f["proxy"]["pace"]["rate"]), (100.0, 100.0))
+        c = f["selections"]["c"]["forecast"]
+        self.assertEqual(c["walls"]["max-b"], self.at(75), "the class starts on B")
+
+    def test_the_forecast_is_clock_only(self):
+        # Two renders a minute apart differ only in the clock-only fields,
+        # and the publisher's digest strips them (69 §6.1).
+        accts = {"max-a": anth(seven=100 - 400 / 30, seven_in=2 * self.D)}
+        a = walk_case(accts, 40.0, now=self.NOW)
+        later = {"max-a": anth(seven=100 - 400 / 30, seven_in=2 * self.D - 60, age=60)}
+        b = walk_case(later, 40.0, now=self.NOW + 60)
+        self.assertNotEqual(a["selections"]["c"]["forecast"], b["selections"]["c"]["forecast"])
+        self.assertEqual(json.dumps(fleet_clean(a)), json.dumps(fleet_clean(b)))
+        for path in (("fleet", "proxy", "pace"), ("fleet", "proxy", "forecast"),
+                     ("fleet", "selections", "*", "pace"), ("fleet", "selections", "*", "forecast")):
+            self.assertIn(path, ex.PREFERRED_CLOCK_ONLY)
+
+
+class TestForecastOnTheDocument(SizingBase):
+    """69 §6.1: pace and forecast per selection and for the proxy in the
+    brain's document, the gauges, and the skeleton standing's events."""
+
+    def view(self, rate=None):
+        v = fleet_view({ACCT_A: {"seven_day": (1000.0, {"claude-opus-5-5": 1000.0})}})
+        if rate is not None:
+            p = {"rate": rate, "rate_24h": rate, "unit": "api_usd/h", "hours": 168,
+                 "servable_h": 100, "unpriced": None, "basis": "learned"}
+            v["pace"] = {"selections": {"lane:opus": p}, "proxy": p}
+        return v
+
+    def test_every_selection_and_the_proxy_carry_pace_and_forecast(self):
+        with mock.patch.object(ex, "_sizing_fleet_view", return_value=self.view(10.0)):
+            f = ex._preferred_payload(T)["fleet"]
+        for key, sel in f["selections"].items():
+            self.assertIn("pace", sel, key)
+            self.assertIn("forecast", sel, key)
+        fc = f["selections"]["lane:opus"]["forecast"]
+        self.assertEqual(fc["basis"], "learned")
+        self.assertEqual(f["selections"]["lane:opus"]["pace"]["rate"], 10.0)
+        self.assertIsNotNone(fc["dry_s"])
+        self.assertIn(ACCT_A, fc["walls"])
+        self.assertEqual(f["proxy"]["forecast"]["rate"], 10.0)
+
+    def test_the_lane_prefers_its_incumbent(self):
+        with T.plock:
+            ctx = ex._policy_ctx(T, list(T.state.values()), time.time())
+            pref = ex._fleet_preferred(T, ctx)
+        self.assertEqual(pref["lane:opus"], T.preferred["lanes"]["opus"]["account"])
+
+    def test_the_gauges(self):
+        with mock.patch.object(ex, "_sizing_fleet_view", return_value=self.view(10.0)):
+            t = ex.render([T])
+        L = lambda fam, **lab: [l for l in t.splitlines()  # noqa: E731
+                                if l.startswith(fam + "{") and all(f'{k}="{v}"' in l
+                                                                   for k, v in lab.items())]
+        self.assertEqual(L("fleet_pace_api_usd_per_h", level="selection",
+                           name="lane:opus")[0].split()[-1], "10.0")
+        self.assertEqual(len(L("fleet_forecast_dry_s", level="proxy", name="proxy")), 1)
+        self.assertEqual(len(L("fleet_forecast_unmet_api_usd", level="selection", name="lane:opus")), 1)
+        self.assertEqual(L("fleet_pace_api_usd_per_h", level="selection", name="lane:fable"), [],
+                         "no pace, no gauge")
+        for fam in ("fleet_pace_api_usd_per_h", "fleet_forecast_dry_s",
+                    "fleet_forecast_unmet_api_usd"):
+            self.assertIn(f"# TYPE {fam} gauge", t)
+
+    def test_the_skeleton_standing_says_unread(self):
+        # 69 §2.6: an account with no reading yet carries no events and says
+        # why, so it reads apart from one whose provider offers none.
+        st = ex._preferred_payload(T)["accounts"][ACCT_B]
+        self.assertIsNone(st["as_of"])
+        self.assertEqual(st["allowance"]["events"], [])
+        self.assertEqual(st["allowance"]["events_basis"], {"state": "unread", "why": "no reading yet"})
+        self.assertNotEqual(ex._preferred_payload(T)["accounts"]["kimi"]["allowance"]["events_basis"]
+                            ["why"], "no reading yet", "a read account says its own")
+        # A reading with no allowance pot (an api account's money alone) was
+        # read, and offers none.
+        st = ex._account_standing(T, "api-x", {"reading": {"kind": "api", "pots": []},
+                                               "good_ts": time.time()}, "kimi", time.time())
+        self.assertEqual(st["allowance"]["events_basis"],
+                         {"state": "none", "why": "no reset mechanism read"})
 
 
 class TestLocalRoutes(PayBase):

@@ -3947,13 +3947,19 @@ def _account_standing(t, name, res, provider, now):
                 "next_poll_at": round(sched) if sched else None,
                 "recheck_epoch": epoch,
                 "source": None, "plan": None,
-                "allowance": {"open": None, "open_basis": None, "windows": {}, "limits": {}},
+                "allowance": {"open": None, "open_basis": None, "windows": {}, "limits": {},
+                              # Not read yet, which is not "offers none" (69 §2.6).
+                              "events": [],
+                              "events_basis": {"state": "unread", "why": "no reading yet"}},
                 "money": {_money_pot(provider): {"open": None, "balance": None, "unit": None}},
                 "beside": [], "models": {}}
     if standing["as_of"] is None:
         return standing
     for k in ("kind", "source", "plan", "beside", "models"):
         standing[k] = rd.get(k, standing[k])
+    # A reading with no allowance pot (an api account's money alone) was
+    # read: it offers no reset, as its adapter's allowance would say.
+    standing["allowance"]["events_basis"] = {"state": "none", "why": "no reset mechanism read"}
     reported = res.get("reported_as_of") or {}
     for pot in rd.get("pots") or []:
         sp = _standing_pot(pot)
@@ -5369,7 +5375,7 @@ def _preferred_payload(t):
         # Every number below reads the polls with the reports merged in
         # (ctx["snap"], quota-model 64 §5); account_health reads _state alone.
         ctx = _policy_ctx(t, snap, now)
-        fleet = _fleet_payload(ctx, view, _fleet_health(account_health))
+        fleet = _fleet_payload(ctx, view, _fleet_health(account_health), _fleet_preferred(t, ctx))
         snap = ctx["snap"]
         accounts = [r for r in snap if _target_kind(r) == "anthropic_account"]
         weekly = {r["name"]: _weekly(r) for r in accounts}
@@ -5426,6 +5432,7 @@ def _preferred_payload(t):
     p["providers"] = {pid: dict(ps, pool=prov_pool.get(pid, {}))
                       for pid, ps in prov_states.items()}
     p["fleet"] = fleet
+    _burn_stamp(t, fleet, now)  # a render of the figure (69 §4.2), outside _plock
     p["prices"] = _prices_payload()
     # The prepaid notices (notices.py): every prepaid account's state, what it
     # serves, where it is paid, and each notice sent.
@@ -6177,10 +6184,12 @@ def _sizing_fresh():
     providers whose samples changed since their fit, fitted again as the
     batch ends (_sizing_after). While a batch runs, "dirty" says the file
     needs a save and "resized" that a window's samples or weights changed,
-    so the document's fleet may have (67 §8)."""
+    so the document's fleet may have (67 §8). burn: the pace's hourly
+    buckets (_burn_fresh, quota-model 69 §4.2), saved under the file's
+    `burn`."""
     return {"accounts": {}, "windows": {}, "boots": OrderedDict(), "gaps": [],
             "reporters": {}, "restarts": [], "restarted": set(), "weights": {},
-            "stale": set()}
+            "stale": set(), "burn": _burn_fresh()}
 
 
 
@@ -7203,7 +7212,11 @@ def _sizing_after(t, acct, moved):
     if moved:
         _sizing_prune(t, acct)
         _sizing_prune_gaps(t)
-    if t.sizing.pop("dirty", False):
+    # The pace's rings ride on the batch's save; with none due, they wait at
+    # most BURN_SAVE_S since the last one (69 §4.2), never a save per event.
+    if t.sizing.pop("dirty", False) or (
+            t.sizing.get("burn_unsaved")
+            and time.time() - t.sizing.get("saved_at", 0.0) >= BURN_SAVE_S):
         _sizing_save(t)
     if t.sizing.pop("resized", False):
         # A sample closed, retired or was taken back, or the weights moved:
@@ -7227,6 +7240,7 @@ def _sizing_take(t, acct, provider, ev, usd, why, speed, tier, reporter="", boun
     rt = ev["read_at"]
     model_speed = speed if speed is not None else ev["speed"]
     tokens, span = ev["tokens"], None
+    priced = usd  # the pace counts list dollars only, never a bound's middle (69 §4.2)
     if bound is not None:
         usd, span, model_speed, tier, tokens = bound
     e = {"r": float(rt), "h": float(ev["head_at"]),
@@ -7241,6 +7255,7 @@ def _sizing_take(t, acct, provider, ev, usd, why, speed, tier, reporter="", boun
         a = _sizing_acct(t, acct, provider)
         if (e["boot"], e["seq"]) in a["keys"]:
             return  # a resend of an event the loaded buffer holds
+        _burn_take(t, ev["selection"], ev["member"], acct, priced, rt)
         new, restart = _sizing_boot(t, e["boot"], e["seq"], e["r"], reporter or "")
         if restart is not None:
             for (racct, wid), w in list(t.sizing["windows"].items()):
@@ -7366,11 +7381,14 @@ def _sizing_save(t, open_state=False, final=False):
     wins = {}
     for (acct, wid), w in t.sizing["windows"].items():
         wins.setdefault(acct, {})[wid] = _sizing_window_doc(w)
-    doc = {"v": SIZING_FILE_VERSION, "prices": _api_prices_hash(), "windows": wins}
+    doc = {"v": SIZING_FILE_VERSION, "prices": _api_prices_hash(), "windows": wins,
+           "burn": _burn_doc(t.sizing["burn"])}
     if open_state:
         doc["open"] = _sizing_open_doc(t)
     try:
         _store.write_json(t.sizing_file, doc)
+        t.sizing["burn_unsaved"] = False
+        t.sizing["saved_at"] = time.time()
         return True
     except Exception as e:  # noqa: BLE001
         log(f"WARN sizing: could not write {t.sizing_file}: {e}")
@@ -7602,13 +7620,24 @@ def _sizing_load(t):
         _sizing_set_aside(t, why)
         return
     opened = isinstance(doc.get("open"), dict)
+    # The pace's buckets (69 §4.2): a malformed `burn` is dropped with a log
+    # line and the rest of the file kept; a file without one (an older
+    # brain's) starts the pace afresh.
+    burn_dropped = None
+    if "burn" in doc:
+        burn, burn_dropped = _burn_from_doc(doc["burn"])
+        if burn is not None:
+            st["burn"] = burn
+        else:
+            log(f"WARN sizing: the pace's buckets in {t.sizing_file} were dropped: "
+                f"{burn_dropped} does not check")
     with t.sizing_lock:
         t.sizing = st
         # The weights from the re-priced samples (67 §3); an account the open
         # state didn't name joins its provider's fit at its first event.
         for prov in sorted({a["provider"] for a in st["accounts"].values() if a.get("provider")}):
             _sizing_refit(t, prov)
-        if opened or dropped or ranges_dropped:
+        if opened or dropped or ranges_dropped or burn_dropped:
             _sizing_save(t)  # the open state is good for this start only
     _events_mark(t)  # the fleet reads the sizes just read (67 §8)
     n = sum(len(w["samples"]) for w in st["windows"].values())
@@ -7787,6 +7816,7 @@ def sizing_payload(t):
     with t.sizing_lock:
         fd = {"path": t.sizing_file, "frozen": t.sizing_gate["frozen"] is not None,
               "frozen_why": t.sizing_gate["frozen"], "set_aside": t.sizing_gate["set_aside"]}
+        burn = _burn_payload(t, time.time())
     return dict({"as_of": time.time(), "unit": "api_usd", "prices": _api_prices_hash(),
                  "file": fd,
                  "constants": {"settle_s": SIZING_SETTLE_S, "fuzz": SIZING_FUZZ,
@@ -7800,8 +7830,11 @@ def sizing_payload(t):
                                "weight_share": SIZING_WEIGHT_SHARE,
                                "weight_steps_min": SIZING_WEIGHT_STEPS_MIN,
                                "weight_iters": SIZING_WEIGHT_ITERS,
-                               "weight_z": SIZING_WEIGHT_Z},
-                 "accounts": accts}, **extra)
+                               "weight_z": SIZING_WEIGHT_Z,
+                               "burn_hours": BURN_HOURS,
+                               "burn_min_servable_h": BURN_MIN_SERVABLE_H,
+                               "forecast_h": FORECAST_H},
+                 "accounts": accts, "burn": burn}, **extra)
 
 
 def _sizing_metric_lines(t):
@@ -7844,6 +7877,267 @@ def _sizing_metric_lines(t):
     return lines
 
 
+# ---- pace: served dollars over the hours a selection could serve (quota-model 69 §4.2) ----
+#
+# Per tenant, hourly buckets of priced served dollars for the last
+# BURN_HOURS, one ring per selection (_burn_selection: a served event's
+# `selection` when it names a class, else its member's bare lane), per
+# account, and one for the whole proxy (every served event, whatever its
+# selection or none). The pace
+# is the dollars over the hours the selection could serve, not over the
+# clock: behind a wall nothing is served, and an average over every hour
+# would fall exactly while a way through is worth most. A bucket is servable
+# when a served event of the ring landed in it, or when a render of the
+# figure in that hour counted at least one of the ring's accounts with room
+# that was neither resting nor refused (_burn_stamp). An hour with neither
+# keeps the last render's stamp, since the standings do not change without a
+# reading. The pace reads complete hours only: the current hour joins it
+# when it ends, so a hand sum over the same hours matches. Unpriced and
+# incomplete events add no dollars and are counted beside. The rings live in
+# t.sizing["burn"] and are saved with the sizing file under its own key,
+# `burn`: every take marks it unsaved, and the batch's save carries it,
+# with at most BURN_SAVE_S between saves while it waits (_sizing_after).
+
+BURN_HOURS = 168             # the pace's hours (69 §4.2)
+BURN_MIN_SERVABLE_H = 24     # servable hours before a pace is said; under it, no pace yet
+FORECAST_H = 7 * 86400       # the forecast's horizon after now (69 §4.3)
+BURN_SAVE_S = 60             # the longest a taken event's dollars wait for a save
+_BURN_LEVELS = ("selections", "accounts")
+
+
+def _burn_fresh():
+    """{"selections": {key: ring}, "accounts": {acct: ring}, "proxy": ring}.
+    A ring is {"hours": {hour: bucket}, "carry": the last render stamp of the
+    hours that rolled off (None for none)}; an hour is int(epoch // 3600); a
+    bucket is {usd, n (priced events), un (unpriced events), s (servable at
+    any stamp or event of the hour), l (the hour's last render stamp, None
+    for none)}."""
+    return {"selections": {}, "accounts": {}, "proxy": _burn_ring()}
+
+
+def _burn_ring():
+    return {"hours": {}, "carry": None}
+
+
+def _burn_bucket(ring, hour):
+    """The ring's bucket for the hour -> (bucket, created)."""
+    b = ring["hours"].get(hour)
+    if b is not None:
+        return b, False
+    b = ring["hours"][hour] = {"usd": 0.0, "n": 0, "un": 0, "s": False, "l": None}
+    return b, True
+
+
+def _burn_roll(ring, now):
+    """Let go of the hours before the last BURN_HOURS complete ones, keeping
+    the last render stamp among them as the carry the next hours inherit."""
+    first = int(now // 3600) - BURN_HOURS
+    for h in sorted(h for h in ring["hours"] if h < first):
+        b = ring["hours"].pop(h)
+        if b["l"] is not None:
+            ring["carry"] = b["l"]
+
+
+def _burn_selection(t, selection, member):
+    """The selection a served event counts for: its `selection` when that
+    names one of the tenant's classes; else the bare lane its member names
+    (lane:<x>); else none. A class's member id is lane:<x> for an Anthropic
+    lane and <provider>/<model> otherwise, so the member alone never names
+    the class, and a request for a bare model through a lane has a model
+    name, not a class, as its selection."""
+    if isinstance(selection, str) and any(c["class"] == selection for c in t.classes):
+        return selection
+    if isinstance(member, str) and member.startswith("lane:") and len(member) > 5:
+        return member
+    return None
+
+
+def _burn_take(t, selection, member, acct, usd, at, now=None):
+    """A served event into its rings: the proxy's, its account's and, when it
+    counts for one (_burn_selection), its selection's, in the hour of its
+    read_at (`at`). Each bucket it lands in is servable. Every take marks
+    the rings unsaved (_sizing_after). Caller holds _sizing_lock."""
+    now = time.time() if now is None else now
+    hour = int(float(at) // 3600)
+    if hour < int(now // 3600) - BURN_HOURS:
+        return  # older than the pace's hours: it counts in none of them
+    burn = t.sizing["burn"]
+    t.sizing["burn_unsaved"] = True
+    rings = [burn["proxy"], burn["accounts"].setdefault(acct, _burn_ring())]
+    sel = _burn_selection(t, selection, member)
+    if sel is not None:
+        rings.append(burn["selections"].setdefault(sel, _burn_ring()))
+    for ring in rings:
+        _burn_roll(ring, now)
+        b, _ = _burn_bucket(ring, hour)
+        if usd is None:
+            b["un"] += 1
+        else:
+            b["usd"] += usd
+            b["n"] += 1
+        b["s"] = True
+
+
+def _burn_servable_now(fleet):
+    """{"selections": {key: bool}, "accounts": {acct: bool}, "proxy": bool}
+    from a rendered figure: could the proxy serve each now, i.e. does it count
+    an account with room that is neither resting nor refused?"""
+    def open_(acct, e, resting):
+        return (e.get("room") or 0) > 0 and e.get("refused") is None and acct not in resting
+    sels = {k: any(open_(a, e, s.get("resting") or ()) for a, e in (s.get("accounts") or {}).items())
+            for k, s in (fleet.get("selections") or {}).items()}
+    resting = fleet["proxy"].get("resting") or ()
+    accts = {a: open_(a, e, resting) for a, e in (fleet.get("accounts") or {}).items()}
+    return {"selections": sels, "accounts": accts, "proxy": any(accts.values())}
+
+
+def _burn_stamp(t, fleet, now):
+    """Stamp the current hour's buckets from a rendered figure (69 §4.2).
+    Takes _sizing_lock; never call it under _plock. Marks no save: the stamps
+    go to the file with the next batch's save or at shutdown."""
+    flags = _burn_servable_now(fleet)
+    hour = int(now // 3600)
+    with t.sizing_lock:
+        burn = t.sizing["burn"]
+        pairs = [(burn["proxy"], flags["proxy"])]
+        for level in _BURN_LEVELS:
+            for key, v in flags[level].items():
+                pairs.append((burn[level].setdefault(key, _burn_ring()), v))
+        for ring, v in pairs:
+            b, _ = _burn_bucket(ring, hour)
+            b["s"] = b["s"] or v
+            b["l"] = v
+        # Every ring rolls, and one with no hour left (a selection gone a
+        # week) goes.
+        _burn_roll(burn["proxy"], now)
+        for level in _BURN_LEVELS:
+            for ring in burn[level].values():
+                _burn_roll(ring, now)
+            for key in [k for k, r in burn[level].items() if not r["hours"]]:
+                del burn[level][key]
+
+
+def _burn_hours(ring, now, hours):
+    """(usd, servable hours, priced events, unpriced events) over the ring's
+    last `hours` complete hours, the current one left out until it ends. An
+    hour with no bucket keeps the last render stamp before it."""
+    cur = int(now // 3600)
+    first = cur - BURN_HOURS
+    lo = cur - hours
+    stamp = ring.get("carry")
+    usd = 0.0
+    servable = n = un = 0
+    for h in range(first, cur):
+        b = ring["hours"].get(h)
+        if b is not None and b["l"] is not None:
+            stamp = b["l"]
+        if h < lo:
+            continue
+        if b is None:
+            servable += bool(stamp)
+            continue
+        usd += b["usd"]
+        n += b["n"]
+        un += b["un"]
+        servable += bool(b["s"])
+    return usd, servable, n, un
+
+
+def _burn_pace(ring, now):
+    """A ring's pace (69 §4.2, §6.1's `pace`): rate, the dollars over the
+    servable hours of the last BURN_HOURS complete hours, null under
+    BURN_MIN_SERVABLE_H of them (no pace yet, never 0); rate_24h the same
+    over the last 24 complete hours, for show; servable_h; unpriced, the share of the events that carried no
+    price (null with none)."""
+    if ring is None:
+        ring = _burn_ring()
+    usd, sh, n, un = _burn_hours(ring, now, BURN_HOURS)
+    usd24, sh24, _, _ = _burn_hours(ring, now, 24)
+    learned = sh >= BURN_MIN_SERVABLE_H
+    return {"rate": round(usd / sh, 4) if learned else None,
+            "rate_24h": round(usd24 / sh24, 4) if learned and sh24 else None,
+            "unit": "api_usd/h", "hours": BURN_HOURS, "servable_h": sh,
+            "unpriced": round(un / (n + un), 4) if n + un else None,
+            "basis": "learned" if learned else "no pace yet"}
+
+
+def _burn_paces(t, now):
+    """{"selections": {key: pace}, "accounts": {acct: pace}, "proxy": pace}.
+    Caller holds _sizing_lock."""
+    burn = t.sizing["burn"]
+    return {"selections": {k: _burn_pace(r, now) for k, r in sorted(burn["selections"].items())},
+            "accounts": {k: _burn_pace(r, now) for k, r in sorted(burn["accounts"].items())},
+            "proxy": _burn_pace(burn["proxy"], now)}
+
+
+def _burn_payload(t, now):
+    """/sizing's `burn`: per selection, per account and for the proxy, each
+    bucket {at (the hour's start), usd, events, unpriced, servable} and the
+    ring's pace. Caller holds _sizing_lock."""
+    burn = t.sizing["burn"]
+
+    def one(ring):
+        _burn_roll(ring, now)
+        buckets = [{"at": h * 3600, "usd": round(b["usd"], 6), "events": b["n"],
+                    "unpriced": b["un"], "servable": b["s"]}
+                   for h, b in sorted(ring["hours"].items())]
+        return dict({"buckets": buckets}, **_burn_pace(ring, now))
+    return {"selections": {k: one(r) for k, r in sorted(burn["selections"].items())},
+            "accounts": {k: one(r) for k, r in sorted(burn["accounts"].items())},
+            "proxy": one(burn["proxy"])}
+
+
+def _burn_doc(burn):
+    """The rings as sizing.json's `burn`: each {carry, hours: [[hour, usd, n,
+    un, s, l], ...]}."""
+    def ring(r):
+        return {"carry": r["carry"],
+                "hours": [[h, round(b["usd"], 6), b["n"], b["un"], b["s"], b["l"]]
+                          for h, b in sorted(r["hours"].items())]}
+    return {"selections": {k: ring(r) for k, r in sorted(burn["selections"].items())},
+            "accounts": {k: ring(r) for k, r in sorted(burn["accounts"].items())},
+            "proxy": ring(burn["proxy"])}
+
+
+def _burn_from_doc(raw):
+    """sizing.json's `burn` -> (rings, None), or (None, why) when it does not
+    check: the caller drops it and keeps the rest of the file."""
+    def ring(r, where):
+        if not isinstance(r, dict) or not isinstance(r.get("hours"), list) \
+                or r.get("carry") not in (None, True, False):
+            return None, where
+        out = _burn_ring()
+        out["carry"] = r["carry"]
+        for row in r["hours"]:
+            if not (isinstance(row, list) and len(row) == 6
+                    and isinstance(row[0], int) and not isinstance(row[0], bool)
+                    and _is_num(row[1]) and row[1] >= 0
+                    and all(isinstance(x, int) and not isinstance(x, bool) and x >= 0
+                            for x in row[2:4])
+                    and isinstance(row[4], bool) and row[5] in (None, True, False)):
+                return None, f"{where}.hours"
+            out["hours"][row[0]] = {"usd": float(row[1]), "n": row[2], "un": row[3],
+                                    "s": row[4], "l": row[5]}
+        return out, None
+    if not isinstance(raw, dict):
+        return None, "burn"
+    burn = _burn_fresh()
+    got, why = ring(raw.get("proxy"), "burn.proxy")
+    if why:
+        return None, why
+    burn["proxy"] = got
+    for level in _BURN_LEVELS:
+        rings = raw.get(level)
+        if not isinstance(rings, dict):
+            return None, f"burn.{level}"
+        for key, r in rings.items():
+            got, why = ring(r, f"burn.{level}.{key}")
+            if why:
+                return None, why
+            burn[level][key] = got
+    return burn, None
+
+
 # ---- fleet: room across a selection, the proxy and each account (quota-model 65 §1, 67 §5-§8) ----
 #
 # The figure of 65 §1, per selection (every class and bare lane), for the
@@ -7870,8 +8164,11 @@ def _sizing_fleet_view(t):
     the per-point ones) as /sizing publishes them: the mix size and the size
     in each model the window's sizes name. Nothing a served event moves
     without closing a sample (the outside sum) is in it, so such an event
-    publishes no document (64 §2, 67 §8). Takes _lock, then _sizing_lock;
-    never call it under _plock."""
+    publishes no document (64 §2, 67 §8). `pace` is each selection's and the
+    proxy's (_burn_paces, 69 §4.2): it moves with every served event and the
+    clock, and the document's fields made from it are clock-only
+    (PREFERRED_CLOCK_ONLY). Takes _lock, then _sizing_lock; never call it
+    under _plock."""
     accts, extra = _sizing_snapshot(t, full=False)
     windows = {acct: {wid: {"basis": v["size_basis"], "mix": v["size"], "sizes": dict(v["sizes"]),
                             "samples": v["samples_n"]}
@@ -7881,7 +8178,9 @@ def _sizing_fleet_view(t):
                      "models": {m: {"basis": d["basis"], "dollars": d["dollars"]}
                                 for m, d in f["models"].items()}}
                  for p, f in extra["weights"].items()}
-    return {"windows": windows, "providers": providers}
+    with t.sizing_lock:
+        pace = _burn_paces(t, time.time())
+    return {"windows": windows, "providers": providers, "pace": pace}
 
 
 def _fleet_period_s(lim):
@@ -8303,12 +8602,197 @@ def _fleet_asks(accts, health, limits, bound=None):
     return sorted(out, key=lambda x: (x["kind"] != "auth", x["account"], x["model"] or ""))
 
 
-def _fleet_figure(standings, routes, models, view, limits, now, stale_max, health):
+# ---- the forecast: when a selection runs dry, for how long, and when room returns (69 §4.3) ----
+#
+# The walk takes the figure's counted accounts as they are now, each window
+# counted with its room and its capacity in the selection's dollars, and walks
+# forward to the horizon (now + FORECAST_H). The selection spends at its pace
+# from one account at a time: the one the brain prefers for it now, then the
+# others in the figure's listing order; when the account in turn runs dry it
+# moves to the next with room and does not move back when an earlier one
+# refills. A resting account waits for its rest to end, a refused one for its
+# refusal to end (never, when that end is unknown). A counted window refills
+# to its capacity at its reset: a refill sets room, it never adds to what is
+# left. A fixed window's next period follows at once, every period after
+# within the horizon. A first-use window's next period starts at the first
+# draw after a refill, so its following refill is that draw plus its period;
+# one whose reset is past or unknown is not running, and refills a period
+# after the walk first draws from it. In a drought the first draw is at once.
+# Spending a dollar takes a dollar from each counted window of the account,
+# since each window's room is in the same dollars, so the account's room
+# stays the least of them, as in the figure. Listed accounts add nothing.
+# Nothing here is a fact: the pace is learned, and the forecast is the
+# walk's estimate.
+
+_WALK_EPS = 1e-9
+
+
+def _fleet_walk_accounts(entries, standings, now, horizon):
+    """{acct: {"wins": {wid: {room, capacity, period, first_use, next (the
+    next refill, None for none known yet)}}, "from": the first instant it may
+    serve (inf for an unknown end)}} for the walk, from the counted accounts'
+    figure entries (with their `resting`) and their standings."""
+    out = {}
+    for acct, e in entries.items():
+        st = standings.get(acct) or {}
+        lims = _fleet_limits(st)
+        wins = {}
+        for wid, wv in sorted((e.get("windows") or {}).items()):
+            w = lims.get(wid) or {}
+            r, period = w.get("resets_at"), _fleet_period_s(w)
+            first_use = w.get("anchor") == "first_use"
+            if r is not None and r <= now:
+                if first_use or not period:
+                    r = None  # not running: a first-use window waits for its draw
+                else:
+                    r += period * math.ceil((now - r) / period)
+                    if r <= now:
+                        r += period
+            wins[wid] = {"room": float(wv["room"]), "capacity": float(wv["capacity"]),
+                         "period": period, "first_use": first_use,
+                         "next": float(r) if r is not None else None}
+        start = now
+        if e.get("refused") is not None:
+            until = e["refused"].get("until")
+            start = math.inf if until is None else max(now, float(until))
+        elif e.get("resting"):
+            until = e.get("resting_until")
+            start = math.inf if until is None else max(now, float(until))
+        out[acct] = {"wins": wins, "from": start}
+    return out
+
+
+def _fleet_walk(accts, order, rate, now, horizon, walls):
+    """The walk itself (69 §4.3) over _fleet_walk_accounts' accounts, in draw
+    order, at `rate` dollars an hour (> 0) -> spells [(from, to)], each dry
+    spell within the horizon. `walls` ({acct: the instant it ran dry, None
+    for not yet}, those dry now already set) gains each account's first
+    instant dry in the walk."""
+    b = rate / 3600.0
+
+    def room(a):
+        ws = accts[a]["wins"]
+        return min(w["room"] for w in ws.values()) if ws else 0.0
+
+    def can(a, t):
+        return accts[a]["from"] <= t and room(a) > _WALK_EPS
+
+    def pick(t, after):
+        if not order:
+            return None
+        i = 0 if after is None else (order.index(after) + 1) % len(order)
+        ring = order[i:] + order[:i]
+        return next((a for a in ring if can(a, t)), None)
+
+    def draw(a, t):
+        # Drawing from an account starts each of its idle first-use windows.
+        if a is None:
+            return
+        for w in accts[a]["wins"].values():
+            if w["first_use"] and w["next"] is None and w["period"]:
+                w["next"] = t + w["period"]
+
+    def spend(a, usd):
+        for w in accts[a]["wins"].values():
+            w["room"] = max(0.0, w["room"] - usd)
+
+    def upcoming(t):
+        ts = [w["next"] for a in accts.values() for w in a["wins"].values()
+              if w["next"] is not None and w["next"] > t]
+        ts += [a["from"] for a in accts.values() if t < a["from"] < horizon]
+        return min(ts + [horizon])
+
+    spells, dry_from = [], None
+    t, cur, last = now, pick(now, None), None
+    draw(cur, t)
+    while t < horizon:
+        if cur is None and dry_from is None:
+            dry_from = t
+        nxt = upcoming(t)
+        if cur is not None:
+            r = room(cur)
+            t_dry = t + r / b
+            if t_dry < nxt:
+                spend(cur, r)
+                t = t_dry
+                if walls[cur] is None:
+                    walls[cur] = t
+                last, cur = cur, pick(t, cur)
+                draw(cur, t)
+                continue
+            spend(cur, b * (nxt - t))
+        t = nxt
+        if t >= horizon:
+            break
+        for a in accts.values():
+            for w in a["wins"].values():
+                if w["next"] is not None and w["next"] <= t:
+                    w["room"] = w["capacity"]
+                    if w["first_use"] or not w["period"]:
+                        w["next"] = None
+                    else:
+                        while w["next"] <= t:
+                            w["next"] += w["period"]
+        if cur is None:
+            cur = pick(t, last)
+            if cur is not None and dry_from is not None:
+                spells.append((dry_from, t))
+                dry_from = None
+        draw(cur, t)
+    if dry_from is not None:
+        spells.append((dry_from, horizon))
+    return spells
+
+
+def _fleet_forecast(entries, standings, preferred, pace, now):
+    """A level's `forecast` (69 §4.3) from its counted accounts' figure
+    entries ({acct: entry with `resting`}, in listing order), the account the
+    brain prefers for it now (None for the proxy, which draws in listing
+    order), its pace and now."""
+    horizon = now + FORECAST_H
+    order = sorted(entries)
+    if preferred in entries:
+        order = [preferred] + [a for a in order if a != preferred]
+    rate = pace.get("rate")
+    out = {"dry_at": None, "back_at": None, "dry_s": None, "unmet": None, "spells": None,
+           "walls": {}, "horizon_at": _fleet_secs(horizon), "rate": rate,
+           "rate_basis": "learned" if rate is not None else "no pace yet",
+           "basis": "learned" if rate is not None else "no pace"}
+    accts = _fleet_walk_accounts(entries, standings, now, horizon)
+    if rate is None or not order:
+        # No projection: only the accounts dry now (69 §4.3). With nothing
+        # counted there is nothing to walk.
+        out["walls"] = {a: (_fleet_secs(now) if entries[a]["room"] <= 0 else None) for a in order}
+        if rate is not None:
+            out["basis"] = "nothing counted"
+        return out
+    walls = {a: (now if entries[a]["room"] <= 0 else None) for a in order}
+    spells = _fleet_walk(accts, order, rate, now, horizon, walls) if rate > 0 else []
+    dry_s = sum(b - a for a, b in spells)
+    out.update(
+        dry_at=_fleet_secs(spells[0][0]) if spells else None,
+        back_at=_fleet_secs(spells[0][1]) if spells and spells[0][1] < horizon else None,
+        dry_s=int(round(dry_s)), unmet=round(rate * dry_s / 3600.0, 2),
+        spells=[{"from": _fleet_secs(a), "to": _fleet_secs(b)} for a, b in spells],
+        walls={a: _fleet_secs(w) for a, w in walls.items()})
+    return out
+
+
+def _fleet_figure(standings, routes, models, view, limits, now, stale_max, health,
+                  preferred=None):
     """The `fleet` section (67 §8, 68 §3) from plain data: standings and
     routes as the dial check reads them (ctx), models {route id: its
-    member's model} for class members, the sizing view (_sizing_fleet_view),
-    the live limits the brain has no window for (_limit_snap, 67 §9), and
-    each account's sign-in health {account: {kind, sign_in}} (_fleet_health)."""
+    member's model} for class members, the sizing view (_sizing_fleet_view,
+    with its `pace`), the live limits the brain has no window for
+    (_limit_snap, 67 §9), each account's sign-in health {account: {kind,
+    sign_in}} (_fleet_health), and the account the brain prefers for each
+    selection now ({selection: account}, _fleet_preferred), which the
+    forecast draws from first (69 §4.3)."""
+    paces = view.get("pace") or {}
+    preferred = preferred or {}
+
+    def pace_of(p):
+        return dict(p) if p is not None else _burn_pace(None, now)
     # The selections (67 §7): each class, and each bare lane. An account is
     # valued by the highest-priority member whose route can serve it now,
     # windows and limits alike, and is refused only when every member that
@@ -8344,6 +8828,10 @@ def _fleet_figure(standings, routes, models, view, limits, now, stale_max, healt
         sel = _fleet_sum(results)
         sel["asks"] = _fleet_asks(reach, health, limits, lambda a, lim, reach=reach: any(
             _fleet_limit_binds(lim, *held_by(rt)) for rt in reach[a]))
+        sel["pace"] = pace_of((paces.get("selections") or {}).get(key))
+        sel["forecast"] = _fleet_forecast(
+            {a: got[0] for a, (got, _) in results.items() if got is not None},
+            standings, preferred.get(key), sel["pace"], now)
         sel["accounts"] = {}
         for a, (got, _) in sorted(results.items()):
             if got is not None:
@@ -8413,6 +8901,10 @@ def _fleet_figure(standings, routes, models, view, limits, now, stale_max, healt
         accounts[a] = entry
     proxy = dict(_fleet_sum(results), valued="mix")
     proxy["asks"] = _fleet_asks(set(standings) | set(health), health, limits)
+    proxy["pace"] = pace_of(paces.get("proxy"))
+    proxy["forecast"] = _fleet_forecast(
+        {a: got[0] for a, (got, _) in results.items() if got is not None},
+        standings, None, proxy["pace"], now)
     return {"unit": "api_usd", "proxy": proxy, "selections": selections, "accounts": accounts}
 
 
@@ -8432,20 +8924,45 @@ def _fleet_health(account_health):
     return out
 
 
-def _fleet_payload(ctx, view, health):
+def _fleet_preferred(t, ctx):
+    """{selection: account} the brain prefers for each selection now, as the
+    document names it: a bare lane's verdict account (its incumbent first,
+    as routes[] has it), a class's pointer member's verdict account (None
+    while the class has no pointer). The forecast draws from it first (69
+    §4.3). Caller holds _plock."""
+    out = {}
+    for rid, rt in ctx["routes"].items():
+        if rt["kind"] != "lane":
+            continue
+        inc = (t.preferred["lanes"].get(rt["lane"]) or {}).get("account") \
+            if rt["provider"] == "anthropic" else \
+            (t.preferred.get("providers", {}).get(rt["provider"]) or {}).get("account")
+        out[rid], _ = _verdict(rt, ctx["checks"][rid], inc)
+    for c in ctx["classes"]:
+        verdicts = _class_verdicts(t, c, ctx)
+        ptr = _class_pointer(c, verdicts, ctx["money"]["pay_order"])
+        out[c["class"]] = verdicts[ptr]["account"] if ptr is not None else None
+    return out
+
+
+def _fleet_payload(ctx, view, health, preferred=None):
     """The `fleet` section of the document from the decision context, the
     sizing view and the sign-in health (_fleet_health), both taken before
-    _plock. Caller holds _plock."""
+    _plock, and the account the brain prefers for each selection
+    (_fleet_preferred). Caller holds _plock."""
     models = {f"{c['class']}/{_member_id(m)}": m.get("model")
               for c in ctx["classes"] for m in c["members"]}
     return _fleet_figure(ctx["standings"], ctx["routes"], models, view, ctx["limits"], ctx["now"],
-                         STALE_MAX, health)
+                         STALE_MAX, health, preferred)
 
 
 def _fleet_metric_lines(fleet, tid):
     """fleet_capacity_api_usd, fleet_room_api_usd and fleet_left_pct, by
     {level, name}: the proxy, each selection and each account at the proxy
-    level; a listed account's own left_pct only (67 §8, §13 Q7)."""
+    level; a listed account's own left_pct only (67 §8, §13 Q7). For the
+    proxy and each selection, fleet_pace_api_usd_per_h while a pace is
+    learned, and fleet_forecast_dry_s and fleet_forecast_unmet_api_usd while
+    the walk projects (69 §6.1). No rule reads them."""
     _line = _tenant_line(tid)
     rows = [("proxy", "proxy", fleet["proxy"])]
     rows += [("selection", k, s) for k, s in sorted(fleet["selections"].items())]
@@ -8458,6 +8975,12 @@ def _fleet_metric_lines(fleet, tid):
             lines.append(_line("fleet_room_api_usd", lab, v["room"]))
         if v.get("left_pct") is not None:
             lines.append(_line("fleet_left_pct", lab, v["left_pct"]))
+        if (v.get("pace") or {}).get("rate") is not None:
+            lines.append(_line("fleet_pace_api_usd_per_h", lab, v["pace"]["rate"]))
+        fc = v.get("forecast") or {}
+        if fc.get("dry_s") is not None:
+            lines.append(_line("fleet_forecast_dry_s", lab, fc["dry_s"]))
+            lines.append(_line("fleet_forecast_unmet_api_usd", lab, fc["unmet"]))
     return lines
 
 
@@ -8829,6 +9352,12 @@ EVENTS_RETRY_MS = 1000     # the reconnect delay the stream asks its client for
 #                                             next poll (that poll's result is
 #                                             itself a change)
 #   ledger.as_of                              round(now, 3): the time of the render
+#   fleet.proxy.{pace, forecast},             the pace and the walk forward from now
+#   fleet.selections[].{pace, forecast}       (quota-model 69 §4.2, §4.3): they move
+#                                             with the clock and with served events,
+#                                             and are recomputed at each render; a
+#                                             reading change that moves them moves
+#                                             the figure too, which is a change
 # A field the clock flips by a rule is NOT here: `stale`, a check whose `until`
 # has passed, the budget period. Those flip by a decision and are a change.
 # Nor may a field follow the clock some of the time: accounts[].next_poll_at is
@@ -8841,6 +9370,10 @@ PREFERRED_CLOCK_ONLY = (
     ("account_health", "accounts", "*", "age_s"),
     ("account_health", "accounts", "*", "next_retry_in_s"),
     ("ledger", "as_of"),
+    ("fleet", "proxy", "pace"),
+    ("fleet", "proxy", "forecast"),
+    ("fleet", "selections", "*", "pace"),
+    ("fleet", "selections", "*", "forecast"),
 )
 
 _EVENTS_BOOT = str(int(_start_time))  # the id's boot part, fixed at process start
@@ -9363,6 +9896,9 @@ def render(tenants):
     helptype("fleet_capacity_api_usd", "gauge", "Room with nothing used, in API dollars of the work each account would do: per level (proxy, selection, account) and name; sized accounts only (quota-model 65 §1, 67 §5).")
     helptype("fleet_room_api_usd", "gauge", "Room left now, in the same dollars as fleet_capacity_api_usd: (cap - used) x size, 0 while refused, summed over the sized accounts (quota-model 65 §1, 67 §5).")
     helptype("fleet_left_pct", "gauge", "Room left as a percent of the room with nothing used, for the proxy and each selection. For an account, its main window's own (cap - used) / cap, the provider's number: shown whether the account is counted, refused or listed, so it is not room / capacity (quota-model 67 §8, §13 Q7).")
+    helptype("fleet_pace_api_usd_per_h", "gauge", "A selection's or the whole proxy's pace: its priced served API dollars over the hours of the last week it could serve, present once 24 such hours are counted (quota-model 69 §4.2).")
+    helptype("fleet_forecast_dry_s", "gauge", "Seconds in the coming week a selection or the whole proxy is forecast to have no room, walking its accounts' room and resets forward at its pace; an estimate, present only with a pace (quota-model 69 §4.3).")
+    helptype("fleet_forecast_unmet_api_usd", "gauge", "The pace times the forecast's dry seconds: the API dollars of work the selection could not be served in the coming week, by the same estimate (quota-model 69 §4.3).")
     helptype("sizing_spread", "gauge", "The spread of a window's kept samples: their median absolute deviation over their median, with two or more samples.")
     helptype("sizing_samples", "gauge", "Samples kept for a window's size, one per clean step.")
     helptype("sizing_step_api_usd", "gauge", "The newest sample's API dollars per point of the window, at its provider's model weights (reference-model dollars; list dollars while no model is weighed).")
@@ -9565,7 +10101,8 @@ def _render_tenant(t):
         ctx = _policy_ctx(t, snapshot, time.time())
         # No health: the gauges read no asks, and account_health would take
         # _refresh_lock, which a token refresh holds across its network call.
-        fleet = _fleet_payload(ctx, view, {})
+        fleet = _fleet_payload(ctx, view, {}, _fleet_preferred(t, ctx))
+    _burn_stamp(t, fleet, ctx["now"])  # a render of the figure (69 §4.2)
     for acct, st in sorted(ctx["standings"].items()):
         if st.get("as_of") is None:
             continue
