@@ -1016,6 +1016,21 @@
      }
     ],
     "back_at": 1800604800,
+    "burn": {
+     "basis": "no history",
+     "expected": null,
+     "half_life_h": 3,
+     "history": {
+      "full_days": 0,
+      "hours": 1,
+      "imported_hours": 0,
+      "weekday_days": 0,
+      "weekend_days": 0
+     },
+     "now": null,
+     "ratio": null,
+     "unit": "api_usd/h"
+    },
     "capacity": 0.0,
     "coverage": {
      "counted": 0,
@@ -1026,16 +1041,8 @@
      "unread": 1
     },
     "forecast": {
-     "back_at": null,
-     "basis": "no pace",
-     "dry_at": null,
-     "dry_s": null,
-     "horizon_at": 1800604800,
-     "rate": null,
-     "rate_basis": "no pace yet",
-     "spells": null,
-     "unmet": null,
-     "walls": {}
+     "basis": "no history",
+     "horizon_at": 1800604800
     },
     "left_pct": null,
     "listed": [
@@ -1104,15 +1111,6 @@
      }
     ],
     "more_at": null,
-    "pace": {
-     "basis": "no pace yet",
-     "hours": 168,
-     "rate": null,
-     "rate_24h": null,
-     "servable_h": 0,
-     "unit": "api_usd/h",
-     "unpriced": null
-    },
     "resting": [],
     "room": 0.0,
     "stale": [],
@@ -1131,6 +1129,21 @@
       }
      ],
      "back_at": 1800604800,
+     "burn": {
+      "basis": "no history",
+      "expected": null,
+      "half_life_h": 3,
+      "history": {
+       "full_days": 0,
+       "hours": 1,
+       "imported_hours": 0,
+       "weekday_days": 0,
+       "weekend_days": 0
+      },
+      "now": null,
+      "ratio": null,
+      "unit": "api_usd/h"
+     },
      "capacity": 0.0,
      "coverage": {
       "counted": 0,
@@ -1141,16 +1154,8 @@
       "unread": 1
      },
      "forecast": {
-      "back_at": null,
-      "basis": "no pace",
-      "dry_at": null,
-      "dry_s": null,
-      "horizon_at": 1800604800,
-      "rate": null,
-      "rate_basis": "no pace yet",
-      "spells": null,
-      "unmet": null,
-      "walls": {}
+      "basis": "no history",
+      "horizon_at": 1800604800
      },
      "left_pct": null,
      "listed": [
@@ -1212,15 +1217,6 @@
       }
      ],
      "more_at": null,
-     "pace": {
-      "basis": "no pace yet",
-      "hours": 168,
-      "rate": null,
-      "rate_24h": null,
-      "servable_h": 0,
-      "unit": "api_usd/h",
-      "unpriced": null
-     },
      "resting": [],
      "room": 0.0,
      "stale": []
@@ -1229,6 +1225,21 @@
      "accounts": {},
      "asks": [],
      "back_at": 1800604800,
+     "burn": {
+      "basis": "no history",
+      "expected": null,
+      "half_life_h": 3,
+      "history": {
+       "full_days": 0,
+       "hours": 1,
+       "imported_hours": 0,
+       "weekday_days": 0,
+       "weekend_days": 0
+      },
+      "now": null,
+      "ratio": null,
+      "unit": "api_usd/h"
+     },
      "capacity": 0.0,
      "coverage": {
       "counted": 0,
@@ -1239,16 +1250,8 @@
       "unread": 0
      },
      "forecast": {
-      "back_at": null,
-      "basis": "no pace",
-      "dry_at": null,
-      "dry_s": null,
-      "horizon_at": 1800604800,
-      "rate": null,
-      "rate_basis": "no pace yet",
-      "spells": null,
-      "unmet": null,
-      "walls": {}
+      "basis": "no history",
+      "horizon_at": 1800604800
      },
      "left_pct": null,
      "listed": [
@@ -1277,15 +1280,6 @@
       }
      ],
      "more_at": null,
-     "pace": {
-      "basis": "no pace yet",
-      "hours": 168,
-      "rate": null,
-      "rate_24h": null,
-      "servable_h": 0,
-      "unit": "api_usd/h",
-      "unpriced": null
-     },
      "resting": [],
      "room": 0.0,
      "stale": []
@@ -1302,6 +1296,21 @@
       }
      ],
      "back_at": null,
+     "burn": {
+      "basis": "no history",
+      "expected": null,
+      "half_life_h": 3,
+      "history": {
+       "full_days": 0,
+       "hours": 1,
+       "imported_hours": 0,
+       "weekday_days": 0,
+       "weekend_days": 0
+      },
+      "now": null,
+      "ratio": null,
+      "unit": "api_usd/h"
+     },
      "capacity": 0.0,
      "coverage": {
       "counted": 0,
@@ -1312,16 +1321,8 @@
       "unread": 1
      },
      "forecast": {
-      "back_at": null,
-      "basis": "no pace",
-      "dry_at": null,
-      "dry_s": null,
-      "horizon_at": 1800604800,
-      "rate": null,
-      "rate_basis": "no pace yet",
-      "spells": null,
-      "unmet": null,
-      "walls": {}
+      "basis": "no history",
+      "horizon_at": 1800604800
      },
      "left_pct": null,
      "listed": [
@@ -1357,15 +1358,6 @@
       }
      ],
      "more_at": null,
-     "pace": {
-      "basis": "no pace yet",
-      "hours": 168,
-      "rate": null,
-      "rate_24h": null,
-      "servable_h": 0,
-      "unit": "api_usd/h",
-      "unpriced": null
-     },
      "resting": [],
      "room": 0.0,
      "stale": []
@@ -1389,6 +1381,21 @@
       }
      ],
      "back_at": 1800021600,
+     "burn": {
+      "basis": "no history",
+      "expected": null,
+      "half_life_h": 3,
+      "history": {
+       "full_days": 0,
+       "hours": 1,
+       "imported_hours": 0,
+       "weekday_days": 0,
+       "weekend_days": 0
+      },
+      "now": null,
+      "ratio": null,
+      "unit": "api_usd/h"
+     },
      "capacity": 0.0,
      "coverage": {
       "counted": 0,
@@ -1399,16 +1406,8 @@
       "unread": 1
      },
      "forecast": {
-      "back_at": null,
-      "basis": "no pace",
-      "dry_at": null,
-      "dry_s": null,
-      "horizon_at": 1800604800,
-      "rate": null,
-      "rate_basis": "no pace yet",
-      "spells": null,
-      "unmet": null,
-      "walls": {}
+      "basis": "no history",
+      "horizon_at": 1800604800
      },
      "left_pct": null,
      "listed": [
@@ -1448,15 +1447,6 @@
       }
      ],
      "more_at": null,
-     "pace": {
-      "basis": "no pace yet",
-      "hours": 168,
-      "rate": null,
-      "rate_24h": null,
-      "servable_h": 0,
-      "unit": "api_usd/h",
-      "unpriced": null
-     },
      "resting": [],
      "room": 0.0,
      "stale": []
@@ -1473,6 +1463,21 @@
       }
      ],
      "back_at": null,
+     "burn": {
+      "basis": "no history",
+      "expected": null,
+      "half_life_h": 3,
+      "history": {
+       "full_days": 0,
+       "hours": 1,
+       "imported_hours": 0,
+       "weekday_days": 0,
+       "weekend_days": 0
+      },
+      "now": null,
+      "ratio": null,
+      "unit": "api_usd/h"
+     },
      "capacity": 0.0,
      "coverage": {
       "counted": 0,
@@ -1483,16 +1488,8 @@
       "unread": 1
      },
      "forecast": {
-      "back_at": null,
-      "basis": "no pace",
-      "dry_at": null,
-      "dry_s": null,
-      "horizon_at": 1800604800,
-      "rate": null,
-      "rate_basis": "no pace yet",
-      "spells": null,
-      "unmet": null,
-      "walls": {}
+      "basis": "no history",
+      "horizon_at": 1800604800
      },
      "left_pct": null,
      "listed": [
@@ -1528,15 +1525,6 @@
       }
      ],
      "more_at": null,
-     "pace": {
-      "basis": "no pace yet",
-      "hours": 168,
-      "rate": null,
-      "rate_24h": null,
-      "servable_h": 0,
-      "unit": "api_usd/h",
-      "unpriced": null
-     },
      "resting": [],
      "room": 0.0,
      "stale": []
@@ -1553,6 +1541,21 @@
       }
      ],
      "back_at": 4089225600,
+     "burn": {
+      "basis": "no history",
+      "expected": null,
+      "half_life_h": 3,
+      "history": {
+       "full_days": 0,
+       "hours": 1,
+       "imported_hours": 0,
+       "weekday_days": 0,
+       "weekend_days": 0
+      },
+      "now": null,
+      "ratio": null,
+      "unit": "api_usd/h"
+     },
      "capacity": 0.0,
      "coverage": {
       "counted": 0,
@@ -1563,16 +1566,8 @@
       "unread": 1
      },
      "forecast": {
-      "back_at": null,
-      "basis": "no pace",
-      "dry_at": null,
-      "dry_s": null,
-      "horizon_at": 1800604800,
-      "rate": null,
-      "rate_basis": "no pace yet",
-      "spells": null,
-      "unmet": null,
-      "walls": {}
+      "basis": "no history",
+      "horizon_at": 1800604800
      },
      "left_pct": null,
      "listed": [
@@ -1611,15 +1606,6 @@
       }
      ],
      "more_at": null,
-     "pace": {
-      "basis": "no pace yet",
-      "hours": 168,
-      "rate": null,
-      "rate_24h": null,
-      "servable_h": 0,
-      "unit": "api_usd/h",
-      "unpriced": null
-     },
      "resting": [],
      "room": 0.0,
      "stale": []
@@ -1636,6 +1622,21 @@
       }
      ],
      "back_at": null,
+     "burn": {
+      "basis": "no history",
+      "expected": null,
+      "half_life_h": 3,
+      "history": {
+       "full_days": 0,
+       "hours": 1,
+       "imported_hours": 0,
+       "weekday_days": 0,
+       "weekend_days": 0
+      },
+      "now": null,
+      "ratio": null,
+      "unit": "api_usd/h"
+     },
      "capacity": 0.0,
      "coverage": {
       "counted": 0,
@@ -1646,16 +1647,8 @@
       "unread": 1
      },
      "forecast": {
-      "back_at": null,
-      "basis": "no pace",
-      "dry_at": null,
-      "dry_s": null,
-      "horizon_at": 1800604800,
-      "rate": null,
-      "rate_basis": "no pace yet",
-      "spells": null,
-      "unmet": null,
-      "walls": {}
+      "basis": "no history",
+      "horizon_at": 1800604800
      },
      "left_pct": null,
      "listed": [
@@ -1697,15 +1690,6 @@
       }
      ],
      "more_at": null,
-     "pace": {
-      "basis": "no pace yet",
-      "hours": 168,
-      "rate": null,
-      "rate_24h": null,
-      "servable_h": 0,
-      "unit": "api_usd/h",
-      "unpriced": null
-     },
      "resting": [],
      "room": 0.0,
      "stale": []

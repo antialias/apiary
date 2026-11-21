@@ -133,6 +133,26 @@ with the brain on the moved document; then remove them:
 Before then, `migrate_classes.py revert --creds-dir /creds` (brain stopped) puts them back as
 they were. While a `classes.json` is still at the top of the volume, the brain warns of it in
 its log and on the classes page.
+## The forecast's days
+
+The brain keeps four weeks of served dollars by the hour and forecasts the coming week from
+your own days, cut at 04:00 local time and typed weekday or weekend. Local is the brain's `TZ`,
+UTC when unset. Set it to your zone under the brain's `environment` in `docker-compose.yml`,
+for example `TZ: Europe/Berlin`, then `docker compose up -d`.
+
+A brain starts its history empty. If you keep your own record of served work, bring it in once
+with `POST /t/$T/sizing/burn` (switch key in `X-Switch-Key`):
+
+    {"proxy": [[hour, usd, n, un, s], ...], "accounts": {"<account>": [...]}, "selections": {"<class>": [...]}}
+
+`hour` is `int(epoch / 3600)` of the hour's start, `usd` that hour's served dollars at API list
+prices, `n` the requests and `un` the unpriced ones. `s` is your judgement of whether the hour
+could have been served: true when some account had room at any moment of it, or anything was
+served. A row lands only in an hour the brain has no record of, so a second run adds nothing.
+The brain refuses the whole body if any row is wrong: the current hour or later, an unknown
+account, a selection that is none of your classes or bare lanes, or a row of the wrong shape.
+It replies `{added, skipped, rings}`.
+
 ## Where state lives
 
 Everything is on the Compose volume `apiary_data`, mounted at `/creds` in both services:

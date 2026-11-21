@@ -56,6 +56,7 @@ import hmac
 import json
 import math
 import os
+import random
 import re
 import secrets
 import shutil
@@ -89,8 +90,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 # Every request that carries a provider's key or token in its headers goes
 # through this name: it follows no redirect. A patch seam like urlopen.
 key_urlopen = urllib.request.build_opener(_NoRedirect).open
+from array import array
 from collections import OrderedDict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -338,6 +340,10 @@ def _tenant_fresh(tid, name, lan, tap, dir_):
     t.served = _served_fresh()
     t.sizing_gate = {"closing": False, "inflight": 0, "frozen": None, "set_aside": None}
     t.sizing = _sizing_fresh()
+    # The forecast worker's result and the inputs a render left for it (69 §4.9).
+    t.forecast_lock = threading.Lock()
+    t.forecast = None
+    t.forecast_want = None
     t.events_pub = {"seq": 0, "data": None, "digest": None, "ledger_as_of": None}
     t.events_subs = set()
     t.reauth_pending = {}
@@ -2889,6 +2895,24 @@ def _anthropic_events(raw, windows, name="anthropic"):
             "events_used": None}
 
 
+def _anthropic_weekly_shares(raw):
+    """{scoped window id: {used_pct_of_weekly, allowance_pct_of_weekly}} from
+    weekly_scoped_shares, for the windows whose entry states both: the
+    scoped family's use and its window's allowance, each as a percent of
+    the weekly window. The forecast's walk drains a scoped window by it
+    (69 §4.6)."""
+    shares = raw.get("weekly_scoped_shares")
+    by_index = {}
+    for s in shares if isinstance(shares, list) else ():
+        if isinstance(s, dict) and isinstance(s.get("limit_index"), int) \
+                and not isinstance(s["limit_index"], bool):
+            used, allow = _num(s.get("used_percent_of_weekly")), _num(s.get("allowance_percent_of_weekly"))
+            if used is not None and allow:
+                by_index[s["limit_index"]] = {"used_pct_of_weekly": used,
+                                              "allowance_pct_of_weekly": allow}
+    return {wid: by_index[i] for wid, i in _anthropic_scoped_index(raw).items() if i in by_index}
+
+
 def _anthropic_reading(raw, as_of, tier=""):
     """GET /api/oauth/usage -> the §1.5 reading of one Anthropic subscription."""
     raw = raw if isinstance(raw, dict) else {}
@@ -2930,6 +2954,9 @@ def _anthropic_reading(raw, as_of, tier=""):
     # not reported: the 5h window is null while idle and opens at first use
     # (10 §2), so it binds nothing and is not unknown. A reported window whose
     # utilization is null is unknown, never 0 (§1.5).
+    for wid, share in _anthropic_weekly_shares(raw).items():
+        if wid in windows:
+            windows[wid]["weekly_share"] = share
     _anthropic_programs_seen(raw)
     try:
         events = _anthropic_events(raw, windows)
@@ -5375,7 +5402,9 @@ def _preferred_payload(t):
         # Every number below reads the polls with the reports merged in
         # (ctx["snap"], quota-model 64 §5); account_health reads _state alone.
         ctx = _policy_ctx(t, snap, now)
-        fleet = _fleet_payload(ctx, view, _fleet_health(account_health), _fleet_preferred(t, ctx))
+        walk = {}
+        fleet = _fleet_payload(ctx, view, _fleet_health(account_health), walk)
+        preferred = _fleet_preferred(t, ctx)
         snap = ctx["snap"]
         accounts = [r for r in snap if _target_kind(r) == "anthropic_account"]
         weekly = {r["name"]: _weekly(r) for r in accounts}
@@ -5433,6 +5462,7 @@ def _preferred_payload(t):
                       for pid, ps in prov_states.items()}
     p["fleet"] = fleet
     _burn_stamp(t, fleet, now)  # a render of the figure (69 §4.2), outside _plock
+    _forecast_attach(t, fleet, walk, ctx["standings"], view, preferred, now)
     p["prices"] = _prices_payload()
     # The prepaid notices (notices.py): every prepaid account's state, what it
     # serves, where it is paid, and each notice sent.
@@ -6184,9 +6214,10 @@ def _sizing_fresh():
     providers whose samples changed since their fit, fitted again as the
     batch ends (_sizing_after). While a batch runs, "dirty" says the file
     needs a save and "resized" that a window's samples or weights changed,
-    so the document's fleet may have (67 §8). burn: the pace's hourly
-    buckets (_burn_fresh, quota-model 69 §4.2), saved under the file's
-    `burn`."""
+    so the document's fleet may have (67 §8). burn: the hourly rings of
+    served dollars (_burn_fresh, quota-model 69 §4.2), saved under the
+    file's `burn`; pool_cache the owner's days read from them (_burn_pool),
+    never saved, and burn_gen what moves it outside the day's turn."""
     return {"accounts": {}, "windows": {}, "boots": OrderedDict(), "gaps": [],
             "reporters": {}, "restarts": [], "restarted": set(), "weights": {},
             "stale": set(), "burn": _burn_fresh()}
@@ -7212,7 +7243,7 @@ def _sizing_after(t, acct, moved):
     if moved:
         _sizing_prune(t, acct)
         _sizing_prune_gaps(t)
-    # The pace's rings ride on the batch's save; with none due, they wait at
+    # The history's rings ride on the batch's save; with none due, they wait at
     # most BURN_SAVE_S since the last one (69 §4.2), never a save per event.
     if t.sizing.pop("dirty", False) or (
             t.sizing.get("burn_unsaved")
@@ -7240,7 +7271,7 @@ def _sizing_take(t, acct, provider, ev, usd, why, speed, tier, reporter="", boun
     rt = ev["read_at"]
     model_speed = speed if speed is not None else ev["speed"]
     tokens, span = ev["tokens"], None
-    priced = usd  # the pace counts list dollars only, never a bound's middle (69 §4.2)
+    priced = usd  # the history counts list dollars only, never a bound's middle (69 §4.2)
     if bound is not None:
         usd, span, model_speed, tier, tokens = bound
     e = {"r": float(rt), "h": float(ev["head_at"]),
@@ -7620,16 +7651,16 @@ def _sizing_load(t):
         _sizing_set_aside(t, why)
         return
     opened = isinstance(doc.get("open"), dict)
-    # The pace's buckets (69 §4.2): a malformed `burn` is dropped with a log
+    # The history's rings (69 §4.2): a malformed `burn` is dropped with a log
     # line and the rest of the file kept; a file without one (an older
-    # brain's) starts the pace afresh.
+    # brain's) starts the history afresh.
     burn_dropped = None
     if "burn" in doc:
         burn, burn_dropped = _burn_from_doc(doc["burn"])
         if burn is not None:
             st["burn"] = burn
         else:
-            log(f"WARN sizing: the pace's buckets in {t.sizing_file} were dropped: "
+            log(f"WARN sizing: the served-dollar history in {t.sizing_file} was dropped: "
                 f"{burn_dropped} does not check")
     with t.sizing_lock:
         t.sizing = st
@@ -7832,8 +7863,12 @@ def sizing_payload(t):
                                "weight_iters": SIZING_WEIGHT_ITERS,
                                "weight_z": SIZING_WEIGHT_Z,
                                "burn_hours": BURN_HOURS,
-                               "burn_min_servable_h": BURN_MIN_SERVABLE_H,
-                               "forecast_h": FORECAST_H},
+                               "forecast_h": FORECAST_H,
+                               "live_half_life_h": LIVE_HALF_LIFE_H,
+                               "forecast_samples": FORECAST_SAMPLES,
+                               "forecast_min_days": FORECAST_MIN_DAYS,
+                               "day_cut_h": DAY_CUT_H,
+                               "day_min_servable_h": DAY_MIN_SERVABLE_H},
                  "accounts": accts, "burn": burn}, **extra)
 
 
@@ -7874,35 +7909,63 @@ def _sizing_metric_lines(t):
         for m, d in sorted(f["models"].items()):
             if d["basis"] != "unweighed":
                 lines.append(_line("sizing_weight", {"provider": prov, "model": m}, round(d["ratio"], 6)))
+    with t.sizing_lock:
+        imported = t.sizing.get("imported_total", 0)
+    lines.append(_line("burn_imported_hours_total", {}, imported))
+    with t.forecast_lock:
+        fc = t.forecast
+    if fc is not None:
+        lines.append(_line("forecast_compute_seconds", {}, round(fc["seconds"], 3)))
     return lines
 
 
-# ---- pace: served dollars over the hours a selection could serve (quota-model 69 §4.2) ----
+# ---- the history: served dollars by the hour, and the owner's days (quota-model 69 §4.2-§4.4) ----
 #
 # Per tenant, hourly buckets of priced served dollars for the last
 # BURN_HOURS, one ring per selection (_burn_selection: a served event's
 # `selection` when it names a class, else its member's bare lane), per
 # account, and one for the whole proxy (every served event, whatever its
-# selection or none). The pace
-# is the dollars over the hours the selection could serve, not over the
-# clock: behind a wall nothing is served, and an average over every hour
-# would fall exactly while a way through is worth most. A bucket is servable
-# when a served event of the ring landed in it, or when a render of the
-# figure in that hour counted at least one of the ring's accounts with room
-# that was neither resting nor refused (_burn_stamp). An hour with neither
-# keeps the last render's stamp, since the standings do not change without a
-# reading. The pace reads complete hours only: the current hour joins it
-# when it ends, so a hand sum over the same hours matches. Unpriced and
-# incomplete events add no dollars and are counted beside. The rings live in
-# t.sizing["burn"] and are saved with the sizing file under its own key,
-# `burn`: every take marks it unsaved, and the batch's save carries it,
-# with at most BURN_SAVE_S between saves while it waits (_sizing_after).
+# selection or none). A bucket is servable when a served event of the ring
+# landed in it, or when a render of the figure in that hour counted at least
+# one of the ring's accounts with room that was neither resting nor refused
+# (_burn_stamp); an hour with neither keeps the last render's stamp, since
+# the standings do not change without a reading. A bucket the brain did not
+# see itself was imported (POST /sizing/burn, `i`), with the install's own
+# servable flag by the same rule. Unpriced and incomplete events add no
+# dollars and are counted beside. The rings live in t.sizing["burn"] and are
+# saved with the sizing file under its own key, `burn`: every take marks it
+# unsaved, and the batch's save carries it, with at most BURN_SAVE_S between
+# saves while it waits (_sizing_after).
+#
+# What is read from the rings: the burn right now (_burn_now, an
+# exponentially weighted mean of the last 24 buckets' servable hours), and
+# the owner's days (_burn_pool): a day runs from DAY_CUT_H to DAY_CUT_H in
+# the brain's local time (the process's TZ, UTC without one), typed weekday
+# or weekend by the calendar day its cut falls on; the pool is the last
+# POOL_DAYS before today whose 24 hours all have a bucket in the proxy's
+# ring, each with DAY_MIN_SERVABLE_H servable hours; the profile, per ring
+# and day type, is each hour's mean over the servable hours of those days,
+# smoothed 1-2-1 around the clock; and a pool day's hours the ring could not
+# be served in are filled from the profile at the day's own level. A day on
+# a clock change has 23 or 25 hours: the short one is never whole, and the
+# long one's repeated hour is summed.
 
-BURN_HOURS = 168             # the pace's hours (69 §4.2)
-BURN_MIN_SERVABLE_H = 24     # servable hours before a pace is said; under it, no pace yet
-FORECAST_H = 7 * 86400       # the forecast's horizon after now (69 §4.3)
+BURN_HOURS = 672             # four weeks of hours (69 §4.2)
+FORECAST_H = 7 * 86400       # the forecast's horizon after now (69 §4.5)
+FORECAST_SLOTS = FORECAST_H // 3600
 BURN_SAVE_S = 60             # the longest a taken event's dollars wait for a save
+LIVE_HALF_LIFE_H = 3         # the burn right now's half-life, hours (69 §4.3)
+DAY_CUT_H = 4                # a day runs from 04:00 to 04:00, local time (69 §4.4)
+DAY_MIN_SERVABLE_H = 16      # servable hours a day needs to be in the pool
+POOL_DAYS = 27               # the days before today the pool is drawn from
+FORECAST_MIN_DAYS = 3        # a day type with fewer full days takes the whole pool
+FORECAST_SAMPLES = 400       # sampled weeks (69 §4.5)
+FILL_LEVEL_MIN = 0.25        # the censor fill's day level, held within these
+FILL_LEVEL_MAX = 4.0
+BURN_IMPORT_MAX = 4 << 20    # POST /sizing/burn's largest body
 _BURN_LEVELS = ("selections", "accounts")
+_DAY_TYPES = ("weekday", "weekend")
+_DAYKEY = {}                 # hour -> (day, hour of day), local time; _burn_tz_reset clears it
 
 
 def _burn_fresh():
@@ -7911,7 +7974,7 @@ def _burn_fresh():
     hours that rolled off (None for none)}; an hour is int(epoch // 3600); a
     bucket is {usd, n (priced events), un (unpriced events), s (servable at
     any stamp or event of the hour), l (the hour's last render stamp, None
-    for none)}."""
+    for none), i (imported, not seen by this brain)}."""
     return {"selections": {}, "accounts": {}, "proxy": _burn_ring()}
 
 
@@ -7924,7 +7987,7 @@ def _burn_bucket(ring, hour):
     b = ring["hours"].get(hour)
     if b is not None:
         return b, False
-    b = ring["hours"][hour] = {"usd": 0.0, "n": 0, "un": 0, "s": False, "l": None}
+    b = ring["hours"][hour] = {"usd": 0.0, "n": 0, "un": 0, "s": False, "l": None, "i": False}
     return b, True
 
 
@@ -7936,6 +7999,28 @@ def _burn_roll(ring, now):
         b = ring["hours"].pop(h)
         if b["l"] is not None:
             ring["carry"] = b["l"]
+
+
+def _burn_tz_reset():
+    """Forget the hours' local days: for a change of the process's TZ."""
+    _DAYKEY.clear()
+    time.tzset()
+
+
+def _burn_daykey(hour):
+    """(day, hour of day) of an hour's start in local time: the day is the
+    calendar date of the instant DAY_CUT_H hours earlier."""
+    k = _DAYKEY.get(hour)
+    if k is None:
+        if len(_DAYKEY) > 100000:
+            _DAYKEY.clear()
+        lt = datetime.fromtimestamp(hour * 3600)
+        k = _DAYKEY[hour] = ((lt - timedelta(hours=DAY_CUT_H)).date(), lt.hour)
+    return k
+
+
+def _burn_day_type(day):
+    return "weekday" if day.weekday() < 5 else "weekend"
 
 
 def _burn_selection(t, selection, member):
@@ -7956,13 +8041,16 @@ def _burn_take(t, selection, member, acct, usd, at, now=None):
     """A served event into its rings: the proxy's, its account's and, when it
     counts for one (_burn_selection), its selection's, in the hour of its
     read_at (`at`). Each bucket it lands in is servable. Every take marks
-    the rings unsaved (_sizing_after). Caller holds _sizing_lock."""
+    the rings unsaved (_sizing_after); one into a day before today moves
+    the pool (_burn_pool). Caller holds _sizing_lock."""
     now = time.time() if now is None else now
     hour = int(float(at) // 3600)
     if hour < int(now // 3600) - BURN_HOURS:
-        return  # older than the pace's hours: it counts in none of them
+        return  # older than the rings' hours: it counts in none of them
     burn = t.sizing["burn"]
     t.sizing["burn_unsaved"] = True
+    if _burn_daykey(hour)[0] != _burn_daykey(int(now // 3600))[0]:
+        t.sizing["burn_gen"] = t.sizing.get("burn_gen", 0) + 1
     rings = [burn["proxy"], burn["accounts"].setdefault(acct, _burn_ring())]
     sel = _burn_selection(t, selection, member)
     if sel is not None:
@@ -8007,8 +8095,8 @@ def _burn_stamp(t, fleet, now):
             b, _ = _burn_bucket(ring, hour)
             b["s"] = b["s"] or v
             b["l"] = v
-        # Every ring rolls, and one with no hour left (a selection gone a
-        # week) goes.
+        # Every ring rolls, and one with no hour left (a selection gone four
+        # weeks) goes.
         _burn_roll(burn["proxy"], now)
         for level in _BURN_LEVELS:
             for ring in burn[level].values():
@@ -8017,91 +8105,301 @@ def _burn_stamp(t, fleet, now):
                 del burn[level][key]
 
 
-def _burn_hours(ring, now, hours):
-    """(usd, servable hours, priced events, unpriced events) over the ring's
-    last `hours` complete hours, the current one left out until it ends. An
-    hour with no bucket keeps the last render stamp before it."""
-    cur = int(now // 3600)
-    first = cur - BURN_HOURS
-    lo = cur - hours
+def _burn_servable(ring, hours):
+    """{hour: servable} over `hours` (ascending): a bucket's own flag, an
+    hour with none the last render stamp before it."""
     stamp = ring.get("carry")
-    usd = 0.0
-    servable = n = un = 0
-    for h in range(first, cur):
-        b = ring["hours"].get(h)
-        if b is not None and b["l"] is not None:
-            stamp = b["l"]
-        if h < lo:
+    own = ring["hours"]
+    out = {}
+    first = hours[0] if hours else 0
+    for h in sorted(h for h in own if h < first):
+        if own[h]["l"] is not None:
+            stamp = own[h]["l"]
+    for h in hours:
+        b = own.get(h)
+        if b is not None:
+            if b["l"] is not None:
+                stamp = b["l"]
+            out[h] = b["s"]
+        else:
+            out[h] = bool(stamp)
+    return out
+
+
+def _burn_by_day(ring, days):
+    """{day: {hour of day: [usd, servable, imported]}} of the ring's buckets
+    in the given days; a clock change's repeated hour is summed."""
+    out = {}
+    for h, b in ring["hours"].items():
+        day, hod = _burn_daykey(h)
+        if day not in days:
             continue
-        if b is None:
-            servable += bool(stamp)
-            continue
-        usd += b["usd"]
-        n += b["n"]
-        un += b["un"]
-        servable += bool(b["s"])
-    return usd, servable, n, un
+        cell = out.setdefault(day, {}).get(hod)
+        if cell is None:
+            out[day][hod] = [b["usd"], b["s"], b.get("i", False)]
+        else:
+            cell[0] += b["usd"]
+            cell[1] = cell[1] or b["s"]
+            cell[2] = cell[2] or b.get("i", False)
+    return out
 
 
-def _burn_pace(ring, now):
-    """A ring's pace (69 §4.2, §6.1's `pace`): rate, the dollars over the
-    servable hours of the last BURN_HOURS complete hours, null under
-    BURN_MIN_SERVABLE_H of them (no pace yet, never 0); rate_24h the same
-    over the last 24 complete hours, for show; servable_h; unpriced, the share of the events that carried no
-    price (null with none)."""
-    if ring is None:
-        ring = _burn_ring()
-    usd, sh, n, un = _burn_hours(ring, now, BURN_HOURS)
-    usd24, sh24, _, _ = _burn_hours(ring, now, 24)
-    learned = sh >= BURN_MIN_SERVABLE_H
-    return {"rate": round(usd / sh, 4) if learned else None,
-            "rate_24h": round(usd24 / sh24, 4) if learned and sh24 else None,
-            "unit": "api_usd/h", "hours": BURN_HOURS, "servable_h": sh,
-            "unpriced": round(un / (n + un), 4) if n + un else None,
-            "basis": "learned" if learned else "no pace yet"}
+def _burn_smooth(raw):
+    """24 hourly means (None where no servable sample) -> the profile: each
+    hour half itself and a quarter each neighbour, around the clock, over the
+    ones that have a sample; an hour with none of the three takes the mean
+    hour; 0 with no sample at all."""
+    seen = [v for v in raw if v is not None]
+    if not seen:
+        return [0.0] * 24
+    mean = sum(seen) / len(seen)
+    out = []
+    for h in range(24):
+        num = den = 0.0
+        for v, w in ((raw[h - 1], 1), (raw[h], 2), (raw[(h + 1) % 24], 1)):
+            if v is not None:
+                num += v * w
+                den += w
+        out.append(num / den if den else mean)
+    return out
 
 
-def _burn_paces(t, now):
-    """{"selections": {key: pace}, "accounts": {acct: pace}, "proxy": pace}.
-    Caller holds _sizing_lock."""
+def _burn_profile(by_day, days):
+    """A ring's profile over the given days (69 §4.4): each hour of day the
+    mean of its servable hours' dollars, smoothed (_burn_smooth)."""
+    raw = []
+    for h in range(24):
+        xs = [by_day[d][h][0] for d in days if h in by_day.get(d, ()) and by_day[d][h][1]]
+        raw.append(sum(xs) / len(xs) if xs else None)
+    return _burn_smooth(raw)
+
+
+def _burn_flat_profile(ring, now):
+    """Under one full day (69 §4.4's ladder): each hour of day the mean of
+    the ring's servable complete hours seen at it, an hour not seen the mean
+    of those seen."""
+    cur = int(now // 3600)
+    sums, counts = [0.0] * 24, [0] * 24
+    for h, b in ring["hours"].items():
+        if h < cur and b["s"]:
+            hod = _burn_daykey(h)[1]
+            sums[hod] += b["usd"]
+            counts[hod] += 1
+    seen = [sums[h] / counts[h] for h in range(24) if counts[h]]
+    if not seen:
+        return [0.0] * 24
+    mean = sum(seen) / len(seen)
+    return [sums[h] / counts[h] if counts[h] else mean for h in range(24)]
+
+
+def _burn_fill(hours, profile):
+    """A pool day's 24 hours for a ring, its unservable hours filled (69
+    §4.4): the profile's value at the day's own level, the day's servable
+    dollars over the profile's for the same hours, held within FILL_LEVEL_MIN
+    and FILL_LEVEL_MAX. An hour with no bucket spends nothing."""
+    sv = [h for h, v in hours.items() if v[1]]
+    if sv:
+        level = sum(hours[h][0] for h in sv) / max(1e-9, sum(profile[h] for h in sv))
+        level = min(FILL_LEVEL_MAX, max(FILL_LEVEL_MIN, level))
+    else:
+        level = 1.0  # no servable hour to read a level from: the profile itself
+    out = []
+    for h in range(24):
+        v = hours.get(h)
+        out.append(0.0 if v is None else v[0] if v[1] else profile[h] * level)
+    return out
+
+
+def _burn_rings(burn):
+    """{ring key: ring}: ("proxy", None), ("selections", key), ("accounts", acct)."""
+    out = {("proxy", None): burn["proxy"]}
+    for level in _BURN_LEVELS:
+        for k, r in burn[level].items():
+            out[(level, k)] = r
+    return out
+
+
+def _burn_pool(t, now):
+    """The owner's days (69 §4.4), kept on the sizing state and rebuilt when
+    today changes (at DAY_CUT_H), a bucket lands in a day before today (an
+    import, a late event), or at a start: {pool (the days, ascending), types
+    {day: type}, counts {type: days}, complete (the proxy's whole days),
+    profiles {ring key: {type: [24]}}, filled {ring key: {day: [24]}},
+    totals {day: the proxy's filled dollars}, draw {type: the days a slot of
+    that type draws from}, servable_h {day}, imported {day}, history (any
+    servable complete hour in the proxy's ring), flat (no pool day: the
+    profile is the hours seen)}. Every list in it is new, never changed in
+    place, so a reader may keep it outside the lock. Caller holds
+    _sizing_lock."""
+    cur = int(now // 3600)
+    today = _burn_daykey(cur)[0]
+    key = (today, t.sizing.get("burn_gen", 0))
+    c = t.sizing.get("pool_cache")
+    if c is not None and c["key"] == key and (c["pool"] or c["hour"] == cur):
+        return c
     burn = t.sizing["burn"]
-    return {"selections": {k: _burn_pace(r, now) for k, r in sorted(burn["selections"].items())},
-            "accounts": {k: _burn_pace(r, now) for k, r in sorted(burn["accounts"].items())},
-            "proxy": _burn_pace(burn["proxy"], now)}
+    window = {today - timedelta(days=k) for k in range(1, POOL_DAYS + 1)}
+    rings = _burn_rings(burn)
+    by = {rk: _burn_by_day(r, window) for rk, r in rings.items()}
+    proxy = by[("proxy", None)]
+    complete = sorted(d for d, hs in proxy.items() if len(hs) == 24)
+    servable_h = {d: sum(1 for v in proxy[d].values() if v[1]) for d in complete}
+    pool = [d for d in complete if servable_h[d] >= DAY_MIN_SERVABLE_H]
+    types = {d: _burn_day_type(d) for d in complete}
+    counts = {ty: sum(1 for d in pool if types[d] == ty) for ty in _DAY_TYPES}
+    if pool:
+        src = {ty: [d for d in pool if types[d] == ty] if counts[ty] >= FORECAST_MIN_DAYS
+               else pool for ty in _DAY_TYPES}
+        profiles = {rk: {ty: _burn_profile(by[rk], src[ty]) for ty in _DAY_TYPES} for rk in rings}
+    else:
+        profiles = {}
+        for rk, r in rings.items():
+            p = _burn_flat_profile(r, now)
+            profiles[rk] = {ty: p for ty in _DAY_TYPES}
+    filled = {rk: {d: _burn_fill(by[rk].get(d, {}), profiles[rk][types[d]]) for d in pool}
+              for rk in rings}
+    pr = burn["proxy"]["hours"]
+    # Every ring's pool days, to the cent: the forecast's key moves with any
+    # ring's history, a selection's import included (69 §4.9).
+    digest = hashlib.sha256(json.dumps(
+        [[str(rk), [[str(d), round(sum(v), 2)] for d, v in sorted(f.items())]]
+         for rk, f in sorted(filled.items(), key=lambda kv: str(kv[0]))]
+        + [[str(rk), [round(x, 4) for ty in _DAY_TYPES for x in p[ty]]]
+           for rk, p in sorted(profiles.items(), key=lambda kv: str(kv[0]))]
+        ).encode("utf-8")).hexdigest()
+    c = {"key": key, "hour": cur, "digest": digest, "today": today, "pool": pool, "types": types, "counts": counts,
+         "complete": complete, "profiles": profiles, "filled": filled,
+         "totals": {d: sum(filled[("proxy", None)][d]) for d in pool},
+         "draw": {ty: [d for d in pool if types[d] == ty] if counts[ty] >= FORECAST_MIN_DAYS
+                  else list(pool) for ty in _DAY_TYPES},
+         "servable_h": servable_h,
+         "imported": {d: any(v[2] for v in proxy[d].values()) for d in complete},
+         "history": any(b["s"] for h, b in pr.items() if h < cur),
+         "flat": not pool}
+    t.sizing["pool_cache"] = c
+    return c
+
+
+def _burn_slots(now):
+    """[(day, hour of day)] of the week's FORECAST_SLOTS hours from now: slot
+    i is the hour at now + i h."""
+    return [_burn_daykey(int((now + i * 3600) // 3600)) for i in range(FORECAST_SLOTS)]
+
+
+def _burn_seed(pool, now, samples=FORECAST_SAMPLES):
+    """(seed, its int, the days the horizon touches) for the draws (69 §4.5):
+    the first 64 bits of the SHA-256 of the pool (each day and its filled
+    total to the cent, in date order), the sample count and the days."""
+    days = sorted({d for d, _ in _burn_slots(now)})
+    src = json.dumps([[str(d), round(pool["totals"][d], 2)] for d in pool["pool"]]
+                     + [samples, [str(d) for d in days]])
+    hexed = hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
+    return hexed, int(hexed, 16), days
+
+
+def _burn_now(ring, pool, rk, now):
+    """The burn right now of a ring (69 §4.3): `now`, the mean of the last 24
+    buckets' dollars an hour over their servable hours, each weighted 2^(-age
+    / LIVE_HALF_LIFE_H) by the hours since it ended, the current hour at its
+    elapsed fraction (never under a tenth); `expected`, the same weights on
+    the profile's dollars for the same hours; `ratio`, now / expected. Null,
+    `basis: "no history"`, with no servable hour in the 24; never 0 by
+    assumption."""
+    now = int(now)
+    cur = now // 3600
+    hours = list(range(cur - 23, cur + 1))
+    serv = _burn_servable(ring, hours) if ring is not None else {h: False for h in hours}
+    prof = (pool["profiles"].get(rk) if pool["history"] else None)
+    num = den = pnum = 0.0
+    for h in hours:
+        if not serv[h]:
+            continue
+        end = min(now, (h + 1) * 3600)
+        length = max(0.1, (end - h * 3600) / 3600.0) if h == cur else 1.0
+        w = 0.5 ** ((now - end) / 3600.0 / LIVE_HALF_LIFE_H)
+        b = ring["hours"].get(h)
+        num += w * (b["usd"] if b is not None else 0.0)
+        den += w * length
+        if prof is not None:
+            day, hod = _burn_daykey(h)
+            pnum += w * length * prof[_burn_day_type(day)][hod]
+    rate = num / den if den else None
+    expected = pnum / den if den and prof is not None else None
+    return {"now": round(rate, 4) if rate is not None else None,
+            "expected": round(expected, 4) if expected is not None else None,
+            "ratio": round(rate / expected, 4) if rate is not None and expected else None,
+            "basis": "learned" if rate is not None else "no history"}
+
+
+def _burn_doc_row(ring, rk, pool, now):
+    """A fleet row's `burn` (69 §6.1)."""
+    out = dict(_burn_now(ring, pool, rk, now), unit="api_usd/h", half_life_h=LIVE_HALF_LIFE_H)
+    hours = (ring or {"hours": {}})["hours"]
+    out["history"] = {"hours": len(hours),
+                      "full_days": len(pool["pool"]),
+                      "weekday_days": pool["counts"]["weekday"],
+                      "weekend_days": pool["counts"]["weekend"],
+                      "imported_hours": sum(1 for b in hours.values() if b.get("i"))}
+    basis = out.pop("basis")
+    out["basis"] = basis
+    return out
 
 
 def _burn_payload(t, now):
     """/sizing's `burn`: per selection, per account and for the proxy, each
-    bucket {at (the hour's start), usd, events, unpriced, servable} and the
-    ring's pace. Caller holds _sizing_lock."""
+    bucket {at (the hour's start), usd, events, unpriced, servable,
+    imported}, the ring's burn right now and its profile; and the pool, each
+    day {day, type, usd (filled), servable_h, imported}, with the seed the
+    forecast draws its weeks with now. Caller holds _sizing_lock."""
     burn = t.sizing["burn"]
-
-    def one(ring):
+    for ring in _burn_rings(burn).values():
         _burn_roll(ring, now)
+    pool = _burn_pool(t, now)
+
+    def one(ring, rk):
         buckets = [{"at": h * 3600, "usd": round(b["usd"], 6), "events": b["n"],
-                    "unpriced": b["un"], "servable": b["s"]}
+                    "unpriced": b["un"], "servable": b["s"], "imported": b.get("i", False)}
                    for h, b in sorted(ring["hours"].items())]
-        return dict({"buckets": buckets}, **_burn_pace(ring, now))
-    return {"selections": {k: one(r) for k, r in sorted(burn["selections"].items())},
-            "accounts": {k: one(r) for k, r in sorted(burn["accounts"].items())},
-            "proxy": one(burn["proxy"])}
+        prof = pool["profiles"].get(rk) if pool["history"] else None
+        return dict({"buckets": buckets}, **_burn_now(ring, pool, rk, now),
+                    profile={ty: [round(v, 4) for v in prof[ty]] for ty in _DAY_TYPES}
+                    if prof is not None else None)
+    seed, _, _ = _burn_seed(pool, now)
+    return {"selections": {k: one(r, ("selections", k)) for k, r in sorted(burn["selections"].items())},
+            "accounts": {k: one(r, ("accounts", k)) for k, r in sorted(burn["accounts"].items())},
+            "proxy": one(burn["proxy"], ("proxy", None)),
+            "pool": [{"day": str(d), "type": pool["types"][d], "usd": round(pool["totals"][d], 2),
+                      "servable_h": pool["servable_h"][d], "imported": pool["imported"][d]}
+                     for d in pool["pool"]],
+            "seed": seed}
 
 
 def _burn_doc(burn):
     """The rings as sizing.json's `burn`: each {carry, hours: [[hour, usd, n,
-    un, s, l], ...]}."""
+    un, s, l, i], ...]}."""
     def ring(r):
         return {"carry": r["carry"],
-                "hours": [[h, round(b["usd"], 6), b["n"], b["un"], b["s"], b["l"]]
+                "hours": [[h, round(b["usd"], 6), b["n"], b["un"], b["s"], b["l"], b.get("i", False)]
                           for h, b in sorted(r["hours"].items())]}
     return {"selections": {k: ring(r) for k, r in sorted(burn["selections"].items())},
             "accounts": {k: ring(r) for k, r in sorted(burn["accounts"].items())},
             "proxy": ring(burn["proxy"])}
 
 
+def _burn_row_ok(row, n):
+    """Is a ring row [hour, usd, n, un, s, ...] of length n in the shape its
+    first five fields need?"""
+    return (isinstance(row, list) and len(row) == n
+            and isinstance(row[0], int) and not isinstance(row[0], bool)
+            and _is_num(row[1]) and math.isfinite(row[1]) and row[1] >= 0
+            and all(isinstance(x, int) and not isinstance(x, bool) and x >= 0 for x in row[2:4])
+            and isinstance(row[4], bool))
+
+
 def _burn_from_doc(raw):
     """sizing.json's `burn` -> (rings, None), or (None, why) when it does not
-    check: the caller drops it and keeps the rest of the file."""
+    check: the caller drops it and keeps the rest of the file. A row of six
+    (an older brain's) was seen by the brain: `i` false."""
     def ring(r, where):
         if not isinstance(r, dict) or not isinstance(r.get("hours"), list) \
                 or r.get("carry") not in (None, True, False):
@@ -8109,15 +8407,12 @@ def _burn_from_doc(raw):
         out = _burn_ring()
         out["carry"] = r["carry"]
         for row in r["hours"]:
-            if not (isinstance(row, list) and len(row) == 6
-                    and isinstance(row[0], int) and not isinstance(row[0], bool)
-                    and _is_num(row[1]) and row[1] >= 0
-                    and all(isinstance(x, int) and not isinstance(x, bool) and x >= 0
-                            for x in row[2:4])
-                    and isinstance(row[4], bool) and row[5] in (None, True, False)):
+            n = len(row) if isinstance(row, list) else 0
+            if not ((n == 6 or n == 7) and _burn_row_ok(row, n) and row[5] in (None, True, False)
+                    and (n == 6 or isinstance(row[6], bool))):
                 return None, f"{where}.hours"
             out["hours"][row[0]] = {"usd": float(row[1]), "n": row[2], "un": row[3],
-                                    "s": row[4], "l": row[5]}
+                                    "s": row[4], "l": row[5], "i": row[6] if n == 7 else False}
         return out, None
     if not isinstance(raw, dict):
         return None, "burn"
@@ -8136,6 +8431,78 @@ def _burn_from_doc(raw):
                 return None, why
             burn[level][key] = got
     return burn, None
+
+
+def burn_import_problem(t, body, now, known):
+    """Why a POST /sizing/burn body is refused whole, or None (69 §6.7):
+    {"proxy": [[hour, usd, n, un, s]], "accounts": {acct: [...]},
+    "selections": {sel: [...]}}, every hour before the current one, every
+    selection one of the tenant's classes or bare lanes, every account one
+    the brain knows (`known`)."""
+    shape = ('body must be {"proxy": [[hour, usd, n, un, s], ...], "accounts": {account: rows}, '
+             '"selections": {selection: rows}}')
+    if not isinstance(body, dict) or not body or set(body) - {"proxy", "accounts", "selections"}:
+        return shape
+    cur = int(now // 3600)
+    sels = {c["class"] for c in t.classes} | {f"lane:{lc['lane']}" for lc in _lanes}
+    groups = [("proxy", body.get("proxy", []))]
+    for level in _BURN_LEVELS:
+        named = body.get(level, {})
+        if not isinstance(named, dict):
+            return shape
+        for k, rows in named.items():
+            if level == "selections" and k not in sels:
+                return f"selections: {k!r} is none of the tenant's classes or bare lanes"
+            if level == "accounts" and k not in known:
+                return f"accounts: {k!r} is not an account the brain knows"
+            groups.append((f"{level}.{k}", rows))
+    for where, rows in groups:
+        if not isinstance(rows, list):
+            return f"{where}: rows must be a list"
+        for i, row in enumerate(rows):
+            if not _burn_row_ok(row, 5):
+                return f"{where}[{i}]: a row is [hour, usd >= 0, n >= 0, un >= 0, servable]"
+            if row[0] >= cur:
+                return f"{where}[{i}]: hour {row[0]} is not before the current hour {cur}"
+    return None
+
+
+def burn_import(t, body, now):
+    """POST /sizing/burn, a checked body (burn_import_problem): each row a
+    bucket marked imported, only for an hour its ring has no bucket for, a
+    row older than BURN_HOURS skipped. -> {added, skipped (too old), rings
+    (those added to)}. Moves the pool and has the rings saved with the
+    batch's end (_sizing_after)."""
+    first = int(now // 3600) - BURN_HOURS
+    out = {"added": 0, "skipped": 0, "rings": 0}
+    with t.sizing_lock:
+        burn = t.sizing["burn"]
+        groups = [(burn["proxy"], body.get("proxy", []))]
+        for level in _BURN_LEVELS:
+            for k, rows in sorted((body.get(level) or {}).items()):
+                if rows:
+                    groups.append((burn[level].setdefault(k, _burn_ring()), rows))
+        for ring, rows in groups:
+            added = 0
+            for hour, usd, n, un, s in rows:
+                if hour < first:
+                    out["skipped"] += 1
+                elif hour not in ring["hours"]:
+                    ring["hours"][hour] = {"usd": float(usd), "n": n, "un": un, "s": s,
+                                           "l": None, "i": True}
+                    added += 1
+            out["added"] += added
+            out["rings"] += 1 if added else 0
+        for level in _BURN_LEVELS:
+            for key in [k for k, r in burn[level].items() if not r["hours"]]:
+                del burn[level][key]
+        if out["added"]:
+            t.sizing["burn_unsaved"] = True
+            t.sizing["dirty"] = True
+            t.sizing["burn_gen"] = t.sizing.get("burn_gen", 0) + 1
+            t.sizing["imported_total"] = t.sizing.get("imported_total", 0) + out["added"]
+            t.sizing.pop("pool_cache", None)
+    return out
 
 
 # ---- fleet: room across a selection, the proxy and each account (quota-model 65 §1, 67 §5-§8) ----
@@ -8164,11 +8531,9 @@ def _sizing_fleet_view(t):
     the per-point ones) as /sizing publishes them: the mix size and the size
     in each model the window's sizes name. Nothing a served event moves
     without closing a sample (the outside sum) is in it, so such an event
-    publishes no document (64 §2, 67 §8). `pace` is each selection's and the
-    proxy's (_burn_paces, 69 §4.2): it moves with every served event and the
-    clock, and the document's fields made from it are clock-only
-    (PREFERRED_CLOCK_ONLY). Takes _lock, then _sizing_lock; never call it
-    under _plock."""
+    publishes no document (64 §2, 67 §8); the burn and the forecast are put
+    on the figure after it is rendered (_forecast_attach). Takes _lock, then
+    _sizing_lock; never call it under _plock."""
     accts, extra = _sizing_snapshot(t, full=False)
     windows = {acct: {wid: {"basis": v["size_basis"], "mix": v["size"], "sizes": dict(v["sizes"]),
                             "samples": v["samples_n"]}
@@ -8178,9 +8543,7 @@ def _sizing_fleet_view(t):
                      "models": {m: {"basis": d["basis"], "dollars": d["dollars"]}
                                 for m, d in f["models"].items()}}
                  for p, f in extra["weights"].items()}
-    with t.sizing_lock:
-        pace = _burn_paces(t, time.time())
-    return {"windows": windows, "providers": providers, "pace": pace}
+    return {"windows": windows, "providers": providers}
 
 
 def _fleet_period_s(lim):
@@ -8602,197 +8965,613 @@ def _fleet_asks(accts, health, limits, bound=None):
     return sorted(out, key=lambda x: (x["kind"] != "auth", x["account"], x["model"] or ""))
 
 
-# ---- the forecast: when a selection runs dry, for how long, and when room returns (69 §4.3) ----
+# ---- the forecast: four hundred weeks walked jointly (quota-model 69 §4.5-§4.7, §4.9) ----
 #
-# The walk takes the figure's counted accounts as they are now, each window
-# counted with its room and its capacity in the selection's dollars, and walks
-# forward to the horizon (now + FORECAST_H). The selection spends at its pace
-# from one account at a time: the one the brain prefers for it now, then the
-# others in the figure's listing order; when the account in turn runs dry it
-# moves to the next with room and does not move back when an earlier one
-# refills. A resting account waits for its rest to end, a refused one for its
-# refusal to end (never, when that end is unknown). A counted window refills
-# to its capacity at its reset: a refill sets room, it never adds to what is
-# left. A fixed window's next period follows at once, every period after
-# within the horizon. A first-use window's next period starts at the first
-# draw after a refill, so its following refill is that draw plus its period;
-# one whose reset is past or unknown is not running, and refills a period
-# after the walk first draws from it. In a drought the first draw is at once.
-# Spending a dollar takes a dollar from each counted window of the account,
-# since each window's room is in the same dollars, so the account's room
-# stays the least of them, as in the figure. Listed accounts add nothing.
-# Nothing here is a fact: the pace is learned, and the forecast is the
-# walk's estimate.
+# A sampled week is the next FORECAST_SLOTS hours from now, each slot taking
+# its hour from one pool day drawn, with replacement, for its calendar day
+# (_burn_pool: a day of its type, or any pool day while its type has fewer
+# than FORECAST_MIN_DAYS), the same drawn day for every ring, its first 24
+# slots scaled by the burn right now's ratio, decaying with the burn's
+# half-life in its logarithm. FORECAST_SAMPLES weeks are drawn from
+# random.Random(seed) (_burn_seed), so two computations on the same pool draw
+# the same days.
+#
+# The joint walk (_fleet_walk_joint) spends every stream at once over the
+# tenant's counted accounts: one stream per selection, its demand from its
+# own ring, and one for the spend with no selection, the proxy's ring less
+# the selections' (0 where that is negative). Each window is in its
+# provider's points: one shared use per window, and per row, a cap (the
+# route's stop_at) and a size, the dollars a point at the row's model (the
+# mix's for all work). A selection draws from one account at a time: the one
+# the brain prefers for it now, then the others in listing order; when the
+# account in turn has no room for it, the next with room, never back to an
+# earlier one that refills. The spend with no selection draws in listing
+# order, bound on the windows all work binds on, and drains each scoped
+# window at its family's share of the weekly window's use, as the provider
+# states it (`weekly_share` on the scoped window): unlabelled work is all
+# kinds of work. Within an hour the streams draw in a fixed order (classes,
+# then bare lanes, by name; the spend with no selection last), which decides
+# only who takes a window's last points in that hour. The walk steps hour by
+# hour, and within an hour to each refill and each account's `from`: a
+# refill sets a window's use to 0; a fixed window's next period follows at
+# once; a first-use window's next period starts at the first draw from it.
+#
+# A row (all work, or a selection) is dry while no account it reaches has
+# room for it; its room at an instant is the sum over those accounts of the
+# least room of the windows it binds on, in its own dollars, 0 for one not
+# yet serving. Each week gives each row the instant it first runs dry, the
+# seconds it spends dry, its demand in those seconds, its demand over the
+# week, and its room at each hour's end over a full week's room (every
+# window of a week or longer at its cap). The forecast publishes their
+# quantiles across the weeks: the order statistic of rank ceil(p x N).
+#
+# The forecast is computed in the background (_forecast_worker), never in a
+# render: a render builds the walk's inputs from its figure, keys them, and
+# takes the last result as it stands, `stale` while the key differs; a key
+# that differs wakes the worker.
 
 _WALK_EPS = 1e-9
+FORECAST_RATIO_MOVE = 0.25   # the burn ratio's move that makes a result stale
+_FORECAST_QS = (("p10", 0.1), ("p50", 0.5), ("p90", 0.9))
 
 
-def _fleet_walk_accounts(entries, standings, now, horizon):
-    """{acct: {"wins": {wid: {room, capacity, period, first_use, next (the
-    next refill, None for none known yet)}}, "from": the first instant it may
-    serve (inf for an unknown end)}} for the walk, from the counted accounts'
-    figure entries (with their `resting`) and their standings."""
-    out = {}
-    for acct, e in entries.items():
-        st = standings.get(acct) or {}
-        lims = _fleet_limits(st)
-        wins = {}
-        for wid, wv in sorted((e.get("windows") or {}).items()):
-            w = lims.get(wid) or {}
-            r, period = w.get("resets_at"), _fleet_period_s(w)
-            first_use = w.get("anchor") == "first_use"
-            if r is not None and r <= now:
-                if first_use or not period:
-                    r = None  # not running: a first-use window waits for its draw
-                else:
-                    r += period * math.ceil((now - r) / period)
-                    if r <= now:
-                        r += period
-            wins[wid] = {"room": float(wv["room"]), "capacity": float(wv["capacity"]),
-                         "period": period, "first_use": first_use,
-                         "next": float(r) if r is not None else None}
-        start = now
-        if e.get("refused") is not None:
-            until = e["refused"].get("until")
-            start = math.inf if until is None else max(now, float(until))
-        elif e.get("resting"):
-            until = e.get("resting_until")
-            start = math.inf if until is None else max(now, float(until))
-        out[acct] = {"wins": wins, "from": start}
-    return out
+def _fleet_pp(view, acct, wid, valued):
+    """Dollars a point of an account's window at what values it (a model, or
+    "mix"), unrounded, from the sizing view."""
+    sz = ((view.get("windows") or {}).get(acct) or {}).get(wid) or {}
+    sizes = sz.get("sizes") or {}
+    return (sizes[valued] if valued != "mix" and valued in sizes else sz["mix"]) / 100.0
 
 
-def _fleet_walk(accts, order, rate, now, horizon, walls):
-    """The walk itself (69 §4.3) over _fleet_walk_accounts' accounts, in draw
-    order, at `rate` dollars an hour (> 0) -> spells [(from, to)], each dry
-    spell within the horizon. `walls` ({acct: the instant it ran dry, None
-    for not yet}, those dry now already set) gains each account's first
-    instant dry in the walk."""
-    b = rate / 3600.0
-
-    def room(a):
-        ws = accts[a]["wins"]
-        return min(w["room"] for w in ws.values()) if ws else 0.0
-
-    def can(a, t):
-        return accts[a]["from"] <= t and room(a) > _WALK_EPS
-
-    def pick(t, after):
-        if not order:
-            return None
-        i = 0 if after is None else (order.index(after) + 1) % len(order)
-        ring = order[i:] + order[:i]
-        return next((a for a in ring if can(a, t)), None)
-
-    def draw(a, t):
-        # Drawing from an account starts each of its idle first-use windows.
-        if a is None:
-            return
-        for w in accts[a]["wins"].values():
-            if w["first_use"] and w["next"] is None and w["period"]:
-                w["next"] = t + w["period"]
-
-    def spend(a, usd):
-        for w in accts[a]["wins"].values():
-            w["room"] = max(0.0, w["room"] - usd)
-
-    def upcoming(t):
-        ts = [w["next"] for a in accts.values() for w in a["wins"].values()
-              if w["next"] is not None and w["next"] > t]
-        ts += [a["from"] for a in accts.values() if t < a["from"] < horizon]
-        return min(ts + [horizon])
-
-    spells, dry_from = [], None
-    t, cur, last = now, pick(now, None), None
-    draw(cur, t)
-    while t < horizon:
-        if cur is None and dry_from is None:
-            dry_from = t
-        nxt = upcoming(t)
-        if cur is not None:
-            r = room(cur)
-            t_dry = t + r / b
-            if t_dry < nxt:
-                spend(cur, r)
-                t = t_dry
-                if walls[cur] is None:
-                    walls[cur] = t
-                last, cur = cur, pick(t, cur)
-                draw(cur, t)
-                continue
-            spend(cur, b * (nxt - t))
-        t = nxt
-        if t >= horizon:
-            break
-        for a in accts.values():
-            for w in a["wins"].values():
-                if w["next"] is not None and w["next"] <= t:
-                    w["room"] = w["capacity"]
-                    if w["first_use"] or not w["period"]:
-                        w["next"] = None
+def _fleet_walk_accounts(rows, standings, view, now):
+    """The walk's accounts (69 §4.6) from each row's counted entries ({row:
+    {acct: entry with `resting`}}): {acct: {"from": the first instant it may
+    serve (0 for at once, None for never), "wins": {wid: {used (points), period,
+    first_use, next (the next refill, None for none known yet), drain
+    ({scoped wid: its points per point of this window drawn by unlabelled
+    work})}}}}, every window any row counts on it; and {row: {acct: {wid:
+    [cap, size]}}}, what each row binds on each account."""
+    accts, binds = {}, {}
+    for row, entries in rows.items():
+        binds[row] = {}
+        for acct, e in sorted(entries.items()):
+            st = standings.get(acct) or {}
+            lims = _fleet_limits(st)
+            a = accts.get(acct)
+            if a is None:
+                # From an instant, never `now`, so the inputs' key holds
+                # still between renders: 0 serves at once, a past end too.
+                start = 0.0
+                if e.get("refused") is not None:
+                    until = e["refused"].get("until")
+                    start = None if until is None else float(until)
+                elif e.get("resting"):
+                    until = e.get("resting_until")
+                    start = None if until is None else float(until)
+                a = accts[acct] = {"from": start, "wins": {}}
+            binds[row][acct] = {}
+            for wid, wv in sorted((e.get("windows") or {}).items()):
+                binds[row][acct][wid] = [float(wv["cap"]), _fleet_pp(view, acct, wid, wv["valued"])]
+                if wid in a["wins"]:
+                    continue
+                w = lims.get(wid) or {}
+                r, period = w.get("resets_at"), _fleet_period_s(w)
+                first_use = w.get("anchor") == "first_use"
+                if r is not None and r <= now:
+                    if first_use or not period:
+                        r = None  # not running: a first-use window waits for its draw
                     else:
-                        while w["next"] <= t:
-                            w["next"] += w["period"]
-        if cur is None:
-            cur = pick(t, last)
-            if cur is not None and dry_from is not None:
-                spells.append((dry_from, t))
-                dry_from = None
-        draw(cur, t)
-    if dry_from is not None:
-        spells.append((dry_from, horizon))
-    return spells
+                        r += period * math.ceil((now - r) / period)
+                        if r <= now:
+                            r += period
+                a["wins"][wid] = {"used": float(wv["used"]), "period": period,
+                                  "first_use": first_use,
+                                  "next": float(r) if r is not None else None, "drain": {}}
+    # Unlabelled work's drain of each scoped window (69 §4.6): the scoped
+    # family's share of the weekly window's use, in the scoped window's own
+    # points. A scoped window whose provider states no share is not drained.
+    for acct, a in accts.items():
+        wins = (standings.get(acct) or {}).get("allowance", {}).get("windows") or {}
+        weekly = wins.get("seven_day") or {}
+        if "seven_day" not in a["wins"] or not weekly.get("used_pct"):
+            continue
+        for wid in a["wins"]:
+            share = (wins.get(wid) or {}).get("weekly_share")
+            if not share or not share.get("allowance_pct_of_weekly"):
+                continue
+            a["wins"]["seven_day"]["drain"][wid] = (
+                share["used_pct_of_weekly"] / weekly["used_pct"]
+                * 100.0 / share["allowance_pct_of_weekly"])
+    return accts, binds
 
 
-def _fleet_forecast(entries, standings, preferred, pace, now):
-    """A level's `forecast` (69 §4.3) from its counted accounts' figure
-    entries ({acct: entry with `resting`}, in listing order), the account the
-    brain prefers for it now (None for the proxy, which draws in listing
-    order), its pace and now."""
-    horizon = now + FORECAST_H
-    order = sorted(entries)
-    if preferred in entries:
-        order = [preferred] + [a for a in order if a != preferred]
-    rate = pace.get("rate")
-    out = {"dry_at": None, "back_at": None, "dry_s": None, "unmet": None, "spells": None,
-           "walls": {}, "horizon_at": _fleet_secs(horizon), "rate": rate,
-           "rate_basis": "learned" if rate is not None else "no pace yet",
-           "basis": "learned" if rate is not None else "no pace"}
-    accts = _fleet_walk_accounts(entries, standings, now, horizon)
-    if rate is None or not order:
-        # No projection: only the accounts dry now (69 §4.3). With nothing
-        # counted there is nothing to walk.
-        out["walls"] = {a: (_fleet_secs(now) if entries[a]["room"] <= 0 else None) for a in order}
-        if rate is not None:
-            out["basis"] = "nothing counted"
-        return out
-    walls = {a: (now if entries[a]["room"] <= 0 else None) for a in order}
-    spells = _fleet_walk(accts, order, rate, now, horizon, walls) if rate > 0 else []
-    dry_s = sum(b - a for a, b in spells)
-    out.update(
-        dry_at=_fleet_secs(spells[0][0]) if spells else None,
-        back_at=_fleet_secs(spells[0][1]) if spells and spells[0][1] < horizon else None,
-        dry_s=int(round(dry_s)), unmet=round(rate * dry_s / 3600.0, 2),
-        spells=[{"from": _fleet_secs(a), "to": _fleet_secs(b)} for a, b in spells],
-        walls={a: _fleet_secs(w) for a, w in walls.items()})
+def _forecast_streams(keys):
+    """The streams' draw order within an hour (69 §4.6): classes by name,
+    bare lanes by name, then None, the spend with no selection."""
+    return sorted((k for k in keys if not k.startswith("lane:"))) \
+        + sorted(k for k in keys if k.startswith("lane:")) + [None]
+
+
+def _fleet_walk_joint(accts, binds, orders, demand, now, rooms=None, walls=None):
+    """One sampled week walked (69 §4.6). accts and binds as
+    _fleet_walk_accounts gives them (accts is changed: give it a copy);
+    orders {stream: [acct], the draw order}; demand {stream: [168 dollars an
+    hour]} for every row ("proxy" is all work, its demand the week's whole
+    spend; None the spend with no selection, which binds on all work's
+    windows). -> {row: [dry_at (None for never), dry_s, unmet, usd]}, and
+    with `rooms` ({row: list}) each row's room at each hour's end over its
+    full week's room appended there; with `walls` ({}), the instant each
+    account first had no room left for the stream drawing on it."""
+    horizon = now + FORECAST_SLOTS * 3600
+    INF = math.inf
+    frm = {a: (INF if v["from"] is None else v["from"]) for a, v in accts.items()}
+    streams = [s for s in _forecast_streams([k for k in orders if k is not None])
+               if s is None or s in binds]
+    srow = {s: "proxy" if s is None else s for s in streams}
+    rows = list(binds)
+    racc = {row: list(binds[row]) for row in rows}
+    # Each row's terms: per account its windows' state and [cap, pp]. The
+    # room they leave on an account, in dollars, is kept (memo) until the
+    # account's windows move: a take, a drain or a refill bumps ver.
+    terms = {row: [(a, [(accts[a]["wins"][wid], cap, pp) for wid, (cap, pp) in bw.items()], {})
+                   for a, bw in binds[row].items()] for row in rows}
+    ver = dict.fromkeys(accts, 0)
+
+    def wroom(ws, memo, a):
+        m = memo.get(a)
+        v = ver[a]
+        if m is not None and m[0] == v:
+            return m[1]
+        r = INF
+        for w, cap, pp in ws:
+            x = (cap - w["used"]) * pp
+            if x < r:
+                r = x
+        r = r if _WALK_EPS < r != INF else 0.0
+        memo[a] = (v, r)
+        return r
+
+    rterm = {row: {a: (ws, memo) for a, ws, memo in terms[row]} for row in rows}
+
+    def room_for(row, a, t, strict=False):
+        if (frm[a] >= t) if strict else (frm[a] > t):
+            return 0.0
+        ws, memo = rterm[row][a]
+        return wroom(ws, memo, a)
+
+    def row_room(row, t, strict=False):
+        tot = 0.0
+        for a, ws, memo in terms[row]:
+            f = frm[a]
+            if f >= t if strict else f > t:
+                continue
+            tot += wroom(ws, memo, a)
+        return tot
+
+    full = {}
+    for row in rows:
+        tot = 0.0
+        for a, bw in binds[row].items():
+            long_ = {wid: v for wid, v in bw.items()
+                     if (accts[a]["wins"][wid]["period"] or 0) >= 7 * 86400} or bw
+            tot += min(cap * pp for cap, pp in long_.values()) if long_ else 0.0
+        full[row] = tot
+    cursor = {s: None for s in streams}
+    out = {row: [None, 0.0, 0.0, 0.0] for row in rows}
+    dry_from = {row: None for row in rows}
+    nexts = sorted({v for v in frm.values() if now < v < horizon})
+    waiting = {a for a, v in frm.items() if v > now}
+    first = True
+    t = now
+    for i in range(FORECAST_SLOTS):
+        hour_end = now + (i + 1) * 3600
+        rate = {s: demand[s][i] / 3600.0 for s in streams}
+        rrate = {row: (demand["proxy"][i] if row == "proxy" else demand.get(row, [0.0] * 168)[i])
+                 / 3600.0 for row in rows}
+        for row in rows:
+            out[row][3] += rrate[row] * 3600.0
+        while t < hour_end:
+            # What lands at t: refills, and accounts that start serving.
+            landed = set()
+            nxt = hour_end
+            for an, a in accts.items():
+                for w in a["wins"].values():
+                    if w["next"] is not None:
+                        if w["next"] <= t:
+                            w["used"] = 0.0
+                            ver[an] += 1
+                            landed.add(an)
+                            if w["first_use"] or not w["period"]:
+                                w["next"] = None
+                            else:
+                                while w["next"] <= t:
+                                    w["next"] += w["period"]
+                        if w["next"] is not None and w["next"] < nxt:
+                            nxt = w["next"]
+            if waiting:
+                came = {a for a in waiting if frm[a] <= t}
+                waiting -= came
+                landed |= came
+            for v in nexts:
+                if t < v < nxt:
+                    nxt = v
+                    break
+            # A row's room only grows by what lands, so only a dry row with
+            # an account that landed can have room again.
+            for row in rows:
+                if dry_from[row] is not None and (first or not landed.isdisjoint(racc[row])) \
+                        and row_room(row, t) > _WALK_EPS:
+                    out[row][1] += t - dry_from[row]
+                    dry_from[row] = None
+            # A row with room at the last step's end has room now (refills
+            # only add); only the first step can start on an empty row.
+            empty = {row: row_room(row, t) <= _WALK_EPS for row in rows
+                     if dry_from[row] is None} if first else {}
+            span = nxt - t
+            hit = {}  # acct -> the instant its last take this step ended
+            for s in streams:
+                r = rate[s]
+                if r <= 0:
+                    continue
+                left = r * span
+                row_s = srow[s]
+                bind = binds[row_s]
+                order = orders.get(s) or ()
+                if s is None:
+                    # The spend with no selection draws in listing order:
+                    # every step starts from the first account with room,
+                    # an earlier one that refilled included. A selection
+                    # keeps its cursor and never switches back.
+                    cursor[s] = None
+                while left > _WALK_EPS:
+                    cur = cursor[s]
+                    if cur is None or room_for(row_s, cur, t) <= _WALK_EPS:
+                        k = 0 if cur is None else (order.index(cur) + 1) % len(order)
+                        ring = order[k:] + order[:k]
+                        cur = next((a for a in ring if room_for(row_s, a, t) > _WALK_EPS), None)
+                        if cur is None:
+                            break
+                        cursor[s] = cur
+                    took = min(left, room_for(row_s, cur, t))
+                    at = t + (r * span - left) / r
+                    ws = accts[cur]["wins"]
+                    for wid, (cap, pp) in bind[cur].items():
+                        w = ws[wid]
+                        pts = took / pp
+                        w["used"] += pts
+                        if w["first_use"] and w["next"] is None and w["period"]:
+                            w["next"] = at + w["period"]
+                        if s is None:
+                            for sw, k in w["drain"].items():
+                                ws[sw]["used"] += pts * k
+                    ver[cur] += 1
+                    left -= took
+                    hit[cur] = at + took / r
+                    if walls is not None and room_for(row_s, cur, t) <= _WALK_EPS:
+                        walls.setdefault(cur, hit[cur])
+            at_end = {}
+            for row in rows:
+                if dry_from[row] is None and (first or not hit.keys().isdisjoint(racc[row])):
+                    at_end[row] = rr = row_room(row, nxt, strict=True)
+                else:
+                    rr = INF
+                if rr <= _WALK_EPS:
+                    if empty.get(row):
+                        on = t
+                    else:
+                        on = max([hit[a] for a in racc[row] if a in hit] or [t])
+                    dry_from[row] = on
+                    if out[row][0] is None:
+                        out[row][0] = on
+                if dry_from[row] is not None:
+                    out[row][2] += rrate[row] * (nxt - max(t, dry_from[row]))
+            first = False
+            t = nxt
+        if rooms is not None:
+            # The last step ended at the hour's end: its rooms are these.
+            for row, series in rooms.items():
+                rr = at_end[row] if row in at_end else row_room(row, hour_end, strict=True)
+                series.append(rr / full[row] if full[row] else 0.0)
+    for row in rows:
+        if dry_from[row] is not None:
+            out[row][1] += horizon - dry_from[row]
     return out
+
+
+def _forecast_q(xs, p):
+    """The order statistic of rank ceil(p x N), 1-based (69 §4.7)."""
+    xs = sorted(xs)
+    return xs[max(0, math.ceil(p * len(xs)) - 1)]
+
+
+def _forecast_weeks(pool, streams, ratio, seed_int, now, samples=FORECAST_SAMPLES):
+    """The sampled weeks (69 §4.5): [{stream: [168]} with "proxy" too], the
+    days drawn in date order for each week from random.Random(seed_int), the
+    first 24 slots scaled by ratio^(2^(-i / LIVE_HALF_LIFE_H))."""
+    slots = _burn_slots(now)
+    days = sorted({d for d, _ in slots})
+    fills = pool["filled"]
+    zero = [0.0] * 24
+    # The decay uses the ratio held within a day's level bounds: an idle 24
+    # hours never zeroes the first day, nor one burst multiplies it without
+    # bound; burn.ratio is published as measured (69 §4.3).
+    held = _burn_held(ratio)
+    scale = [held ** (0.5 ** (i / LIVE_HALF_LIFE_H)) if held is not None and i < 24 else 1.0
+             for i in range(FORECAST_SLOTS)]
+    sels = [s for s in streams if s is not None]
+
+    def week(drawn):
+        out = {}
+        tot = [0.0] * FORECAST_SLOTS
+        for s in sels:
+            f = fills.get(("selections", s), {})
+            ser = [(f.get(drawn[d]) or zero)[h] * scale[i] for i, (d, h) in enumerate(slots)]
+            out[s] = ser
+            for i, v in enumerate(ser):
+                tot[i] += v
+        f = fills[("proxy", None)]
+        prox = [f[drawn[d]][h] * scale[i] for i, (d, h) in enumerate(slots)]
+        out["proxy"] = [max(p, q) for p, q in zip(prox, tot)]
+        out[None] = [max(0.0, p - q) for p, q in zip(prox, tot)]
+        return out
+    if pool["flat"]:
+        prof = pool["profiles"]
+        one = {}
+        tot = [0.0] * FORECAST_SLOTS
+        for s in sels:
+            p = (prof.get(("selections", s)) or {}).get("weekday") or zero
+            one[s] = [p[h] * scale[i] for i, (_, h) in enumerate(slots)]
+            tot = [a + b for a, b in zip(tot, one[s])]
+        p = prof[("proxy", None)]["weekday"]
+        prox = [p[h] * scale[i] for i, (_, h) in enumerate(slots)]
+        one["proxy"] = [max(a, b) for a, b in zip(prox, tot)]
+        one[None] = [max(0.0, a - b) for a, b in zip(prox, tot)]
+        return [one] * samples
+    rng = random.Random(seed_int)
+    out = []
+    for _ in range(samples):
+        drawn = {d: rng.choice(pool["draw"][_burn_day_type(d)]) for d in days}
+        out.append(week(drawn))
+    return out
+
+
+def _forecast_row(res, n, now):
+    """A row's `forecast` figures from its per-week results [[dry_at, dry_s,
+    unmet, usd]] (69 §4.7)."""
+    def qs(xs, nd):
+        return {k: round(_forecast_q(xs, p), nd) for k, p in _FORECAST_QS}
+    firsts = [r[0] for r in res if r[0] is not None]
+    hist = [0] * FORECAST_SLOTS
+    for f in firsts:
+        hist[min(FORECAST_SLOTS - 1, max(0, int((f - now) // 3600)))] += 1
+    out = {"first_dry": None if not firsts else {
+               "p10": _fleet_secs(_forecast_q(firsts, 0.1)),
+               "p90": _fleet_secs(_forecast_q(firsts, 0.9)),
+               "hist": [round(c / n, 4) for c in hist]},
+           "gap_share": round(len(firsts) / n, 4),
+           "dry_h": qs([r[1] / 3600.0 for r in res], 1),
+           "unmet": qs([r[2] for r in res], 2),
+           "usd": qs([r[3] for r in res], 2)}
+    return out
+
+
+def _forecast_compute(t, inputs):
+    """The forecast for one tenant (69 §4.5-§4.7), from a render's inputs
+    (_forecast_inputs): {key, computed_at, ratio, rows: {row: forecast},
+    seconds}. Runs in the worker, outside every lock: the inputs and the
+    pool are the render's own and never changed."""
+    t0 = time.monotonic()
+    now = inputs["now"]
+    pool = inputs["pool"]
+    accts0, binds = inputs["accounts"], inputs["binds"]
+    streams = _forecast_streams([k for k in binds if k != "proxy"])
+    weeks = _forecast_weeks(pool, streams, inputs["ratio"], inputs["seed_int"], now)
+    rows = list(binds)
+    per = {row: [] for row in rows}
+    outs = {row: [0] * FORECAST_SLOTS for row in rows}
+    rooms = {row: array("d") for row in rows}
+    cache = {}
+    for wk in weeks:
+        got = cache.get(id(wk))
+        if got is None:
+            rm = {row: [] for row in rows}
+            got = (_fleet_walk_joint(copy.deepcopy(accts0), binds, inputs["orders"], wk, now, rm), rm)
+            cache[id(wk)] = got  # the flat ladder's weeks are one week
+        res, rm = got
+        for row in rows:
+            per[row].append(res[row])
+            o = outs[row]
+            for h, v in enumerate(rm[row]):
+                if v <= _WALK_EPS:
+                    o[h] += 1
+            rooms[row].extend(rm[row])
+    n = len(weeks)
+    result = {row: dict(_forecast_row(per[row], n, now),
+                        out_share=[round(c / n, 4) for c in outs[row]], room_pct=None)
+              for row in rows}
+
+    # The fan rows (69 §4.7, §4.9): all work, and the selection with the
+    # highest share of weeks with a gap, then the longest median hours dry,
+    # when that beats all work's.
+    def rank(row):
+        return (result[row]["gap_share"], result[row]["dry_h"]["p50"])
+    fans = ["proxy"]
+    best = max((row for row in rows if row != "proxy"), key=rank, default=None)
+    if best is not None and rank(best) > rank("proxy"):
+        fans.append(best)
+    for row in fans:
+        arr = rooms[row]
+        cols = [arr[h::FORECAST_SLOTS] for h in range(FORECAST_SLOTS)]
+        result[row]["room_pct"] = {k: [round(100.0 * _forecast_q(col, p), 2) for col in cols]
+                                   for k, p in _FORECAST_QS}
+    secs = time.monotonic() - t0
+    return {"key": inputs["key"], "computed_at": _fleet_secs(now), "ratio": inputs["ratio"],
+            "horizon_at": _fleet_secs(now + FORECAST_H), "seed": inputs["seed"],
+            "range": len(pool["pool"]) >= FORECAST_MIN_DAYS, "samples": n,
+            "rows": result, "seconds": secs}
+
+
+def _forecast_walk_inputs(walk, standings, view, preferred, now):
+    """(accts, binds, orders) for _fleet_walk_joint from a figure's counted
+    entries (_fleet_figure's `walk`): the walk's accounts, what each row
+    binds (_fleet_walk_accounts), and each stream's draw order, the
+    preferred account first (69 §4.6)."""
+    rows = {"proxy": walk["proxy"]}
+    rows.update(walk["selections"])
+    accts, binds = _fleet_walk_accounts(rows, standings, view, now)
+    orders = {None: sorted(walk["proxy"])}
+    for key, entries in walk["selections"].items():
+        order = sorted(entries)
+        pref = preferred.get(key)
+        if pref in entries:
+            order = [pref] + [a for a in order if a != pref]
+        orders[key] = order
+    return accts, binds, orders
+
+
+def _forecast_inputs(walk, standings, view, preferred, pool, ratio, now):
+    """The worker's inputs from a render (69 §4.9): _forecast_walk_inputs',
+    the pool, the seed, the ratio and now, keyed by a SHA-256 of all of them
+    but now and the ratio, with the hour and the seed in their place."""
+    accts, binds, orders = _forecast_walk_inputs(walk, standings, view, preferred, now)
+    seed, seed_int, _ = _burn_seed(pool, now)
+    keyed = {"accounts": accts, "binds": binds, "orders": {str(k): v for k, v in orders.items()},
+             "seed": seed, "rings": pool.get("digest"), "hour": int(now // 3600)}
+    key = hashlib.sha256(json.dumps(keyed, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    return {"key": key, "now": now, "pool": pool, "ratio": ratio, "seed": seed,
+            "seed_int": seed_int, "accounts": accts, "binds": binds, "orders": orders}
+
+
+# The worker (69 §4.9): one thread for every tenant. A render that finds the
+# result's key unlike its own inputs' leaves them on the tenant
+# (forecast_want) and wakes it; it computes the newest inputs each tenant
+# left, one tenant at a time, and swaps the result in whole.
+_forecast_wake = threading.Event()
+_forecast_thread = None
+_forecast_thread_lock = threading.Lock()
+
+
+def _forecast_request(t, inputs):
+    """Leave a render's inputs for the worker and wake it. Never blocks on a
+    computation."""
+    with t.forecast_lock:
+        if t.forecast_want is None or t.forecast_want["key"] != inputs["key"] \
+                or t.forecast_want["ratio"] != inputs["ratio"]:
+            t.forecast_want = inputs
+    _forecast_wake.set()
+
+
+def _forecast_run(t):
+    """Compute the inputs a render left for this tenant, if any, and keep the
+    result. -> True when it computed."""
+    with t.forecast_lock:
+        want, t.forecast_want = t.forecast_want, None
+    if want is None:
+        return False
+    res = _forecast_compute(t, want)
+    with t.forecast_lock:
+        t.forecast = res
+    _events_mark(t)  # a new result is a change: the publisher sends it
+    return True
+
+
+def _forecast_worker(stop=None):
+    """The worker loop. `stop` (an Event; set it, then wake) ends it, for
+    tests."""
+    while True:
+        _forecast_wake.wait()
+        if stop is not None and stop.is_set():
+            return
+        _forecast_wake.clear()
+        for t in _registry.all():
+            try:
+                _forecast_run(t)
+            except Exception:  # noqa: BLE001 — one tenant's failure must not end the worker
+                log(f"ERROR forecast worker ({t.id}):\n" + traceback.format_exc())
+
+
+def _forecast_start():
+    """Start the forecast worker (once)."""
+    global _forecast_thread
+    with _forecast_thread_lock:
+        if _forecast_thread is None:
+            _forecast_thread = threading.Thread(target=_forecast_worker, name="forecast-worker",
+                                                daemon=True)
+            _forecast_thread.start()
+
+
+def _burn_held(ratio):
+    """The ratio the decay uses, held within a day's level bounds (69 §4.3)."""
+    return None if ratio is None else min(FILL_LEVEL_MAX, max(FILL_LEVEL_MIN, ratio))
+
+
+def _forecast_ratio_moved(was, ratio):
+    """Has the held burn ratio moved by more than FORECAST_RATIO_MOVE of the
+    one the result was computed with (a session starting or ending, 69 §4.9)?
+    A move the bounds absorb changes nothing the walk reads."""
+    was, ratio = _burn_held(was), _burn_held(ratio)
+    if was is None or ratio is None:
+        return (was is None) != (ratio is None)
+    return abs(ratio - was) > FORECAST_RATIO_MOVE * was
+
+
+def _forecast_attach(t, fleet, walk, standings, view, preferred, now):
+    """Put each row's `burn` and `forecast` on a rendered figure (69 §6.1):
+    the burn right now from the rings, the forecast the worker last computed
+    with `stale` when the render's inputs differ from its, which leaves them
+    for the worker. Takes _sizing_lock; never call it under _plock."""
+    with t.sizing_lock:
+        burn = t.sizing["burn"]
+        pool = _burn_pool(t, now)
+        rings = {"proxy": (burn["proxy"], ("proxy", None))}
+        for key in fleet["selections"]:
+            rings[key] = (burn["selections"].get(key), ("selections", key))
+        burns = {row: _burn_doc_row(r, rk, pool, now) for row, (r, rk) in rings.items()}
+    horizon = _fleet_secs(now + FORECAST_H)
+    if not pool["history"]:
+        rows = {row: {"horizon_at": horizon, "basis": "no history"} for row in rings}
+    else:
+        ratio = burns["proxy"]["ratio"]
+        inputs = _forecast_inputs(walk, standings, view, preferred, pool, ratio, now)
+        with t.forecast_lock:
+            res = t.forecast
+        stale = res is None or res["key"] != inputs["key"] or _forecast_ratio_moved(res["ratio"], ratio)
+        if stale:
+            _forecast_request(t, inputs)
+        rows = {}
+        for row in rings:
+            fc = (res or {}).get("rows", {}).get(row) if res is not None else None
+            if res is None:
+                rows[row] = {"basis": "not yet computed"}
+            elif fc is None:
+                # A selection the last result did not walk: its figures wait.
+                rows[row] = {"horizon_at": res["horizon_at"], "computed_at": res["computed_at"],
+                             "stale": True, "basis": "not yet computed"}
+            else:
+                rows[row] = dict({"horizon_at": res["horizon_at"],
+                                  "computed_at": res["computed_at"], "stale": stale,
+                                  "samples": res["samples"], "seed": res["seed"],
+                                  "range": res["range"]}, **fc, basis="learned")
+    fleet["proxy"]["burn"] = burns["proxy"]
+    fleet["proxy"]["forecast"] = rows["proxy"]
+    for key, sel in fleet["selections"].items():
+        sel["burn"] = burns[key]
+        sel["forecast"] = rows[key]
 
 
 def _fleet_figure(standings, routes, models, view, limits, now, stale_max, health,
-                  preferred=None):
+                  walk=None):
     """The `fleet` section (67 §8, 68 §3) from plain data: standings and
     routes as the dial check reads them (ctx), models {route id: its
-    member's model} for class members, the sizing view (_sizing_fleet_view,
-    with its `pace`), the live limits the brain has no window for
-    (_limit_snap, 67 §9), each account's sign-in health {account: {kind,
-    sign_in}} (_fleet_health), and the account the brain prefers for each
-    selection now ({selection: account}, _fleet_preferred), which the
-    forecast draws from first (69 §4.3)."""
-    paces = view.get("pace") or {}
-    preferred = preferred or {}
-
-    def pace_of(p):
-        return dict(p) if p is not None else _burn_pace(None, now)
+    member's model} for class members, the sizing view (_sizing_fleet_view),
+    the live limits the brain has no window for
+    (_limit_snap, 67 §9), and each account's sign-in health {account: {kind,
+    sign_in}} (_fleet_health). With `walk` (a dict), each level's counted
+    entries, `resting` kept, are left in it for the forecast's walk (69
+    §4.6): walk["proxy"] {acct: entry}, walk["selections"] {key: {acct:
+    entry}}."""
+    if walk is not None:
+        walk["selections"] = {}
     # The selections (67 §7): each class, and each bare lane. An account is
     # valued by the highest-priority member whose route can serve it now,
     # windows and limits alike, and is refused only when every member that
@@ -8828,10 +9607,9 @@ def _fleet_figure(standings, routes, models, view, limits, now, stale_max, healt
         sel = _fleet_sum(results)
         sel["asks"] = _fleet_asks(reach, health, limits, lambda a, lim, reach=reach: any(
             _fleet_limit_binds(lim, *held_by(rt)) for rt in reach[a]))
-        sel["pace"] = pace_of((paces.get("selections") or {}).get(key))
-        sel["forecast"] = _fleet_forecast(
-            {a: got[0] for a, (got, _) in results.items() if got is not None},
-            standings, preferred.get(key), sel["pace"], now)
+        if walk is not None:
+            walk["selections"][key] = {a: got[0] for a, (got, _) in results.items()
+                                       if got is not None}
         sel["accounts"] = {}
         for a, (got, _) in sorted(results.items()):
             if got is not None:
@@ -8901,10 +9679,8 @@ def _fleet_figure(standings, routes, models, view, limits, now, stale_max, healt
         accounts[a] = entry
     proxy = dict(_fleet_sum(results), valued="mix")
     proxy["asks"] = _fleet_asks(set(standings) | set(health), health, limits)
-    proxy["pace"] = pace_of(paces.get("proxy"))
-    proxy["forecast"] = _fleet_forecast(
-        {a: got[0] for a, (got, _) in results.items() if got is not None},
-        standings, None, proxy["pace"], now)
+    if walk is not None:
+        walk["proxy"] = {a: got[0] for a, (got, _) in results.items() if got is not None}
     return {"unit": "api_usd", "proxy": proxy, "selections": selections, "accounts": accounts}
 
 
@@ -8928,8 +9704,8 @@ def _fleet_preferred(t, ctx):
     """{selection: account} the brain prefers for each selection now, as the
     document names it: a bare lane's verdict account (its incumbent first,
     as routes[] has it), a class's pointer member's verdict account (None
-    while the class has no pointer). The forecast draws from it first (69
-    §4.3). Caller holds _plock."""
+    while the class has no pointer). The forecast's walk draws from it first
+    (69 §4.6). Caller holds _plock."""
     out = {}
     for rid, rt in ctx["routes"].items():
         if rt["kind"] != "lane":
@@ -8945,24 +9721,24 @@ def _fleet_preferred(t, ctx):
     return out
 
 
-def _fleet_payload(ctx, view, health, preferred=None):
+def _fleet_payload(ctx, view, health, walk=None):
     """The `fleet` section of the document from the decision context, the
     sizing view and the sign-in health (_fleet_health), both taken before
-    _plock, and the account the brain prefers for each selection
-    (_fleet_preferred). Caller holds _plock."""
+    _plock; `walk` as _fleet_figure takes it. Caller holds _plock."""
     models = {f"{c['class']}/{_member_id(m)}": m.get("model")
               for c in ctx["classes"] for m in c["members"]}
     return _fleet_figure(ctx["standings"], ctx["routes"], models, view, ctx["limits"], ctx["now"],
-                         STALE_MAX, health, preferred)
+                         STALE_MAX, health, walk)
 
 
 def _fleet_metric_lines(fleet, tid):
     """fleet_capacity_api_usd, fleet_room_api_usd and fleet_left_pct, by
     {level, name}: the proxy, each selection and each account at the proxy
     level; a listed account's own left_pct only (67 §8, §13 Q7). For the
-    proxy and each selection, fleet_pace_api_usd_per_h while a pace is
-    learned, and fleet_forecast_dry_s and fleet_forecast_unmet_api_usd while
-    the walk projects (69 §6.1). No rule reads them."""
+    proxy and each selection, fleet_burn_now_api_usd_per_h while the burn
+    right now is known, and fleet_forecast_dry_h and
+    fleet_forecast_unmet_api_usd by quantile q while a forecast is computed
+    (69 §6.1). No rule reads them."""
     _line = _tenant_line(tid)
     rows = [("proxy", "proxy", fleet["proxy"])]
     rows += [("selection", k, s) for k, s in sorted(fleet["selections"].items())]
@@ -8975,12 +9751,13 @@ def _fleet_metric_lines(fleet, tid):
             lines.append(_line("fleet_room_api_usd", lab, v["room"]))
         if v.get("left_pct") is not None:
             lines.append(_line("fleet_left_pct", lab, v["left_pct"]))
-        if (v.get("pace") or {}).get("rate") is not None:
-            lines.append(_line("fleet_pace_api_usd_per_h", lab, v["pace"]["rate"]))
+        if (v.get("burn") or {}).get("now") is not None:
+            lines.append(_line("fleet_burn_now_api_usd_per_h", lab, v["burn"]["now"]))
         fc = v.get("forecast") or {}
-        if fc.get("dry_s") is not None:
-            lines.append(_line("fleet_forecast_dry_s", lab, fc["dry_s"]))
-            lines.append(_line("fleet_forecast_unmet_api_usd", lab, fc["unmet"]))
+        if fc.get("dry_h") is not None:
+            for q in ("p10", "p50", "p90"):
+                lines.append(_line("fleet_forecast_dry_h", dict(lab, q=q), fc["dry_h"][q]))
+                lines.append(_line("fleet_forecast_unmet_api_usd", dict(lab, q=q), fc["unmet"][q]))
     return lines
 
 
@@ -9352,12 +10129,14 @@ EVENTS_RETRY_MS = 1000     # the reconnect delay the stream asks its client for
 #                                             next poll (that poll's result is
 #                                             itself a change)
 #   ledger.as_of                              round(now, 3): the time of the render
-#   fleet.proxy.{pace, forecast},             the pace and the walk forward from now
-#   fleet.selections[].{pace, forecast}       (quota-model 69 §4.2, §4.3): they move
-#                                             with the clock and with served events,
-#                                             and are recomputed at each render; a
-#                                             reading change that moves them moves
-#                                             the figure too, which is a change
+#   fleet.proxy.burn.{now, expected, ratio},  the burn right now (quota-model 69
+#   fleet.selections[].burn.{...}             §4.3): its weights age with the
+#                                             clock and the current hour's part
+#                                             grows with it
+#   fleet.*.forecast.horizon_at               now + FORECAST_H on a row with no
+#                                             history (a result's is its own)
+# The forecast's figures are NOT here: a worker's result, and `stale` flipping,
+# are changes the publisher sends (69 §4.9).
 # A field the clock flips by a rule is NOT here: `stale`, a check whose `until`
 # has passed, the budget period. Those flip by a decision and are a change.
 # Nor may a field follow the clock some of the time: accounts[].next_poll_at is
@@ -9370,10 +10149,14 @@ PREFERRED_CLOCK_ONLY = (
     ("account_health", "accounts", "*", "age_s"),
     ("account_health", "accounts", "*", "next_retry_in_s"),
     ("ledger", "as_of"),
-    ("fleet", "proxy", "pace"),
-    ("fleet", "proxy", "forecast"),
-    ("fleet", "selections", "*", "pace"),
-    ("fleet", "selections", "*", "forecast"),
+    ("fleet", "proxy", "burn", "now"),
+    ("fleet", "proxy", "burn", "expected"),
+    ("fleet", "proxy", "burn", "ratio"),
+    ("fleet", "proxy", "forecast", "horizon_at"),
+    ("fleet", "selections", "*", "burn", "now"),
+    ("fleet", "selections", "*", "burn", "expected"),
+    ("fleet", "selections", "*", "burn", "ratio"),
+    ("fleet", "selections", "*", "forecast", "horizon_at"),
 )
 
 _EVENTS_BOOT = str(int(_start_time))  # the id's boot part, fixed at process start
@@ -9896,9 +10679,11 @@ def render(tenants):
     helptype("fleet_capacity_api_usd", "gauge", "Room with nothing used, in API dollars of the work each account would do: per level (proxy, selection, account) and name; sized accounts only (quota-model 65 §1, 67 §5).")
     helptype("fleet_room_api_usd", "gauge", "Room left now, in the same dollars as fleet_capacity_api_usd: (cap - used) x size, 0 while refused, summed over the sized accounts (quota-model 65 §1, 67 §5).")
     helptype("fleet_left_pct", "gauge", "Room left as a percent of the room with nothing used, for the proxy and each selection. For an account, its main window's own (cap - used) / cap, the provider's number: shown whether the account is counted, refused or listed, so it is not room / capacity (quota-model 67 §8, §13 Q7).")
-    helptype("fleet_pace_api_usd_per_h", "gauge", "A selection's or the whole proxy's pace: its priced served API dollars over the hours of the last week it could serve, present once 24 such hours are counted (quota-model 69 §4.2).")
-    helptype("fleet_forecast_dry_s", "gauge", "Seconds in the coming week a selection or the whole proxy is forecast to have no room, walking its accounts' room and resets forward at its pace; an estimate, present only with a pace (quota-model 69 §4.3).")
-    helptype("fleet_forecast_unmet_api_usd", "gauge", "The pace times the forecast's dry seconds: the API dollars of work the selection could not be served in the coming week, by the same estimate (quota-model 69 §4.3).")
+    helptype("fleet_burn_now_api_usd_per_h", "gauge", "The burn right now of a selection or the whole proxy: priced served API dollars an hour over the last 24 hours it could serve, each hour weighted by a 3-hour half-life; absent with no such hour (quota-model 69 §4.3).")
+    helptype("fleet_forecast_dry_h", "gauge", "Hours in the coming week a selection or the whole proxy is forecast to have no room, by quantile q across the sampled weeks, every spell summed; an estimate, present once a forecast is computed (quota-model 69 §4.7).")
+    helptype("fleet_forecast_unmet_api_usd", "gauge", "The API dollars of work a selection or the whole proxy is forecast not to be served in the coming week, its own demand in its dry hours, by quantile q across the sampled weeks (quota-model 69 §4.7).")
+    helptype("burn_imported_hours_total", "counter", "Hourly buckets added to the served-dollar history by POST /sizing/burn since the brain started (quota-model 69 §6.7).")
+    helptype("forecast_compute_seconds", "gauge", "Wall time of the tenant's last forecast computation, in seconds (quota-model 69 §4.9).")
     helptype("sizing_spread", "gauge", "The spread of a window's kept samples: their median absolute deviation over their median, with two or more samples.")
     helptype("sizing_samples", "gauge", "Samples kept for a window's size, one per clean step.")
     helptype("sizing_step_api_usd", "gauge", "The newest sample's API dollars per point of the window, at its provider's model weights (reference-model dollars; list dollars while no model is weighed).")
@@ -10101,8 +10886,11 @@ def _render_tenant(t):
         ctx = _policy_ctx(t, snapshot, time.time())
         # No health: the gauges read no asks, and account_health would take
         # _refresh_lock, which a token refresh holds across its network call.
-        fleet = _fleet_payload(ctx, view, {}, _fleet_preferred(t, ctx))
+        walk = {}
+        fleet = _fleet_payload(ctx, view, {}, walk)
+        preferred = _fleet_preferred(t, ctx)
     _burn_stamp(t, fleet, ctx["now"])  # a render of the figure (69 §4.2)
+    _forecast_attach(t, fleet, walk, ctx["standings"], view, preferred, ctx["now"])
     for acct, st in sorted(ctx["standings"].items()):
         if st.get("as_of") is None:
             continue
@@ -10287,6 +11075,8 @@ class Handler(BaseHTTPRequestHandler):
             self._reports_post()
         elif path == "/recheck":
             self._recheck(parsed)
+        elif path == "/sizing/burn":
+            self._burn_import()
         else:
             # Same rule as do_PUT's fallthrough: a typo'd POST path arrives
             # with a JSON body, and closing with it unread RSTs the 404 off
@@ -10498,6 +11288,32 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return False
         return True
+
+    def _burn_import(self):
+        """POST /sizing/burn (quota-model 69 §6.7): served dollars by the hour
+        from an install's own record, for the hours the brain's rings have
+        no bucket for. Key-guarded. 200 {added, skipped, rings}; 400 {error}
+        with nothing added for any body burn_import_problem refuses. do_POST
+        marks the document after it, and the publisher's render wakes the
+        forecast worker: the rings' pool has moved, so the forecast's key has."""
+        t = self.tenant
+        if not self._guard():
+            return
+        body = self._read_json_body(max_bytes=BURN_IMPORT_MAX)
+        now = time.time()
+        with t.lock:
+            snap = list(t.state.values())
+        why = burn_import_problem(t, body, now, set(_account_roster(t, snap)))
+        if why is not None:
+            self._json(400, {"error": why})
+            return
+        out = burn_import(t, body, now)
+        if out["added"]:
+            with t.sizing_lock:
+                _sizing_after(t, None, False)
+        log(f"burn import: {out['added']} hour(s) added in {out['rings']} ring(s), "
+            f"{out['skipped']} older than the history skipped")
+        self._json(200, out)
 
     def _reports_post(self):
         """POST /reports {"reporter", "events": [...]} (quota-model 64 §5):
@@ -11138,6 +11954,9 @@ def main():
     th = threading.Thread(target=poller, daemon=True)
     th.start()
     _events_start()  # GET /events: publishes the first document now
+    _forecast_start()  # the forecast worker (69 §4.9): its first result follows the first render
+    log(f"forecast: days cut at {DAY_CUT_H:02d}:00 local time, {time.strftime('%Z')} "
+        f"(TZ {os.environ.get('TZ') or 'unset, so UTC'})")
     log(f"listening on :{PORT}/metrics, poll interval {POLL_INTERVAL}s, "
         f"providers {', '.join(PROVIDERS) or 'none'}")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
