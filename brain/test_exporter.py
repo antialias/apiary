@@ -3228,6 +3228,52 @@ class TestFleetAgreesWithTheCheck(unittest.TestCase):
                     self.assertEqual(check["check"], "no", a)
         self.assertEqual(n, 6 * 27 * 2 * 2)
 
+    def test_a_reset_of_the_refusing_window_counts_the_account(self):
+        # 69 §9: an account the check refuses by the window an event refills
+        # is room 0 in the walk before (it rests), and counted after: the
+        # check then includes it.
+        n = 0
+        for five, seven, fable in itertools.product((40, 100), (40, 100), (40, 100)):
+            spec = {"provider": "anthropic", "gate": None, "windows": {
+                "seven_day": {"period_s": 604800, "used": seven, "resets_in": 300000},
+                "five_hour": {"period_s": 18000, "used": five, "resets_in": 3600},
+                "scoped:Fable": {"period_s": 604800, "scope": "Fable", "used": fable,
+                                 "resets_in": 200000}}}
+            check, a = self.one(None, five, seven, fable)
+            if check["check"] != "no" or a["resting"]:
+                continue
+            spent = sorted(w for w, s in spec["windows"].items() if s["used"] >= 100)
+            with self.subTest(spent=spent):
+                n += 1
+                view = fleet_view({"sub-A": {"seven_day": (1000.0, {}),
+                                             "scoped:Fable": (400.0, {})}})
+                case = {"now": self.NOW, "lanes": {}, "accounts": {"sub-A": spec},
+                        "classes": [{"class": "c", "members": [
+                            {"kind": "anthropic", "lane": "fable", "model": "claude-fable-5-1",
+                             "priority": 1}]}], "sizing": view}
+                entry = fleet_case_figure(case)["selections"]["c"]["accounts"]["sub-A"]
+                accts, binds = ex._fleet_walk_accounts(
+                    {"proxy": {"sub-A": entry}, "c": {"sub-A": entry}},
+                    {"sub-A": fleet_standing(spec, self.NOW)}, view, self.NOW)
+                self.assertGreater(accts["sub-A"]["from"], self.NOW, "room 0 before")
+                self.assertTrue(set(accts["sub-A"]["lift"]) <= set(spent))
+                plan = ex._fleet_walk_plan(accts, binds, {None: ["sub-A"], "c": ["sub-A"]},
+                                           self.NOW)
+                st = ex._fleet_walk_start(plan)
+                gift = {"at": self.NOW, "acct": "sub-A", "row": "c", "lift": True,
+                        "effects": [{"window": w, "effect": "refill"} for w in spent]}
+                rec = ex._fleet_walk_gift(plan, st["W"], st["frm"], st["waiting"], gift, self.NOW)
+                self.assertEqual(st["frm"]["sub-A"], self.NOW, "counted after")
+                self.assertGreater(rec["gain"], 0)
+                after = json.loads(json.dumps(spec))
+                for w in spent:
+                    after["windows"][w]["used"] = 0
+                check, a = self.one(None, after["windows"]["five_hour"]["used"],
+                                    after["windows"]["seven_day"]["used"],
+                                    after["windows"]["scoped:Fable"]["used"])
+                self.assertEqual((check["check"], a["refused"]), ("included", None))
+        self.assertGreater(n, 2)
+
     def test_a_passed_reset_reopens_a_stopped_window(self):
         check, a = self.one({"window": "5h", "level": 80}, 85, 40, 40, five_reset=-10)
         self.assertEqual(check["check"], "included")
@@ -15784,7 +15830,7 @@ class TestForecastOnTheDocument(SizingBase):
         self.assertEqual((fc["samples"], fc["range"]), (400, True))
         self.assertEqual(set(fc), {"horizon_at", "computed_at", "stale", "samples", "seed", "range",
                                    "first_dry", "gap_share", "dry_h", "unmet", "usd", "out_share",
-                                   "room_pct", "basis"})
+                                   "room_pct", "left_h", "basis"})
         self.assertEqual(len(fc["room_pct"]["p50"]), 168, "all work has the fan")
         opus = f["selections"]["lane:opus"]["forecast"]
         self.assertIsNone(opus["room_pct"], "a selection no worse than all work has none")
@@ -15795,7 +15841,7 @@ class TestForecastOnTheDocument(SizingBase):
         self.assertEqual((b["half_life_h"], b["history"]["full_days"], b["history"]["weekday_days"]
                           + b["history"]["weekend_days"]), (3, 3, 3))
 
-    def test_only_the_burn_now_and_a_bare_horizon_are_clock_only(self):
+    def test_the_burn_now_a_bare_horizon_and_the_valuations_are_clock_only(self):
         # 69 §6.1, §4.9: the burn right now ages with the clock; a worker's
         # result is a change the publisher sends.
         history_days()
@@ -15815,7 +15861,12 @@ class TestForecastOnTheDocument(SizingBase):
         want = [("fleet", "proxy", "burn", k) for k in ("now", "expected", "ratio")] \
             + [("fleet", "proxy", "forecast", "horizon_at")] \
             + [("fleet", "selections", "*", "burn", k) for k in ("now", "expected", "ratio")] \
-            + [("fleet", "selections", "*", "forecast", "horizon_at")]
+            + [("fleet", "selections", "*", "forecast", "horizon_at")] \
+            + [(*lv, "events", "*", f) for lv in (("fleet", "proxy"), ("fleet", "selections", "*"))
+               for f in ("verdict", "wise_share", "gap_weeks", "reason", "reason_share", "after",
+                         "rank", "step", "use_at", "use_share", "gain", "gain_basis", "worth_h",
+                         "spent", "lost_share", "covers", "left_pct_after", "more_at_after", "now",
+                         "reaches_short")]
         self.assertEqual([p for p in ex.PREFERRED_CLOCK_ONLY if p[0] == "fleet"], want)
 
     def test_the_same_seconds_reads_are_identical(self):
@@ -17683,6 +17734,812 @@ class TestAccountsCommand(AuthRemoveBase):
         code, _, err = self.run_cmd("sign-in", "claude", "nobody@example.com")
         self.assertEqual(code, 1)
         self.assertIn("leave the name off", err)
+
+
+# ---- 69 §4.8, §5: each reset valued, judged and planned ---------------------
+
+def reset_event(eid, effects=(("seven_day", "refill"),), trigger="owner", anchor="kept",
+                to_in=None, order=None, now_=True, why_not=None, only_at_limit=False,
+                not_while_closed=(), min_used_pct=None, paused=False, cooldown_in=None,
+                not_with_overage=False):
+    """An event's short form (69 §2.2): effects as (window, effect[, points[,
+    share_of]]), or (None, effect, provider name) for an unmapped window;
+    times relative to now (to_in, cooldown_in in seconds)."""
+    effs = []
+    for e in effects:
+        if e[0] is None:
+            effs.append({"window": None, "provider_name": e[2], "effect": e[1], "basis": "unknown"})
+        elif e[1] == "give_back":
+            effs.append({"window": e[0], "effect": "give_back",
+                         "share_of": e[3] if len(e) > 3 else None, "points": e[2],
+                         "basis": "inferred"})
+        elif e[1] == "limit":
+            effs.append({"window": e[0], "effect": "limit", "factor": e[2],
+                         "until_in": e[3] if len(e) > 3 else None, "basis": "stated"})
+        else:
+            effs.append({"window": e[0], "effect": e[1], "basis": "stated"})
+    return {"id": eid, "program": eid.split(":")[0], "label": eid, "trigger": trigger,
+            "effects": effs, "anchor": anchor, "anchor_basis": "stated",
+            "supply": {"left": 1, "total": 1, "from": None, "to_in": to_in, "order": order,
+                       "cooldown_in": cooldown_in, "per_period": None, "basis": "stated"},
+            "usable": {"now": now_, "why_not": why_not, "only_at_limit": only_at_limit,
+                       "min_used_pct": min_used_pct, "not_while_closed": list(not_while_closed),
+                       "not_with_overage": not_with_overage, "paused": paused, "basis": "stated"},
+            "auto_use": None, "provider_name": {}}
+
+
+def reset_event_abs(ev, now):
+    """A reset_event with its relative times made epoch seconds."""
+    ev = copy.deepcopy(ev)
+    sup = ev["supply"]
+    to_in, cool_in = sup.pop("to_in", None), sup.pop("cooldown_in", None)
+    sup.setdefault("to", None if to_in is None else now + to_in)
+    sup.setdefault("cooldown_until", None if cool_in is None else now + cool_in)
+    for e in ev["effects"]:
+        if "until_in" in e:
+            u = e.pop("until_in")
+            e["until"] = None if u is None else now + u
+    return ev
+
+
+def resets_standing(spec, now):
+    """fleet_standing with the case's events (69 §2.2), a weekly share on a
+    scoped window, and money pots."""
+    st = fleet_standing(spec, now)
+    wins = st["allowance"]["windows"]
+    for wid, w in (spec.get("windows") or {}).items():
+        if "weekly_share" in w:
+            wins[wid]["weekly_share"] = dict(w["weekly_share"])
+    st["allowance"]["events"] = [
+        reset_event_abs(reset_event(ev["id"], **{k: v for k, v in ev.items() if k != "id"}), now)
+        for ev in spec.get("events") or ()]
+    st["allowance"]["events_basis"] = spec.get("events_basis") or (
+        {"state": "read", "why": None} if spec.get("events") else
+        {"state": "none", "why": "no reset mechanism read"})
+    st["money"] = copy.deepcopy(spec.get("money") or {})
+    return st
+
+
+def resets_weeks(case, streams):
+    """The case's 400 sampled weeks: each of its weeks a share of them, flat
+    at its dollars an hour per stream ("none": no selection; a stream it
+    leaves out draws nothing), all work the sum. Equal weeks are one
+    object, as the flat ladder's are."""
+    out = []
+    for w in case["weeks"]:
+        usd = w["usd_h"]
+        wk = {s: [0.0] * 168 for s in streams}
+        wk.update({(None if k == "none" else k): [float(v)] * 168 for k, v in usd.items()})
+        wk["proxy"] = [float(sum(usd.values()))] * 168
+        out += [wk] * round(w["share"] * 400)
+    assert len(out) == 400, len(out)
+    return out
+
+
+def resets_run(case):
+    """A resets case (69 §9) through the brain: the figure, the worker's
+    inputs, _forecast_compute over the case's weeks (every selection's
+    stream drawn), and _forecast_attach. -> (fleet, result, inputs)."""
+    now = case["now"]
+    standings = {a: resets_standing(s, now) for a, s in case["accounts"].items()}
+    roster = {a: s["provider"] for a, s in case["accounts"].items()}
+    classes = [{"class": c["class"], "request_kind": "chat",
+                "members": [dict({"pay": [], "stop_at": None}, **m) for m in c["members"]]}
+               for c in case["classes"]]
+    routes = ex._routes(classes, case.get("lanes", {}), roster)
+    models = {f"{c['class']}/{ex._member_id(m)}": m["model"] for c in classes for m in c["members"]}
+    view = fleet_view(
+        {a: {wid: (usd, {"claude-opus-5-5": usd, "claude-fable-5-1": usd, "gpt-6-astra": usd})
+             for wid, usd in ws.items()} for a, ws in case["sizes"].items()},
+        providers={"anthropic": {"reference": "claude-opus-5-5", "models": {
+                       "claude-opus-5-5": {"basis": "reference", "dollars": 1.0}}},
+                   "gpt": {"reference": "gpt-6-astra", "models": {
+                       "gpt-6-astra": {"basis": "reference", "dollars": 1.0}}}})
+    walk = {}
+    with mock.patch.dict(T.limit_holds, {}, clear=True):
+        limits = ex._limit_snap(T, standings, now)
+    fleet = ex._fleet_figure(standings, routes, models, view, limits, now, ex.STALE_MAX, {}, walk)
+    preferred = case.get("preferred") or {}
+    pool = {"pool": [], "totals": {}, "history": True, "digest": "d"}
+    with mock.patch.object(ex, "_forecast_weeks",
+                           side_effect=lambda pool, streams, *a: resets_weeks(case, streams)), \
+            mock.patch.object(ex, "_burn_pool", return_value=pool), \
+            mock.patch.object(ex, "_burn_doc_row", return_value={"ratio": 1.0}), \
+            mock.patch.object(ex, "_forecast_request"):
+        inputs = ex._forecast_inputs(walk, standings, view, preferred, pool, 1.0, now)
+        res = ex._forecast_compute(T, inputs)
+        with mock.patch.object(T, "forecast", res):
+            ex._forecast_attach(T, fleet, walk, standings, view, preferred, now)
+    return fleet, res, inputs
+
+
+def ev_of(fleet, eid, level="proxy"):
+    lv = fleet["proxy"] if level == "proxy" else fleet["selections"][level]
+    return next(e for e in lv["events"] if e["id"] == eid)
+
+
+RESETS_CASES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "testdata",
+                            "resets_cases.json")
+RNOW = 1795100000
+OPUS_CLASS = [{"class": "capable", "members": [
+    {"kind": "anthropic", "lane": "opus", "model": "claude-opus-5-5", "priority": 1}]}]
+
+
+def rcase(accounts, usd_h=40.0, weeks=None, preferred=None, sizes=None, classes=None):
+    """A resets case on class `capable` (one Opus-lane member unless
+    classes), each window $3,000 unless sizes says, every week flat at
+    usd_h dollars an hour unless weeks says."""
+    return {"now": RNOW, "accounts": accounts, "classes": classes or OPUS_CLASS, "lanes": {},
+            "sizes": sizes if sizes is not None else {
+                a: {wid: 3000.0 for wid in s["windows"]} for a, s in accounts.items()},
+            "preferred": preferred or {},
+            "weeks": weeks or [{"share": 1.0, "usd_h": {"capable": usd_h}}]}
+
+
+def racct(used=100, back_h=48, events=(), five=None, five_back_h=1, provider="anthropic", **kw):
+    """An account's short form for rcase: its weekly at `used`, back in
+    back_h hours; a 5-hour window at `five` when given."""
+    w = {"seven_day": {"period_s": WEEK, "used": used, "resets_in": int(back_h * HOUR)}}
+    if five is not None:
+        w["five_hour"] = {"period_s": FIVE, "used": five, "resets_in": int(five_back_h * HOUR)}
+    out = {"provider": provider, "windows": w}
+    if events:
+        out["events"] = list(events)
+    out.update(kw)
+    return out
+
+
+def rev(eid, *effects, **kw):
+    """An event's short form for racct: effects as (window, effect[, ...])."""
+    return dict({"id": eid, "effects": [list(e) for e in effects] or [["seven_day", "refill"]]},
+                **kw)
+
+
+def rq(x):
+    return {"p10": x, "p50": x, "p90": x}
+
+
+class TestResetCases(TestFleetCases):
+    """quota-model 69 §9: the owner's cases of §5.2 and drawings 44 and 45
+    (testdata/resets_cases.json)."""
+
+    def test_cases(self):
+        with open(RESETS_CASES) as f:
+            doc = json.load(f)
+        names = [c["name"] for c in doc["cases"]]
+        for n in range(1, 8):
+            self.assertTrue(any(x.startswith(f"69 §5.2 case {n}") for x in names), n)
+        for d in ("drawing 44", "drawing 45"):
+            self.assertTrue(any(x.startswith(d) for x in names), d)
+        for case in doc["cases"]:
+            with self.subTest(case=case["name"]):
+                fleet, _, _ = resets_run(case)
+                self.assertSubset(fleet, case["expect"])
+
+    def test_no_clock_only_field(self):
+        pass
+
+    def test_one_window_is_unit_free(self):
+        pass
+
+
+class TestResetValuation(TestFleetCases):
+    """69 §4.8, §5.1, §5.3, §9: each gift effect, each state and verdict, the
+    plan. $3,000 a window ($30 a point), $40 an hour unless said, hours from
+    now."""
+
+    def at(self, hours):
+        return RNOW + round(hours * HOUR)
+
+    def run_case(self, case):
+        return resets_run(case)[0]
+
+    def test_the_wise_rule_is_one_function(self):
+        # §5.1, §12 Q1: a day of drought removed, or half the gift spent.
+        self.assertTrue(ex._reset_wise(ex.RESET_LONG_S, 0.1))
+        self.assertTrue(ex._reset_wise(3600, ex.RESET_WISE))
+        self.assertFalse(ex._reset_wise(ex.RESET_LONG_S - 1, ex.RESET_WISE - 0.01))
+        # The gate: under an hour of drought removed is never wise.
+        self.assertFalse(ex._reset_wise(3599, 1.0))
+        self.assertEqual((ex.RESET_WISE, ex.RESET_LONG_S, ex.RESET_MIN_S), (0.5, 86400, 3600))
+
+    def test_under_an_hour_removed_is_not_wise_whatever_it_spends(self):
+        # max-a has $30 left (0.75 h) and is back at 10 h; max-c, holding a
+        # give-back of 1.3 points ($39), is back at 90 h. At $40 it fills
+        # 0.975 h of the drought and spends all of it: under the hour, so
+        # not wise in any week (moves, its reason).
+        ev_ = rev("e:g", ("seven_day", "give_back", 1.3))
+        accts = {"max-a": racct(99, 10), "max-c": racct(100, 90, [ev_])}
+        ev = ev_of(self.run_case(rcase(accts)), "e:g")
+        self.assertEqual((ev["spent"]["p50"], ev["gain"]["p50"]), (1.0, 39.0))
+        self.assertEqual((ev["verdict"], ev["reason"]), ("wasteful", "moves"))
+
+    def verdict_pool(self, share_wise):
+        # max-a 25 % used ($2,250) back at 85.25 h, max-c spent back at 90 h
+        # with the reset: at $40 a 29 h drought the reset fills (wise by
+        # worth); at $28 the drought is 4.9 h and the reset spends 0.09
+        # (short). A light week at $10 has no drought at all.
+        accts = {"max-a": racct(25, 85.25), "max-c": racct(100, 90, [rev("e:r")])}
+        weeks = [{"share": share_wise, "usd_h": {"capable": 40.0}}]
+        if share_wise < 1.0:
+            weeks.append({"share": round(1.0 - share_wise, 4), "usd_h": {"capable": 28.0}})
+        return accts, weeks
+
+    def test_each_verdict_word_over_the_gap_weeks(self):
+        for share, word in ((1.0, "wise"), (0.8, "probably_wise"), (0.3, "probably_wasteful"),
+                            (0.05, "wasteful")):
+            with self.subTest(share=share):
+                accts, weeks = self.verdict_pool(share)
+                ev = ev_of(self.run_case(rcase(accts, weeks=weeks)), "e:r")
+                self.assertEqual(ev["verdict"], word)
+                self.assertEqual(ev["wise_share"], share)
+                self.assertEqual(ev["gap_weeks"], 400)
+                self.assertEqual(ev["reason"], None if word == "wise" else "short")
+
+    def test_the_verdicts_boundaries(self):
+        # The verdict reads the outcome's p10, p50 and p90 over 400 gap
+        # weeks (rank ceil(p N)): wise at p10 needs 361 wise weeks, 360 is
+        # probably_wise; the median needs 201; p90 needs 41, and 40 is
+        # wasteful.
+        for share, word in ((0.9025, "wise"), (0.9, "probably_wise"), (0.5025, "probably_wise"),
+                            (0.5, "probably_wasteful"), (0.1025, "probably_wasteful"),
+                            (0.1, "wasteful")):
+            with self.subTest(share=share):
+                accts, weeks = self.verdict_pool(share)
+                ev = ev_of(self.run_case(rcase(accts, weeks=weeks)), "e:r")
+                self.assertEqual((ev["verdict"], ev["wise_share"], ev["gap_weeks"]),
+                                 (word, share, 400))
+
+    def test_a_tie_between_reasons_takes_the_earlier_in_the_table(self):
+        # max-a back at 70 h, max-c's reset expiring at 60 h. At $40 A is
+        # out at 56.25 h: the reset fills the 13.75 h gap and spends 0.45
+        # before max-c's own refill: short. At $35 A is out at 64.3 h,
+        # after the expiry: expires_first. Half the weeks each: the tie
+        # goes to expires_first, ahead of short in §5.1's table.
+        accts = {"max-a": racct(25, 70), "max-c": racct(100, 90, [rev("e:r", to_in=60 * HOUR)])}
+        weeks = [{"share": 0.5, "usd_h": {"capable": 40.0}},
+                 {"share": 0.5, "usd_h": {"capable": 35.0}}]
+        ev = ev_of(self.run_case(rcase(accts, weeks=weeks)), "e:r")
+        self.assertEqual((ev["verdict"], ev["reason"], ev["reason_share"]),
+                         ("wasteful", "expires_first", 0.5))
+
+    def test_rank_ties(self):
+        # No week has a gap ($1 an hour), so every event's worth alone is
+        # 0 and the ties decide (§5.3): fit, then the soonest supply.to,
+        # then the account whose refill is furthest away, then id.
+        def ranks(accts):
+            evs = self.run_case(rcase(accts, usd_h=1.0))["proxy"]["events"]
+            return {e["id"]: e["rank"] for e in evs}
+        # Fit: a refill of the weekly the row binds before a give-back to it.
+        accts = {"max-a": racct(50, 100, [rev("e:a", ("seven_day", "give_back", 20)), rev("e:z")])}
+        self.assertEqual(ranks(accts), {"e:z": 1, "e:a": 2})
+        # The soonest supply.to.
+        accts = {"max-a": racct(50, 100, [rev("e:a", to_in=300 * HOUR),
+                                          rev("e:z", to_in=200 * HOUR)])}
+        self.assertEqual(ranks(accts), {"e:z": 1, "e:a": 2})
+        # The account whose refill is furthest away.
+        accts = {"max-a": racct(50, 50, [rev("e:a")]), "max-b": racct(50, 100, [rev("e:b")])}
+        self.assertEqual(ranks(accts), {"e:b": 1, "e:a": 2})
+
+    def test_the_first_spell_with_a_gain_is_the_one(self):
+        # max-b serves 0.75 h; max-a is out until 30 h, and its Fable window
+        # refills at 0.5 h. At the first spell (0.75 h) A's Fable give-back
+        # reads Fable's use since its refill, 0: it gains nothing, and that
+        # walk ends at its step. A then serves 30 h to 105 h, draining
+        # Fable, and at the second spell it gains.
+        fable = {"period_s": WEEK, "scope": "Fable", "used": 40, "resets_in": int(0.5 * HOUR),
+                 "weekly_share": {"allowance_pct_of_weekly": 40.0, "used_pct_of_weekly": 16.0}}
+        accts = {"max-b": racct(99, 200),
+                 "max-a": racct(100, 30, [rev("e:g", ("seven_day", "give_back", 16, "scoped:Fable"))])}
+        accts["max-a"]["windows"]["scoped:Fable"] = fable
+        case = rcase(accts, sizes={"max-a": {"seven_day": 3000.0}, "max-b": {"seven_day": 3000.0}},
+                     weeks=[{"share": 1.0, "usd_h": {"none": 40.0}}])
+        ev = ev_of(self.run_case(case), "e:g")
+        self.assertEqual(ev["use_at"], {"p10": self.at(105), "p90": self.at(105)})
+        self.assertEqual((ev["gain"]["p50"], ev["gain_basis"]), (480.0, "inferred"))
+
+    def test_gap_free_weeks_are_not_counted(self):
+        # A gap in a tenth of the weeks, the reset wise in each: wise, over
+        # those 40 weeks alone.
+        accts, _ = self.verdict_pool(1.0)
+        weeks = [{"share": 0.1, "usd_h": {"capable": 40.0}}, {"share": 0.9, "usd_h": {"capable": 10.0}}]
+        fleet = self.run_case(rcase(accts, weeks=weeks))
+        ev = ev_of(fleet, "e:r")
+        self.assertEqual((ev["verdict"], ev["wise_share"], ev["gap_weeks"]), ("wise", 1.0, 40))
+        self.assertEqual(fleet["proxy"]["forecast"]["gap_share"], 0.1)
+        self.assertEqual(ev["use_share"], 0.1)
+        self.assertEqual(ev["worth_h"]["p50"], 0.0, "a week with no use_at counts 0")
+
+    def test_no_gap_only_when_no_week_has_one(self):
+        accts, _ = self.verdict_pool(1.0)
+        ev = ev_of(self.run_case(rcase(accts, usd_h=10.0)), "e:r")
+        self.assertEqual((ev["verdict"], ev["reason"], ev["wise_share"], ev["gap_weeks"]),
+                         ("wasteful", "no_gap", None, 0))
+
+    def test_it_moves_the_drought(self):
+        # max-a's five-hour window is shut for 4 h and its weekly has $30
+        # (0.75 h) left: the five-hour refill now serves the 0.75 h sooner
+        # and the weekly wall follows, so the drought only moves: spent
+        # under a tenth, worth 0: wasteful, moves.
+        accts = {"max-a": racct(99, 100, [rev("e:five", ("five_hour", "refill"))], five=100,
+                                five_back_h=4)}
+        case = rcase(accts, sizes={"max-a": {"seven_day": 3000.0, "five_hour": 400.0}})
+        fleet = self.run_case(case)
+        ev = ev_of(fleet, "e:five", "capable") if fleet["selections"]["capable"]["events"] \
+            else ev_of(fleet, "e:five")
+        self.assertEqual((ev["verdict"], ev["reason"]), ("wasteful", "moves"))
+        self.assertEqual(ev["worth_h"]["p50"], 0.0)
+        self.assertGreater(ev["spent"]["p50"], 0.0)
+
+    def test_no_gain_when_no_week_has_one_and_not_when_one_does(self):
+        # The five-hour refill on an account its weekly walls: it touches a
+        # window the row binds but adds no room in any week: no_gain.
+        accts = {"max-a": racct(100, 100, [rev("e:five", ("five_hour", "refill"))], five=100,
+                                five_back_h=1)}
+        sizes = {"max-a": {"seven_day": 3000.0, "five_hour": 400.0}}
+        ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:five")
+        self.assertEqual((ev["verdict"], ev["reason"], ev["gain"]), ("no_gain", "five_hour", None))
+        # One week in ten the weekly has room when the five-hour shuts: the
+        # reset gains there, so it is judged: probably_wasteful at best.
+        accts, weeks = self.verdict_pool(0.3)
+        ev = ev_of(self.run_case(rcase(accts, weeks=weeks)), "e:r")
+        self.assertEqual(ev["verdict"], "probably_wasteful")
+
+    def test_a_gap_week_no_spell_could_take(self):
+        # In a week with a drought, every spell refused by a condition gives
+        # the condition as the week's reason; every spell gaining nothing
+        # gives no_gain. Neither is no_gap: the plain week has a gap.
+        accts, weeks = self.verdict_pool(0.8)
+        accts["max-c"]["events"] = [rev("e:r", only_at_limit=True)]
+        ev = ev_of(self.run_case(rcase(accts, weeks=weeks)), "e:r")
+        self.assertEqual(ev["verdict"], "probably_wise")
+        self.assertEqual(ev["reason"], "short")
+        # A limit ending at 60 h: in a $40 week max-a is out at 56.25 h and
+        # the limit gives 3.75 h (short); in a $28 week A is out at 80.4 h,
+        # after the limit's end, and it gains nothing: no_gain, the
+        # commoner reason.
+        accts = {"max-a": racct(25, 85.25, [rev("e:lim", ("seven_day", "limit", 1.5, 60 * HOUR))])}
+        weeks = [{"share": 0.3, "usd_h": {"capable": 40.0}},
+                 {"share": 0.7, "usd_h": {"capable": 28.0}}]
+        ev = ev_of(self.run_case(rcase(accts, weeks=weeks)), "e:lim")
+        self.assertEqual((ev["verdict"], ev["reason"], ev["reason_share"]),
+                         ("wasteful", "no_gain", 0.7))
+        # A condition: not while scoped:Fable is shut, shut until 70 h; A
+        # back at 100 h. In a $40 week A is out at 56.25 h, Fable still
+        # shut: closed; in a $28 week at 80.4 h, Fable open: 19.6 h filled,
+        # 0.18 spent: short.
+        ev_ = rev("e:r", not_while_closed=["scoped:Fable"])
+        accts = {"max-a": racct(25, 100, [ev_])}
+        accts["max-a"]["windows"]["scoped:Fable"] = {
+            "period_s": WEEK, "scope": "Fable", "used": 100, "resets_in": 70 * HOUR}
+        weeks = [{"share": 0.7, "usd_h": {"capable": 40.0}},
+                 {"share": 0.3, "usd_h": {"capable": 28.0}}]
+        ev = ev_of(self.run_case(rcase(accts, weeks=weeks, sizes={"max-a": {"seven_day": 3000.0}})),
+                   "e:r")
+        self.assertEqual((ev["verdict"], ev["reason"], ev["reason_share"]),
+                         ("wasteful", "closed", 0.7))
+        out_28 = RNOW + round(2250 / 28 * HOUR)  # 80.36 h
+        self.assertEqual(ev["use_at"], {"p10": out_28, "p90": out_28})
+        # Half the weeks each: the tie goes to short, a table reason ahead
+        # of a condition's own (§5.1).
+        weeks = [{"share": 0.5, "usd_h": {"capable": 40.0}},
+                 {"share": 0.5, "usd_h": {"capable": 28.0}}]
+        ev = ev_of(self.run_case(rcase(accts, weeks=weeks, sizes={"max-a": {"seven_day": 3000.0}})),
+                   "e:r")
+        self.assertEqual((ev["reason"], ev["reason_share"]), ("short", 0.5))
+
+    def test_a_structural_no_gain_names_its_window(self):
+        accts = {"max-a": racct(100, 30, [rev("e:fable", ("scoped:Fable", "refill"))])}
+        ev = ev_of(self.run_case(rcase(accts)), "e:fable")
+        self.assertEqual((ev["verdict"], ev["reason"]), ("no_gain", "scoped:Fable"))
+
+    def test_the_conditions_judged_on_the_walk(self):
+        # not_while_closed on the weekly: at every spell start the weekly is
+        # what is shut, so the refill can never be used: unusable, the
+        # provider's own reason when it gave one.
+        five = rev("e:five", ("five_hour", "refill"), not_while_closed=["seven_day"],
+                   why_not="weekly_limit", now_=False)
+        accts = {"max-a": racct(100, 100, [five], five=100, five_back_h=1)}
+        sizes = {"max-a": {"seven_day": 3000.0, "five_hour": 400.0}}
+        ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:five")
+        self.assertEqual(ev["verdict"], "no_gain", "no_gain comes ahead of a condition")
+        # A weekly refill the provider allows only with no overage on, the
+        # account's money on: unusable, not_with_overage.
+        accts = {"max-a": racct(25, 85.25), "max-c": racct(100, 90, [rev(
+            "e:r", not_with_overage=True)], money={"max-c/extra": {"open": True, "balance": 5.0,
+                                                                   "unit": "usd"}})}
+        ev = ev_of(self.run_case(rcase(accts)), "e:r")
+        self.assertEqual((ev["verdict"], ev["reason"]), ("unusable", "not_with_overage"))
+        accts["max-c"]["money"]["max-c/extra"]["open"] = False
+        self.assertEqual(ev_of(self.run_case(rcase(accts)), "e:r")["verdict"], "wise")
+
+    def test_a_window_shut_past_every_spell_start_forbids_it(self):
+        # Refill the weekly, but not while scoped:Fable is shut: it is shut
+        # until 10 h and the only drought starts now, so the walk finds no
+        # moment it may be used: unusable, closed.
+        ev_ = rev("e:r", not_while_closed=["scoped:Fable"])
+        accts = {"max-a": racct(100, 100, [ev_])}
+        accts["max-a"]["windows"]["scoped:Fable"] = {
+            "period_s": WEEK, "scope": "Fable", "used": 100, "resets_in": 10 * HOUR}
+        sizes = {"max-a": {"seven_day": 3000.0}}
+        ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:r")
+        self.assertEqual((ev["verdict"], ev["reason"]), ("unusable", "closed"))
+        accts["max-a"]["events"] = [rev("e:r")]
+        self.assertNotEqual(ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:r")["verdict"],
+                            "unusable")
+
+    def test_a_listed_accounts_condition(self):
+        # max-b is listed (not sized) with room: its reset usable only at the
+        # limit is unusable, by its condition, ahead of unsized.
+        accts, _ = self.verdict_pool(1.0)
+        accts["max-b"] = racct(40, 30, [rev("e:b", only_at_limit=True)])
+        sizes = {"max-a": {"seven_day": 3000.0}, "max-c": {"seven_day": 3000.0}}
+        ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:b")
+        self.assertEqual((ev["verdict"], ev["reason"]), ("unusable", "only_at_limit"))
+
+    def test_a_spell_starting_at_the_horizon_is_no_gap(self):
+        # 75 h + 75 h + 18 h of room at $40 an hour: the row runs dry exactly
+        # at H. The figure counts that spell (push 3's first_dry); the
+        # valuation has no gap to fill.
+        accts = {"max-a": racct(0, 300), "max-b": racct(0, 300),
+                 "max-c": racct(76, 300, [rev("e:r")])}
+        fleet = self.run_case(rcase(accts))
+        ev = ev_of(fleet, "e:r")
+        self.assertEqual(fleet["proxy"]["forecast"]["first_dry"]["p10"], RNOW + 168 * HOUR)
+        self.assertEqual((ev["verdict"], ev["reason"], ev["gap_weeks"]), ("wasteful", "no_gap", 0))
+
+    def test_each_reason_it_cannot_be_used_yet(self):
+        # §5.1: the reset's own state, ahead of no_gain; a condition's
+        # why_not is not its own state.
+        for kw, why in (({"paused": True}, "paused"), ({"cooldown_in": 3600}, "cooldown"),
+                        ({"now_": False, "min_used_pct": 50}, "min_used"),
+                        ({"now_": False, "why_not": "not_enrolled"}, "not_enrolled")):
+            with self.subTest(why=why):
+                accts, _ = self.verdict_pool(1.0)
+                accts["max-c"]["events"] = [rev("e:r", **kw)]
+                ev = ev_of(self.run_case(rcase(accts)), "e:r")
+                self.assertEqual((ev["verdict"], ev["reason"], ev["worth_h"]), ("unusable", why, None))
+        accts, _ = self.verdict_pool(1.0)
+        accts["max-c"]["events"] = [rev("e:r", now_=False, why_not="not_at_wall", only_at_limit=True)]
+        self.assertEqual(ev_of(self.run_case(rcase(accts)), "e:r")["verdict"], "wise",
+                         "at its wall when the row runs dry")
+
+    def test_a_paid_event_is_never_valued(self):
+        accts, _ = self.verdict_pool(1.0)
+        accts["max-c"]["events"].append(rev("e:paid", trigger="owner_pays"))
+        ev = ev_of(self.run_case(rcase(accts)), "e:paid")
+        self.assertEqual(ev["verdict"], "costs_money")
+        for k in ("gain", "worth_h", "spent", "use_at", "wise_share", "step", "now"):
+            self.assertIsNone(ev[k], k)
+        self.assertIs(ev["reaches_short"], False, "the free reset leaves nothing short")
+
+    def test_an_unsized_window_and_an_unmapped_one(self):
+        # max-b is not sized: listed, not counted; its reset is unsized with
+        # its own left % after.
+        accts, _ = self.verdict_pool(1.0)
+        accts["max-b"] = racct(80, 30, [rev("e:b")])
+        sizes = {"max-a": {"seven_day": 3000.0}, "max-c": {"seven_day": 3000.0}}
+        ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:b")
+        self.assertEqual((ev["verdict"], ev["left_pct_after"]), ("unsized", 100.0))
+        accts, _ = self.verdict_pool(1.0)
+        accts["max-c"]["events"] = [rev("e:r", (None, "refill", "mystery window"))]
+        ev = ev_of(self.run_case(rcase(accts)), "e:r")
+        self.assertEqual((ev["verdict"], ev["reason"]), ("unsized", "mystery window not mapped"))
+
+    def test_two_resets_that_each_fill_the_drought_and_one_kept(self):
+        # Drawing 44's shape on one account: the drought of 48 h is filled
+        # whole by either reset alone; in turn the second has none left
+        # (after); a smaller one with no expiry is held past H (keep).
+        accts = {"max-a": racct(100, 82, [rev("e:one"), rev("e:two", ("seven_day", "give_back", 80))]),
+                 "max-b": racct(66, 144),
+                 "max-k": racct(100, 240, [rev("e:small", anchor="restarts_at_use")])}
+        sizes = {"max-a": {"seven_day": 2520.0}, "max-b": {"seven_day": 4000.0},
+                 "max-k": {"seven_day": 1000.0}}
+        fleet = self.run_case(rcase(accts, sizes=sizes))
+        one, two, small = (ev_of(fleet, e) for e in ("e:one", "e:two", "e:small"))
+        self.assertEqual((one["verdict"], one["step"], one["rank"]), ("wise", 1, 1))
+        self.assertEqual((two["verdict"], two["reason"], two["after"]), ("wasteful", "after", "e:one"))
+        self.assertEqual((small["verdict"], small["reason"]), ("wasteful", "keep"))
+        # The same small reset expiring inside the week is not kept: after.
+        accts["max-k"]["events"] = [rev("e:small", anchor="restarts_at_use", to_in=100 * HOUR)]
+        small = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:small")
+        self.assertEqual((small["verdict"], small["reason"]), ("wasteful", "after"))
+
+    def test_valued_at_the_last_drought_before_it_expires(self):
+        # Two droughts: 34 h -> 82 h and, after max-a's refill carries 63 h,
+        # 145 h -> H. A reset expiring at 100 h is valued at the first; one
+        # with no expiry at the first too (the earliest start that gains).
+        accts = {"max-a": racct(100, 82, [rev("e:r", to_in=100 * HOUR)]), "max-b": racct(66, 300)}
+        sizes = {"max-a": {"seven_day": 2520.0}, "max-b": {"seven_day": 4000.0}}
+        ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:r")
+        self.assertEqual(ev["use_at"], {"p10": self.at(34), "p90": self.at(34)})
+        accts["max-a"]["events"] = [rev("e:r", to_in=160 * HOUR)]
+        ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:r")
+        self.assertEqual(ev["use_at"], {"p10": self.at(145), "p90": self.at(145)},
+                         "the latest start before it expires")
+
+    def test_supply_order_is_honoured_in_turn(self):
+        # e:first is next in line but worth less alone than e:big: e:big
+        # waits for it, then is valued after it.
+        accts = {"max-a": racct(100, 120, [rev("e:first", ("seven_day", "give_back", 20), order=1),
+                                           rev("e:big")]),
+                 "max-b": racct(100, 300)}
+        fleet = self.run_case(rcase(accts))
+        first, big = ev_of(fleet, "e:first"), ev_of(fleet, "e:big")
+        self.assertEqual((first["verdict"], first["step"]), ("wise", 1))
+        self.assertEqual((big["after"], big["step"]), ("e:first", 2))
+        self.assertLess(big["rank"], first["rank"], "ranked by worth alone")
+        # Named next but never planned (no gap for it): the sibling waits for good.
+        accts["max-a"]["events"][0] = rev("e:first", ("seven_day", "give_back", 20), order=1,
+                                          to_in=HOUR // 2)
+        accts["max-a"]["windows"]["seven_day"]["used"] = 90
+        big = ev_of(self.run_case(rcase(accts)), "e:big")
+        self.assertEqual((big["verdict"], big["reason"]), ("unusable", "not_next"))
+
+    def test_a_give_back_with_no_share_stated_recovers_its_factor(self):
+        # A Fable class draws on max-a's weekly and its Fable window; A runs
+        # dry at 30 h, after Fable's refill at 10 h. With no weekly_share,
+        # the factor is the stated points over the reading's Fable use,
+        # 16 / 40, the share that stated gives: 20 h of Fable's use since
+        # its refill (26.7 points) gives back 10.7 weekly points, $320.
+        # With no points either, the reset is unsized.
+        fable_class = [{"class": "deep", "members": [
+            {"kind": "anthropic", "lane": "fable", "model": "claude-fable-5-1", "priority": 1}]}]
+        fable = {"period_s": WEEK, "scope": "Fable", "used": 40, "resets_in": 10 * HOUR,
+                 "weekly_share": {"allowance_pct_of_weekly": 40.0, "used_pct_of_weekly": 16.0}}
+        ev_ = rev("e:fable", ("scoped:Fable", "refill"), ("seven_day", "give_back", 16, "scoped:Fable"))
+        accts = {"max-a": racct(60, 100, [ev_])}
+        accts["max-a"]["windows"]["scoped:Fable"] = fable
+        sizes = {"max-a": {"seven_day": 3000.0, "scoped:Fable": 3000.0}}
+        weeks = [{"share": 1.0, "usd_h": {"deep": 40.0}}]
+        run = lambda: ev_of(self.run_case(rcase(accts, sizes=sizes, weeks=weeks,  # noqa: E731
+                                                classes=fable_class)), "e:fable")
+        stated = run()
+        self.assertEqual(stated["gain"]["p50"], 320.0)
+        del fable["weekly_share"]
+        ev = run()
+        self.assertEqual(ev["gain_basis"], "inferred")
+        self.assertGreater(ev["gain"]["p50"], 0.0)
+        self.assertEqual(ev["gain"], stated["gain"])
+        accts["max-a"]["events"] = [rev("e:fable", ("scoped:Fable", "refill"),
+                                        ("seven_day", "give_back", None, "scoped:Fable"))]
+        ev = run()
+        self.assertEqual((ev["verdict"], ev["reason"]), ("unsized", "scoped:Fable share not read"))
+
+    def test_a_condition_in_the_used_now_walks(self):
+        # max-a at 50 % alone, out at 37.5 h to 100 h. e:a, a 40-point
+        # give-back only at the limit, fills 30 h there: wise, step 1. Used
+        # now, with room, it is refused: no gain and nothing moves.
+        # e:b, a 20-point give-back, valued in turn after e:a, used now: A
+        # still has room at 37.5 h, so e:a is refused there and undone; A
+        # runs out at 52.5 h, worse than e:a's plan (67.5 h): e:b used now
+        # removes nothing. Were e:a's give-back kept, A would last to 82.5 h.
+        accts = {"max-a": racct(50, 100, [rev("e:a", ("seven_day", "give_back", 40),
+                                              only_at_limit=True)])}
+        ev = ev_of(self.run_case(rcase(accts)), "e:a")
+        self.assertEqual((ev["verdict"], ev["worth_h"]["p50"]), ("wise", 30.0))
+        self.assertEqual((ev["now"]["gain"]["p50"], ev["now"]["worth_h"]["p50"]), (0.0, 0.0))
+        accts["max-a"]["events"].append(rev("e:b", ("seven_day", "give_back", 20)))
+        fleet = self.run_case(rcase(accts))
+        self.assertEqual((ev_of(fleet, "e:a")["step"], ev_of(fleet, "e:b")["step"]), (1, 2))
+        self.assertEqual(ev_of(fleet, "e:b")["now"]["worth_h"]["p50"], 0.0)
+        self.assertEqual(ev_of(fleet, "e:b")["now"]["gain"]["p50"], 600.0)
+
+    def test_a_give_back_reads_its_points_until_the_share_window_refills(self):
+        # The Fable reset's 16 weekly points are what Fable drew; after
+        # scoped:Fable refills, the walk's own use of it stands in, at its
+        # part of the weekly (40 %): inferred.
+        # The spend with no selection drains scoped:Fable at its share of
+        # the weekly. A at 90 % runs dry at 7.5 h, before Fable refills at
+        # 10 h: the 16 points stated ($480), read.
+        fable = {"period_s": WEEK, "scope": "Fable", "used": 40, "resets_in": 10 * HOUR,
+                 "weekly_share": {"allowance_pct_of_weekly": 40.0, "used_pct_of_weekly": 16.0}}
+        ev_ = rev("e:fable", ("scoped:Fable", "refill"), ("seven_day", "give_back", 16, "scoped:Fable"))
+        accts = {"max-a": racct(90, 100, [ev_])}
+        accts["max-a"]["windows"]["scoped:Fable"] = fable
+        sizes = {"max-a": {"seven_day": 3000.0}}
+        weeks = [{"share": 1.0, "usd_h": {"none": 40.0}}]
+        ev = ev_of(self.run_case(rcase(accts, sizes=sizes, weeks=weeks)), "e:fable")
+        self.assertEqual((ev["gain_basis"], ev["gain"]["p50"]), ("read", 480.0))
+        # At 60 % A runs dry at 30 h, after Fable's refill: what the walk drew
+        # on Fable since (20 h of the weekly's draw at its share), at
+        # Fable's part of the weekly, stands in for the points: inferred.
+        accts["max-a"]["windows"]["seven_day"]["used"] = 60
+        ev = ev_of(self.run_case(rcase(accts, sizes=sizes, weeks=weeks)), "e:fable")
+        self.assertEqual(ev["gain_basis"], "inferred")
+        self.assertGreater(ev["gain"]["p50"], 0.0)
+        self.assertLess(ev["gain"]["p50"], 480.0)
+
+    def test_a_limit_raises_the_cap_until_it_ends(self):
+        # A limit of 1.5 on the weekly for 20 h: 50 points more of room
+        # ($1,500, 37.5 h) while it lasts, at A's wall at 0 h: A serves to
+        # 20 h, when the cap falls back and A is over it.
+        accts = {"max-a": racct(100, 100, [rev("e:lim", ("seven_day", "limit", 1.5, 20 * HOUR))])}
+        ev = ev_of(self.run_case(rcase(accts)), "e:lim")
+        self.assertEqual(ev["gain"]["p50"], 1500.0)
+        self.assertEqual(ev["worth_h"]["p50"], 20.0)
+        accts["max-a"]["events"] = [rev("e:lim", ("seven_day", "limit", 1.5, None))]
+        ev = ev_of(self.run_case(rcase(accts)), "e:lim")
+        self.assertEqual(ev["worth_h"]["p50"], 37.5, "with no end, the whole 50 points")
+
+    def test_a_limit_on_a_row_capped_under_100(self):
+        # capable stops at 80 % on every binding window. A at 50 % runs out
+        # for it at 22.5 h; a limit of 1.5 raises its cap to 120: the gift is
+        # the 40 points above its own cap ($1,200, the gain), and it draws
+        # all 40 by 52.5 h: spent 1.0, not 20 of 50 above 100.
+        capped = [{"class": "capable", "members": [
+            {"kind": "anthropic", "lane": "opus", "model": "claude-opus-5-5", "priority": 1,
+             "stop_at": {"window": "effective", "level": 80}}]}]
+        accts = {"max-a": racct(50, 100, [rev("e:lim", ("seven_day", "limit", 1.5, None))])}
+        fleet = self.run_case(rcase(accts, classes=capped))
+        ev = ev_of(fleet, "e:lim", "capable")
+        self.assertEqual(ev["use_at"], {"p10": self.at(22.5), "p90": self.at(22.5)})
+        self.assertEqual((ev["gain"]["p50"], ev["spent"]["p50"]), (1200.0, 1.0))
+
+    def test_a_limit_used_at_or_after_its_end_gives_nothing(self):
+        # A at 50 % is out at 37.5 h. A limit ending at 10 h, used there,
+        # changes nothing: it gains in no week, which the walk finds:
+        # no_gain. Ending at 60 h it gives the 22.5 h to its end.
+        accts = {"max-a": racct(50, 100, [rev("e:lim", ("seven_day", "limit", 1.5, 10 * HOUR))])}
+        ev = ev_of(self.run_case(rcase(accts)), "e:lim")
+        self.assertEqual((ev["verdict"], ev["reason"]), ("no_gain", "seven_day"))
+        accts["max-a"]["events"] = [rev("e:lim", ("seven_day", "limit", 1.5, 60 * HOUR))]
+        ev = ev_of(self.run_case(rcase(accts)), "e:lim")
+        self.assertEqual((ev["verdict"], ev["worth_h"]["p50"]), ("wise", 22.5))
+
+    def test_a_limits_spent_counts_only_the_room_above_the_cap(self):
+        # The limit's gift is the 50 points above the full cap. Used at the
+        # wall (37.5 h) to its end at 60 h, A draws 30 of them: 0.6. Used
+        # now at 50 %, A draws 80 points by 60 h, of which 30 above the cap:
+        # 0.6 too, not the 50 points of draws under it.
+        accts = {"max-a": racct(50, 100, [rev("e:lim", ("seven_day", "limit", 1.5, 60 * HOUR))])}
+        ev = ev_of(self.run_case(rcase(accts)), "e:lim")
+        self.assertEqual(ev["spent"]["p50"], 0.6)
+        self.assertEqual(ev["now"]["spent"]["p50"], 0.6)
+        self.assertEqual(ev["now"]["worth_h"]["p50"], 22.5)
+
+    def test_an_anchor_that_restarts_at_use(self):
+        for anchor in ("restarts_at_use", "restarts_now"):
+            with self.subTest(anchor=anchor):
+                accts = {"max-a": racct(100, 100, [rev("e:r", anchor=anchor)])}
+                ev = ev_of(self.run_case(rcase(accts)), "e:r")
+                self.assertEqual(ev["more_at_after"], self.at(168))
+                self.assertEqual(ev["lost_share"], 0.0, "the refill at 100 h moved past H")
+        accts["max-a"]["events"] = [rev("e:r")]
+        ev = ev_of(self.run_case(rcase(accts)), "e:r")
+        self.assertEqual(ev["more_at_after"], self.at(100))
+
+    def test_a_lift_starts_a_refused_account(self):
+        # All work binds max-a's weekly only; its five-hour window is shut for
+        # 4 h, so it rests until then. The five-hour refill lifts the rest:
+        # A serves the 4 h its weekly refill at 30 h would otherwise take.
+        accts = {"max-a": racct(50, 30, [rev("e:five", ("five_hour", "refill"))], five=100,
+                                five_back_h=4)}
+        sizes = {"max-a": {"seven_day": 3000.0, "five_hour": 400.0}}
+        fleet = self.run_case(rcase(accts, sizes=sizes))
+        self.assertEqual(fleet["proxy"]["forecast"]["dry_h"]["p50"], 67.0)
+        ev = ev_of(fleet, "e:five")
+        self.assertEqual(ev["use_at"], {"p10": RNOW, "p90": RNOW})
+        self.assertEqual(ev["worth_h"]["p50"], 4.0)
+        # With the weekly back later than A's room lasts, the lift only moves
+        # the drought.
+        accts["max-a"]["windows"]["seven_day"]["resets_in"] = 100 * HOUR
+        ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:five")
+        self.assertEqual((ev["worth_h"]["p50"], ev["reason"]), (0.0, "moves"))
+
+    def test_a_row_neither_shown_nor_out_now_has_none(self):
+        accts, _ = self.verdict_pool(1.0)
+        fleet = self.run_case(rcase(accts))
+        self.assertIsInstance(fleet["proxy"]["events"], list)
+        self.assertIsNone(fleet["selections"]["capable"]["events"])
+        self.assertEqual(fleet["accounts"]["max-c"]["events"],
+                         [{"id": "e:r", "usable": True, "expires_at": None}])
+
+    def test_the_walks_are_counted(self):
+        # §4.9: per distinct week, E alone (resumed), in turn after the first
+        # planned one, E used now; no plan walk. Here e:two in turn finds no
+        # gap left after e:one: no walk at all.
+        case = rcase({"max-a": racct(100, 82, [rev("e:one"), rev("e:two", ("seven_day", "give_back", 80))]),
+                      "max-b": racct(66, 144)},
+                     sizes={"max-a": {"seven_day": 2520.0}, "max-b": {"seven_day": 4000.0}})
+        _, res, _ = resets_run(case)
+        self.assertEqual(res["walks"], {"resumed": 2, "full": 0, "now": 2})
+        # Drawing 45: three alone, two in turn; three used now and the two
+        # weeks the out-now rows read against (each prefix of the plan).
+        with open(RESETS_CASES) as f:
+            case = next(c for c in json.load(f)["cases"] if c["name"].startswith("drawing 45"))
+        _, res, _ = resets_run(case)
+        self.assertEqual(res["walks"], {"resumed": 5, "full": 0, "now": 5})
+
+    def test_valuations_are_clock_only_and_the_events_key_the_inputs(self):
+        accts, _ = self.verdict_pool(1.0)
+        fleet, _, inputs = resets_run(rcase(accts))
+        doc = ex._strip_clock_only({"fleet": copy.deepcopy(fleet)})["fleet"]
+        self.assertEqual(set(doc["proxy"]["events"][0]),
+                         {"id", "account", "label", "trigger", "usable", "why_not", "expires_at",
+                          "anchor"})
+        accts["max-c"]["events"].append(rev("e:more"))
+        _, _, other = resets_run(rcase(accts))
+        self.assertNotEqual(inputs["key"], other["key"], "a reset offered recomputes")
+
+    def test_a_selections_events_strip_to_what_each_event_is(self):
+        # §6.1: a selection's events lose their valuation and a null, not
+        # what each event is: a label changed on a selection's list alone is
+        # a change.
+        with open(RESETS_CASES) as f:
+            case = next(c for c in json.load(f)["cases"] if c["name"].startswith("drawing 45"))
+        fleet = resets_run(case)[0]
+        self.assertTrue(fleet["selections"]["capable"]["events"])
+        doc = ex._strip_clock_only({"fleet": copy.deepcopy(fleet)})["fleet"]
+        structure = {"id", "account", "label", "trigger", "usable", "why_not", "expires_at", "anchor"}
+        self.assertTrue(all(set(e) == structure for e in doc["selections"]["capable"]["events"]))
+        moved = copy.deepcopy(fleet)
+        for e in moved["selections"]["capable"]["events"]:
+            e.update(verdict="wasteful", rank=99, step=None)
+        self.assertEqual(ex._preferred_digest({"fleet": fleet}), ex._preferred_digest({"fleet": moved}))
+        relabelled = copy.deepcopy(fleet)
+        relabelled["selections"]["capable"]["events"][0]["label"] = "another"
+        self.assertNotEqual(ex._preferred_digest({"fleet": fleet}),
+                            ex._preferred_digest({"fleet": relabelled}))
+        nulled = copy.deepcopy(fleet)
+        nulled["selections"]["capable"]["events"] = None
+        self.assertNotIn("events", ex._strip_clock_only({"fleet": nulled})["fleet"]["selections"]["capable"])
+
+    def test_not_yet_and_no_history(self):
+        accts, _ = self.verdict_pool(1.0)
+        case = rcase(accts)
+        now = case["now"]
+        standings = {a: resets_standing(s, now) for a, s in case["accounts"].items()}
+        walk = {}
+        roster = {a: s["provider"] for a, s in case["accounts"].items()}
+        classes = [{"class": "capable", "request_kind": "chat",
+                    "members": [dict({"pay": [], "stop_at": None}, **m) for m in OPUS_CLASS[0]["members"]]}]
+        routes = ex._routes(classes, {}, roster)
+        models = {f"capable/{ex._member_id(m)}": m["model"] for m in classes[0]["members"]}
+        view = fleet_view({a: {"seven_day": (3000.0, {"claude-opus-5-5": 3000.0})} for a in accts})
+        for history, word in ((True, "not_yet"), (False, "no_history")):
+            with self.subTest(word=word):
+                fleet = ex._fleet_figure(standings, routes, models, view, {}, now, ex.STALE_MAX, {}, walk)
+                pool = {"pool": [], "totals": {}, "history": history, "digest": "d"}
+                with mock.patch.object(ex, "_burn_pool", return_value=pool), \
+                        mock.patch.object(ex, "_burn_doc_row", return_value={"ratio": 1.0}), \
+                        mock.patch.object(ex, "_forecast_request"), \
+                        mock.patch.object(T, "forecast", None):
+                    ex._forecast_attach(T, fleet, walk, standings, view, {}, now)
+                self.assertEqual([(e["verdict"], e["rank"]) for e in fleet["proxy"]["events"]],
+                                 [(word, 1)])
+                self.assertIsNone(fleet["selections"]["capable"]["events"])
+
+    def test_the_event_gauge_the_counters_and_the_constants(self):
+        # 69 §6.1, §6.6: fleet_event_worth_h for each valued event (none for
+        # a paid one), the counters of events read, pots unread and unpriced
+        # takes, and /sizing's two constants.
+        with open(RESETS_CASES) as fh:
+            case = next(c for c in json.load(fh)["cases"] if c["name"].startswith("drawing 45"))
+        lines = ex._fleet_metric_lines(resets_run(case)[0], T.id)
+        worth = {l.split('event="')[1].split('"')[0]: float(l.split()[-1]) for l in lines
+                 if l.startswith("fleet_event_worth_h{") and 'level="proxy"' in l and 'q="p50"' in l}
+        self.assertEqual(worth, {"cedar_ember:full-reset": 50.0, "codex_reset:banked": 18.0,
+                                 "cedar_ember:fable-reset": 6.0})
+        ex._events_count(T, {"provider": "anthropic", "pots": [
+            {"events": [{"id": "cedar_ember:a", "program": "cedar_ember"},
+                        {"id": "juniper_tide", "program": "juniper_tide"}]},
+            {"events": [], "events_basis": {"state": "unread", "why": "cli_version"}}]})
+        with T.sizing_lock:
+            ex._burn_take(T, None, None, ACCT_A, None, time.time())
+        text = ex.render([T])
+        tl = f'tenant="{T.id}"'
+        has = lambda fam, *bits: any(l.startswith(fam + "{") and tl in l  # noqa: E731
+                                     and all(b in l for b in bits) for l in text.splitlines())
+        self.assertTrue(has("events_read_total", 'provider="anthropic"', 'program="cedar_ember"'))
+        self.assertTrue(has("events_read_total", 'program="juniper_tide"'))
+        self.assertTrue(has("events_unread_total", 'provider="anthropic"', 'why="cli_version"'))
+        self.assertTrue(has("burn_unpriced_total", 'selection="none"'))
+        for fam, kind in (("events_read_total", "counter"), ("events_unread_total", "counter"),
+                          ("burn_unpriced_total", "counter"), ("fleet_event_worth_h", "gauge")):
+            self.assertIn(f"# TYPE {fam} {kind}", text)
+        c = ex.sizing_payload(T)["constants"]
+        self.assertEqual((c["reset_wise"], c["reset_long_s"], c["reset_min_s"]), (0.5, 86400, 3600))
 
 
 if __name__ == "__main__":

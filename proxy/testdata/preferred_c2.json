@@ -891,6 +891,11 @@
     "acct-a@example.com": {
      "cap": 100.0,
      "capacity": null,
+     "events": [],
+     "events_basis": {
+      "state": "none",
+      "why": "no reset program in the reading"
+     },
      "kind": "learning",
      "left_pct": 90.0,
      "limits": [],
@@ -918,6 +923,11 @@
     "acct-b@example.com": {
      "cap": 100.0,
      "capacity": null,
+     "events": [],
+     "events_basis": {
+      "state": "none",
+      "why": "no reset program in the reading"
+     },
      "kind": "learning",
      "left_pct": 80.0,
      "limits": [
@@ -941,6 +951,11 @@
      "used": 20.0
     },
     "acct-c@example.com": {
+     "events": [],
+     "events_basis": {
+      "state": "unread",
+      "why": "no reading yet"
+     },
      "kind": "unread",
      "limits": [],
      "listed": "unmeasured",
@@ -951,6 +966,17 @@
     "gpt": {
      "cap": 100.0,
      "capacity": null,
+     "events": [
+      {
+       "expires_at": 1802160000,
+       "id": "codex_reset:RateLimitResetCredit_0001",
+       "usable": true
+      }
+     ],
+     "events_basis": {
+      "state": "read",
+      "why": null
+     },
      "kind": "learning",
      "left_pct": 40.0,
      "limits": [],
@@ -973,6 +999,11 @@
     "kimi": {
      "cap": 100.0,
      "capacity": null,
+     "events": [],
+     "events_basis": {
+      "state": "none",
+      "why": "no reset mechanism read"
+     },
      "kind": "learning",
      "left_pct": 99.0,
      "limits": [],
@@ -990,6 +1021,11 @@
      "used": 1.0
     },
     "runway": {
+     "events": [],
+     "events_basis": {
+      "state": "none",
+      "why": "no reset mechanism read"
+     },
      "kind": "not_quota",
      "limits": [],
      "listed": "api account",
@@ -1040,6 +1076,38 @@
      "stale": 0,
      "unread": 1
     },
+    "events": [
+     {
+      "account": "gpt",
+      "after": null,
+      "anchor": "restarts_at_use",
+      "covers": null,
+      "expires_at": 1802160000,
+      "gain": null,
+      "gain_basis": null,
+      "gap_weeks": null,
+      "id": "codex_reset:RateLimitResetCredit_0001",
+      "label": "Full reset (Monthly)",
+      "left_pct_after": 100.0,
+      "lost_share": null,
+      "more_at_after": null,
+      "now": null,
+      "rank": 1,
+      "reaches_short": null,
+      "reason": "seven_day not sized yet (none)",
+      "reason_share": null,
+      "spent": null,
+      "step": null,
+      "trigger": "owner",
+      "usable": true,
+      "use_at": null,
+      "use_share": null,
+      "verdict": "unsized",
+      "why_not": null,
+      "wise_share": null,
+      "worth_h": null
+     }
+    ],
     "forecast": {
      "basis": "no history",
      "horizon_at": 1800604800
@@ -1153,6 +1221,7 @@
       "stale": 0,
       "unread": 1
      },
+     "events": null,
      "forecast": {
       "basis": "no history",
       "horizon_at": 1800604800
@@ -1249,6 +1318,7 @@
       "stale": 0,
       "unread": 0
      },
+     "events": null,
      "forecast": {
       "basis": "no history",
       "horizon_at": 1800604800
@@ -1320,6 +1390,7 @@
       "stale": 0,
       "unread": 1
      },
+     "events": null,
      "forecast": {
       "basis": "no history",
       "horizon_at": 1800604800
@@ -1405,6 +1476,7 @@
       "stale": 0,
       "unread": 1
      },
+     "events": null,
      "forecast": {
       "basis": "no history",
       "horizon_at": 1800604800
@@ -1487,6 +1559,7 @@
       "stale": 0,
       "unread": 1
      },
+     "events": null,
      "forecast": {
       "basis": "no history",
       "horizon_at": 1800604800
@@ -1565,6 +1638,7 @@
       "stale": 0,
       "unread": 1
      },
+     "events": null,
      "forecast": {
       "basis": "no history",
       "horizon_at": 1800604800
@@ -1646,6 +1720,7 @@
       "stale": 0,
       "unread": 1
      },
+     "events": null,
      "forecast": {
       "basis": "no history",
       "horizon_at": 1800604800

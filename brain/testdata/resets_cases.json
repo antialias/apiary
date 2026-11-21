@@ -1,0 +1,1623 @@
+{
+ "doc": "quota-model 69 \u00a79: the owner's cases (\u00a75.2) and drawings 44 and 45, each a fleet case (fleet_cases.json's shape) with per-account sizes in dollars a window (sizes), the account each selection prefers, events in a short form (an id, effects as [window, effect, points], times relative to now), and the sampled weeks: each a share of the 400, flat at its dollars an hour per stream. `expect` is a subset of the fleet the brain publishes: every forecast and event figure is a quantile across the weeks. Every name and number is made up. Hours are from now, 1795100000; H = now + 7 d.",
+ "cases": [
+  {
+   "name": "69 \u00a75.2 case 1, before A's wall",
+   "notes": [
+    "max-a 92 % used ($240, preferred), max-b 30 % ($2,100), max-c spent, back in 2 d; A back in 5 d. $40 an hour.",
+    "Walk: A dry at 6 h, B to 58.5 h, C (refilled at 48 h) to 133.5 h, A (refilled at 120 h) past H: no week has a gap.",
+    "So max-a's reset is wasteful, no_gap, with no share; used now it gives back A's 92 % ($2,760) and removes nothing."
+   ],
+   "now": 1795100000,
+   "accounts": {
+    "max-a": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 92,
+       "resets_in": 432000
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ]
+       ],
+       "order": 1
+      }
+     ]
+    },
+    "max-b": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 30,
+       "resets_in": 518400
+      }
+     }
+    },
+    "max-c": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 172800
+      }
+     }
+    }
+   },
+   "classes": [
+    {
+     "class": "capable",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizes": {
+    "max-a": {
+     "seven_day": 3000.0
+    },
+    "max-b": {
+     "seven_day": 3000.0
+    },
+    "max-c": {
+     "seven_day": 3000.0
+    }
+   },
+   "preferred": {
+    "capable": "max-a"
+   },
+   "weeks": [
+    {
+     "share": 1.0,
+     "usd_h": {
+      "capable": 40.0
+     }
+    }
+   ],
+   "expect": {
+    "proxy": {
+     "forecast": {
+      "dry_h": {
+       "p10": 0.0,
+       "p50": 0.0,
+       "p90": 0.0
+      },
+      "left_h": {
+       "p10": 0.0,
+       "p50": 0.0,
+       "p90": 0.0
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "account": "max-a",
+       "verdict": "wasteful",
+       "reason": "no_gap",
+       "wise_share": null,
+       "gap_weeks": 0,
+       "use_at": null,
+       "use_share": 0.0,
+       "step": null,
+       "rank": 1,
+       "now": {
+        "gain": {
+         "p10": 2760.0,
+         "p50": 2760.0,
+         "p90": 2760.0
+        },
+        "worth_h": {
+         "p10": 0.0,
+         "p50": 0.0,
+         "p90": 0.0
+        }
+       }
+      }
+     ]
+    },
+    "selections": {
+     "capable": {
+      "events": null
+     }
+    }
+   }
+  },
+  {
+   "name": "69 \u00a75.2 case 1, after A's wall",
+   "notes": [
+    "Case 1 after A's wall: A spent, back at 114 h; B 30 % ($2,100) carries to 52.5 h; C refilled at 42 h to 127.5 h; A past H.",
+    "No gap: wasteful, no_gap. Used now it refills A's whole $3,000, and A's own refill at 114 h takes what is left of it."
+   ],
+   "now": 1795100000,
+   "accounts": {
+    "max-a": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 410400
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ]
+       ],
+       "order": 1
+      }
+     ]
+    },
+    "max-b": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 30,
+       "resets_in": 496800
+      }
+     }
+    },
+    "max-c": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 151200
+      }
+     }
+    }
+   },
+   "classes": [
+    {
+     "class": "capable",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizes": {
+    "max-a": {
+     "seven_day": 3000.0
+    },
+    "max-b": {
+     "seven_day": 3000.0
+    },
+    "max-c": {
+     "seven_day": 3000.0
+    }
+   },
+   "preferred": {
+    "capable": "max-b"
+   },
+   "weeks": [
+    {
+     "share": 1.0,
+     "usd_h": {
+      "capable": 40.0
+     }
+    }
+   ],
+   "expect": {
+    "proxy": {
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "verdict": "wasteful",
+       "reason": "no_gap",
+       "now": {
+        "gain": {
+         "p10": 3000.0,
+         "p50": 3000.0,
+         "p90": 3000.0
+        },
+        "worth_h": {
+         "p10": 0.0,
+         "p50": 0.0,
+         "p90": 0.0
+        },
+        "lost_share": 1.0
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "69 \u00a75.2 case 2",
+   "notes": [
+    "A 92 % ($240, preferred) back in 5 d; B and C spent, back in 6 d and 6.5 d.",
+    "Without: A dry at 6 h, dry to 120 h (114 h), then A's $3,000 past H.",
+    "With the reset at A's wall (6 h): A to 81 h, dry 81 h -> 120 h (39 h); worth 75 h, spent 1, covers 75/114: wise, step 1, never now.",
+    "Used now it gives back only A's 92 % used ($2,760, 69 h): A to 75 h, dry 45 h; worth 69 h."
+   ],
+   "now": 1795100000,
+   "accounts": {
+    "max-a": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 92,
+       "resets_in": 432000
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ]
+       ],
+       "order": 1
+      }
+     ]
+    },
+    "max-b": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 518400
+      }
+     }
+    },
+    "max-c": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 561600
+      }
+     }
+    }
+   },
+   "classes": [
+    {
+     "class": "capable",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizes": {
+    "max-a": {
+     "seven_day": 3000.0
+    },
+    "max-b": {
+     "seven_day": 3000.0
+    },
+    "max-c": {
+     "seven_day": 3000.0
+    }
+   },
+   "preferred": {
+    "capable": "max-a"
+   },
+   "weeks": [
+    {
+     "share": 1.0,
+     "usd_h": {
+      "capable": 40.0
+     }
+    }
+   ],
+   "expect": {
+    "proxy": {
+     "forecast": {
+      "dry_h": {
+       "p10": 114.0,
+       "p50": 114.0,
+       "p90": 114.0
+      },
+      "left_h": {
+       "p10": 39.0,
+       "p50": 39.0,
+       "p90": 39.0
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "verdict": "wise",
+       "reason": null,
+       "wise_share": 1.0,
+       "gap_weeks": 400,
+       "use_at": {
+        "p10": 1795121600,
+        "p90": 1795121600
+       },
+       "use_share": 1.0,
+       "gain": {
+        "p10": 3000.0,
+        "p50": 3000.0,
+        "p90": 3000.0
+       },
+       "gain_basis": "read",
+       "worth_h": {
+        "p10": 75.0,
+        "p50": 75.0,
+        "p90": 75.0
+       },
+       "spent": {
+        "p10": 1.0,
+        "p50": 1.0,
+        "p90": 1.0
+       },
+       "covers": {
+        "p10": 0.66,
+        "p50": 0.66,
+        "p90": 0.66
+       },
+       "lost_share": 0.0,
+       "step": 1,
+       "after": null,
+       "more_at_after": 1795532000,
+       "now": {
+        "gain": {
+         "p10": 2760.0,
+         "p50": 2760.0,
+         "p90": 2760.0
+        },
+        "worth_h": {
+         "p10": 69.0,
+         "p50": 69.0,
+         "p90": 69.0
+        },
+        "spent": {
+         "p10": 1.0,
+         "p50": 1.0,
+         "p90": 1.0
+        },
+        "lost_share": 0.0
+       }
+      }
+     ]
+    },
+    "selections": {
+     "capable": {
+      "events": null
+     }
+    }
+   }
+  },
+  {
+   "name": "69 \u00a75.2 case 3",
+   "notes": [
+    "All three spent; A back in 6 d, B in 7 d, C in 5 d. Dry from now to 120 h, then C's $3,000 past H.",
+    "A's reset used now (the row is out now: its use_at is now): 75 h, dry 120 h -> 45 h; worth 75 h, spent 1: wise.",
+    "capable is out now too: its event is read off all work's used-now walk, use_at now."
+   ],
+   "now": 1795100000,
+   "accounts": {
+    "max-a": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 518400
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ]
+       ],
+       "order": 1
+      }
+     ]
+    },
+    "max-b": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 604800
+      }
+     }
+    },
+    "max-c": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 432000
+      }
+     }
+    }
+   },
+   "classes": [
+    {
+     "class": "capable",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizes": {
+    "max-a": {
+     "seven_day": 3000.0
+    },
+    "max-b": {
+     "seven_day": 3000.0
+    },
+    "max-c": {
+     "seven_day": 3000.0
+    }
+   },
+   "preferred": {},
+   "weeks": [
+    {
+     "share": 1.0,
+     "usd_h": {
+      "capable": 40.0
+     }
+    }
+   ],
+   "expect": {
+    "proxy": {
+     "forecast": {
+      "dry_h": {
+       "p10": 120.0,
+       "p50": 120.0,
+       "p90": 120.0
+      },
+      "left_h": {
+       "p10": 45.0,
+       "p50": 45.0,
+       "p90": 45.0
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "verdict": "wise",
+       "use_at": {
+        "p10": 1795100000,
+        "p90": 1795100000
+       },
+       "worth_h": {
+        "p10": 75.0,
+        "p50": 75.0,
+        "p90": 75.0
+       },
+       "spent": {
+        "p10": 1.0,
+        "p50": 1.0,
+        "p90": 1.0
+       },
+       "covers": {
+        "p10": 0.62,
+        "p50": 0.62,
+        "p90": 0.62
+       },
+       "lost_share": 0.0,
+       "step": 1,
+       "now": null
+      }
+     ]
+    },
+    "selections": {
+     "capable": {
+      "events": [
+       {
+        "id": "cedar_ember:full-reset",
+        "verdict": "wise",
+        "use_at": {
+         "p10": 1795100000,
+         "p90": 1795100000
+        },
+        "worth_h": {
+         "p10": 75.0,
+         "p50": 75.0,
+         "p90": 75.0
+        },
+        "step": 1,
+        "now": null
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "name": "69 \u00a75.2 case 4",
+   "notes": [
+    "The coordinator's case: all spent; C back in 4 d, A in 4.5 d; A holds a $3,000 reset.",
+    "Without: 96 h dry, then C. Used now: 75 h served, 21 h dry; worth 75 h, spent 1, covers 0.78: wise.",
+    "A's own refill at 108 h still comes (anchor kept) and finds the reset spent: nothing lost."
+   ],
+   "now": 1795100000,
+   "accounts": {
+    "max-a": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 388800
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ]
+       ],
+       "order": 1
+      }
+     ]
+    },
+    "max-b": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 720000
+      }
+     }
+    },
+    "max-c": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 345600
+      }
+     }
+    }
+   },
+   "classes": [
+    {
+     "class": "capable",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizes": {
+    "max-a": {
+     "seven_day": 3000.0
+    },
+    "max-b": {
+     "seven_day": 3000.0
+    },
+    "max-c": {
+     "seven_day": 3000.0
+    }
+   },
+   "preferred": {},
+   "weeks": [
+    {
+     "share": 1.0,
+     "usd_h": {
+      "capable": 40.0
+     }
+    }
+   ],
+   "expect": {
+    "proxy": {
+     "forecast": {
+      "dry_h": {
+       "p10": 96.0,
+       "p50": 96.0,
+       "p90": 96.0
+      },
+      "left_h": {
+       "p10": 21.0,
+       "p50": 21.0,
+       "p90": 21.0
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "verdict": "wise",
+       "worth_h": {
+        "p10": 75.0,
+        "p50": 75.0,
+        "p90": 75.0
+       },
+       "spent": {
+        "p10": 1.0,
+        "p50": 1.0,
+        "p90": 1.0
+       },
+       "covers": {
+        "p10": 0.78,
+        "p50": 0.78,
+        "p90": 0.78
+       },
+       "lost_share": 0.0,
+       "more_at_after": 1795488800
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "69 \u00a75.2 case 5",
+   "notes": [
+    "A spent, back at 114 h, its reset expiring in 3 d; B unused ($3,000) carries to 75 h; dry 75 h -> 114 h.",
+    "The drought starts after the reset expires: wasteful, expires_first, in every gap week."
+   ],
+   "now": 1795100000,
+   "accounts": {
+    "max-a": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 410400
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ]
+       ],
+       "order": 1,
+       "to_in": 259200
+      }
+     ]
+    },
+    "max-b": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 0,
+       "resets_in": 496800
+      }
+     }
+    },
+    "max-c": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 561600
+      }
+     }
+    }
+   },
+   "classes": [
+    {
+     "class": "capable",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizes": {
+    "max-a": {
+     "seven_day": 3000.0
+    },
+    "max-b": {
+     "seven_day": 3000.0
+    },
+    "max-c": {
+     "seven_day": 3000.0
+    }
+   },
+   "preferred": {
+    "capable": "max-b"
+   },
+   "weeks": [
+    {
+     "share": 1.0,
+     "usd_h": {
+      "capable": 40.0
+     }
+    }
+   ],
+   "expect": {
+    "proxy": {
+     "forecast": {
+      "dry_h": {
+       "p10": 39.0,
+       "p50": 39.0,
+       "p90": 39.0
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "verdict": "wasteful",
+       "reason": "expires_first",
+       "reason_share": 1.0,
+       "wise_share": 0.0,
+       "gap_weeks": 400,
+       "use_at": null,
+       "expires_at": 1795359200
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "69 \u00a75.2 case 6",
+   "notes": [
+    "A 25 % used ($2,250, preferred) carries to 56.25 h; B spent past H; C spent, back at 90 h, holds the reset; A back at 85.25 h.",
+    "Dry 56.25 h -> 85.25 h (29 h). C's reset at the wall: C serves on to its own refill at 90 h (33.75 h, $1,350 of $3,000).",
+    "worth 29 h, a day or more, so wise though spent is 0.45; the rest is lost to C's refill."
+   ],
+   "now": 1795100000,
+   "accounts": {
+    "max-a": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 25,
+       "resets_in": 306900
+      }
+     }
+    },
+    "max-b": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 720000
+      }
+     }
+    },
+    "max-c": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 324000
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ]
+       ],
+       "order": 1
+      }
+     ]
+    }
+   },
+   "classes": [
+    {
+     "class": "capable",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizes": {
+    "max-a": {
+     "seven_day": 3000.0
+    },
+    "max-b": {
+     "seven_day": 3000.0
+    },
+    "max-c": {
+     "seven_day": 3000.0
+    }
+   },
+   "preferred": {
+    "capable": "max-a"
+   },
+   "weeks": [
+    {
+     "share": 1.0,
+     "usd_h": {
+      "capable": 40.0
+     }
+    }
+   ],
+   "expect": {
+    "proxy": {
+     "forecast": {
+      "dry_h": {
+       "p10": 29.0,
+       "p50": 29.0,
+       "p90": 29.0
+      },
+      "left_h": {
+       "p10": 0.0,
+       "p50": 0.0,
+       "p90": 0.0
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "account": "max-c",
+       "verdict": "wise",
+       "use_at": {
+        "p10": 1795302500,
+        "p90": 1795302500
+       },
+       "worth_h": {
+        "p10": 29.0,
+        "p50": 29.0,
+        "p90": 29.0
+       },
+       "spent": {
+        "p10": 0.45,
+        "p50": 0.45,
+        "p90": 0.45
+       },
+       "covers": {
+        "p10": 1.0,
+        "p50": 1.0,
+        "p90": 1.0
+       },
+       "lost_share": 1.0,
+       "step": 1
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "69 \u00a75.2 case 7",
+   "notes": [
+    "Case 6 across the weeks: 8 in 10 at $40 an hour (a 29 h drought, wise by worth), 2 in 10 at $28 (dry at 80.36 h, a 4.9 h drought, spent 0.09).",
+    "Every week has a gap; the rule holds in 0.8 of them: probably_wise, reason short in the rest."
+   ],
+   "now": 1795100000,
+   "accounts": {
+    "max-a": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 25,
+       "resets_in": 306900
+      }
+     }
+    },
+    "max-b": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 720000
+      }
+     }
+    },
+    "max-c": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 324000
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ]
+       ],
+       "order": 1
+      }
+     ]
+    }
+   },
+   "classes": [
+    {
+     "class": "capable",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizes": {
+    "max-a": {
+     "seven_day": 3000.0
+    },
+    "max-b": {
+     "seven_day": 3000.0
+    },
+    "max-c": {
+     "seven_day": 3000.0
+    }
+   },
+   "preferred": {
+    "capable": "max-a"
+   },
+   "weeks": [
+    {
+     "share": 0.8,
+     "usd_h": {
+      "capable": 40.0
+     }
+    },
+    {
+     "share": 0.2,
+     "usd_h": {
+      "capable": 28.0
+     }
+    }
+   ],
+   "expect": {
+    "proxy": {
+     "forecast": {
+      "dry_h": {
+       "p10": 4.9,
+       "p50": 29.0,
+       "p90": 29.0
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "verdict": "probably_wise",
+       "wise_share": 0.8,
+       "gap_weeks": 400,
+       "reason": "short",
+       "reason_share": 0.2,
+       "step": 1,
+       "use_at": {
+        "p10": 1795302500,
+        "p90": 1795389286
+       },
+       "worth_h": {
+        "p10": 4.9,
+        "p50": 29.0,
+        "p90": 29.0
+       }
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "drawing 44: a gap ahead",
+   "notes": [
+    "sub-one (preferred) spent, back at 82 h, $2,520 a window; sub-two 66 % of $4,000 ($1,360, 34 h), its 5-hour window open; codex-one spent, back in 10 d, $1,000.",
+    "Walk: sub-two 0 -> 34 h, dry 34 h -> 82 h (48 h), sub-one to 145 h, sub-two (refilled at 144 h) past H.",
+    "Alone each of the full reset (63 h) and the Fable reset (80 points back, 50.4 h) fills the 48 h whole; the full reset ranks first by fit (it refills the window that binds).",
+    "The full reset at 34 h: sub-one's own refill at 82 h takes the 15 h left: spent 48/63, lost_share 1.",
+    "In turn the Fable reset finds no gap left: wasteful, after. The banked reset alone gives 25 h, under the gap, and keeps past the week: wasteful, keep.",
+    "The 5-hour reset refills a window that does not bind, the account not resting: no_gain, ahead of its only_at_limit.",
+    "The paid reset is listed, never valued; nothing left short, so reaches_short is false."
+   ],
+   "now": 1795100000,
+   "accounts": {
+    "sub-one": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 295200
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ]
+       ],
+       "order": 1,
+       "to_in": 1728000
+      },
+      {
+       "id": "cedar_ember:fable-reset",
+       "effects": [
+        [
+         "seven_day",
+         "give_back",
+         80
+        ]
+       ],
+       "to_in": 8640000
+      }
+     ]
+    },
+    "sub-two": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 66,
+       "resets_in": 518400
+      },
+      "five_hour": {
+       "period_s": 18000,
+       "used": 20,
+       "resets_in": 7200
+      }
+     },
+     "events": [
+      {
+       "id": "juniper_tide",
+       "effects": [
+        [
+         "five_hour",
+         "refill"
+        ]
+       ],
+       "now_": false,
+       "why_not": "not_at_wall",
+       "only_at_limit": true,
+       "not_while_closed": [
+        "seven_day"
+       ]
+      }
+     ]
+    },
+    "codex-one": {
+     "provider": "gpt",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 864000
+      }
+     },
+     "events": [
+      {
+       "id": "codex_reset:banked",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ]
+       ],
+       "anchor": "restarts_at_use",
+       "to_in": 2160000
+      },
+      {
+       "id": "codex_paid_reset",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ]
+       ],
+       "trigger": "owner_pays",
+       "anchor": "restarts_at_use"
+      }
+     ]
+    }
+   },
+   "classes": [
+    {
+     "class": "capable",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1
+      },
+      {
+       "kind": "provider",
+       "provider": "gpt",
+       "model": "gpt-6-astra",
+       "priority": 2
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizes": {
+    "sub-one": {
+     "seven_day": 2520.0
+    },
+    "sub-two": {
+     "seven_day": 4000.0,
+     "five_hour": 400.0
+    },
+    "codex-one": {
+     "seven_day": 1000.0
+    }
+   },
+   "preferred": {
+    "capable": "sub-one"
+   },
+   "weeks": [
+    {
+     "share": 1.0,
+     "usd_h": {
+      "capable": 40.0
+     }
+    }
+   ],
+   "expect": {
+    "proxy": {
+     "forecast": {
+      "dry_h": {
+       "p10": 48.0,
+       "p50": 48.0,
+       "p90": 48.0
+      },
+      "left_h": {
+       "p10": 0.0,
+       "p50": 0.0,
+       "p90": 0.0
+      }
+     },
+     "events": [
+      {
+       "id": "codex_reset:banked",
+       "account": "codex-one",
+       "verdict": "wasteful",
+       "reason": "keep",
+       "reason_share": 1.0,
+       "after": "cedar_ember:full-reset",
+       "rank": 3,
+       "step": null
+      },
+      {
+       "id": "codex_paid_reset",
+       "verdict": "costs_money",
+       "reason": null,
+       "gain": null,
+       "worth_h": null,
+       "use_at": null,
+       "reaches_short": false,
+       "rank": 5
+      },
+      {
+       "id": "cedar_ember:full-reset",
+       "account": "sub-one",
+       "verdict": "wise",
+       "use_at": {
+        "p10": 1795222400,
+        "p90": 1795222400
+       },
+       "gain": {
+        "p10": 2520.0,
+        "p50": 2520.0,
+        "p90": 2520.0
+       },
+       "worth_h": {
+        "p10": 48.0,
+        "p50": 48.0,
+        "p90": 48.0
+       },
+       "spent": {
+        "p10": 0.76,
+        "p50": 0.76,
+        "p90": 0.76
+       },
+       "covers": {
+        "p10": 1.0,
+        "p50": 1.0,
+        "p90": 1.0
+       },
+       "lost_share": 1.0,
+       "step": 1,
+       "rank": 1,
+       "after": null,
+       "more_at_after": 1795395200
+      },
+      {
+       "id": "cedar_ember:fable-reset",
+       "verdict": "wasteful",
+       "reason": "after",
+       "after": "cedar_ember:full-reset",
+       "worth_h": {
+        "p10": 0.0,
+        "p50": 0.0,
+        "p90": 0.0
+       },
+       "rank": 2,
+       "now": {
+        "gain": {
+         "p10": 2016.0,
+         "p50": 2016.0,
+         "p90": 2016.0
+        }
+       }
+      },
+      {
+       "id": "juniper_tide",
+       "account": "sub-two",
+       "verdict": "no_gain",
+       "reason": "five_hour",
+       "gain": null,
+       "rank": 4
+      }
+     ]
+    },
+    "selections": {
+     "capable": {
+      "events": null
+     }
+    }
+   }
+  },
+  {
+   "name": "drawing 45: out now, three resets in order, 6 hours short",
+   "notes": [
+    "All spent: sub-one ($2,000) back at 80 h, sub-two ($3,000) at 120 h, codex-one ($720) in 10 d. Dry now to 80 h.",
+    "Step 1, the full reset now: 50 h. Step 2, the banked reset at 50 h, after 1: 18 h. Step 3, the Fable reset (12 weekly points back, $240) at 68 h, after 2: 6 h.",
+    "Left: 74 h -> 80 h (6 h). The paid codex reset would refill a window that binds in that shortfall: reaches_short.",
+    "capable is out now: each event read off all work's used-now walks, in turn; the Fable reset used now after the two before it adds nothing: wasteful, after, still step 3 of all work's plan.",
+    "sub-two's resets could not be read: no events, its events_basis says why."
+   ],
+   "now": 1795100000,
+   "accounts": {
+    "sub-one": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 288000
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ]
+       ],
+       "order": 1
+      },
+      {
+       "id": "cedar_ember:fable-reset",
+       "effects": [
+        [
+         "seven_day",
+         "give_back",
+         12
+        ]
+       ]
+      }
+     ]
+    },
+    "sub-two": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 432000
+      }
+     },
+     "events_basis": {
+      "state": "unread",
+      "why": "cli_version"
+     }
+    },
+    "codex-one": {
+     "provider": "gpt",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 864000
+      }
+     },
+     "events": [
+      {
+       "id": "codex_reset:banked",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ]
+       ],
+       "anchor": "restarts_at_use",
+       "to_in": 2160000
+      },
+      {
+       "id": "codex_paid_reset",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ]
+       ],
+       "trigger": "owner_pays",
+       "anchor": "restarts_at_use"
+      }
+     ]
+    }
+   },
+   "classes": [
+    {
+     "class": "capable",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1
+      },
+      {
+       "kind": "provider",
+       "provider": "gpt",
+       "model": "gpt-6-astra",
+       "priority": 2
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizes": {
+    "sub-one": {
+     "seven_day": 2000.0
+    },
+    "sub-two": {
+     "seven_day": 3000.0
+    },
+    "codex-one": {
+     "seven_day": 720.0
+    }
+   },
+   "preferred": {
+    "capable": "sub-one"
+   },
+   "weeks": [
+    {
+     "share": 1.0,
+     "usd_h": {
+      "capable": 40.0
+     }
+    }
+   ],
+   "expect": {
+    "proxy": {
+     "forecast": {
+      "dry_h": {
+       "p10": 80.0,
+       "p50": 80.0,
+       "p90": 80.0
+      },
+      "left_h": {
+       "p10": 6.0,
+       "p50": 6.0,
+       "p90": 6.0
+      }
+     },
+     "events": [
+      {
+       "id": "codex_reset:banked",
+       "verdict": "wise",
+       "step": 2,
+       "rank": 2,
+       "after": "cedar_ember:full-reset",
+       "use_at": {
+        "p10": 1795280000,
+        "p90": 1795280000
+       },
+       "worth_h": {
+        "p10": 18.0,
+        "p50": 18.0,
+        "p90": 18.0
+       },
+       "covers": {
+        "p10": 0.6,
+        "p50": 0.6,
+        "p90": 0.6
+       },
+       "more_at_after": 1795884800,
+       "now": null
+      },
+      {
+       "id": "codex_paid_reset",
+       "verdict": "costs_money",
+       "reaches_short": true,
+       "gain": null,
+       "rank": 4
+      },
+      {
+       "id": "cedar_ember:full-reset",
+       "verdict": "wise",
+       "step": 1,
+       "rank": 1,
+       "after": null,
+       "use_at": {
+        "p10": 1795100000,
+        "p90": 1795100000
+       },
+       "worth_h": {
+        "p10": 50.0,
+        "p50": 50.0,
+        "p90": 50.0
+       },
+       "now": null
+      },
+      {
+       "id": "cedar_ember:fable-reset",
+       "verdict": "wise",
+       "step": 3,
+       "rank": 3,
+       "after": "codex_reset:banked",
+       "use_at": {
+        "p10": 1795344800,
+        "p90": 1795344800
+       },
+       "gain": {
+        "p10": 240.0,
+        "p50": 240.0,
+        "p90": 240.0
+       },
+       "worth_h": {
+        "p10": 6.0,
+        "p50": 6.0,
+        "p90": 6.0
+       },
+       "covers": {
+        "p10": 0.5,
+        "p50": 0.5,
+        "p90": 0.5
+       }
+      }
+     ]
+    },
+    "selections": {
+     "capable": {
+      "events": [
+       {
+        "id": "codex_reset:banked",
+        "verdict": "wise",
+        "step": 2,
+        "use_at": {
+         "p10": 1795100000,
+         "p90": 1795100000
+        },
+        "worth_h": {
+         "p10": 18.0,
+         "p50": 18.0,
+         "p90": 18.0
+        }
+       },
+       {
+        "id": "codex_paid_reset",
+        "verdict": "costs_money",
+        "reaches_short": null
+       },
+       {
+        "id": "cedar_ember:full-reset",
+        "verdict": "wise",
+        "step": 1,
+        "worth_h": {
+         "p10": 50.0,
+         "p50": 50.0,
+         "p90": 50.0
+        }
+       },
+       {
+        "id": "cedar_ember:fable-reset",
+        "verdict": "wasteful",
+        "reason": "after",
+        "after": "codex_reset:banked",
+        "step": 3,
+        "use_at": null
+       }
+      ]
+     }
+    },
+    "accounts": {
+     "sub-two": {
+      "events": [],
+      "events_basis": {
+       "state": "unread",
+       "why": "cli_version"
+      }
+     },
+     "codex-one": {
+      "events": [
+       {
+        "id": "codex_reset:banked",
+        "usable": true,
+        "expires_at": 1797260000
+       },
+       {
+        "id": "codex_paid_reset",
+        "usable": true,
+        "expires_at": null
+       }
+      ]
+     }
+    }
+   }
+  }
+ ]
+}
