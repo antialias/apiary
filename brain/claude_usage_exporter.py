@@ -53,8 +53,10 @@ import bisect
 import copy
 import hashlib
 import hmac
+import itertools
 import json
 import math
+import operator
 import os
 import random
 import re
@@ -8994,8 +8996,9 @@ def _fleet_asks(accts, health, limits, bound=None):
 # states it (`weekly_share` on the scoped window): unlabelled work is all
 # kinds of work. Within an hour the streams draw in a fixed order (classes,
 # then bare lanes, by name; the spend with no selection last), which decides
-# only who takes a window's last points in that hour. The walk steps hour by
-# hour, and within an hour to each refill and each account's `from`: a
+# only who takes a window's last points in that hour. The walk steps to each
+# instant (a refill, an account's `from`, a gift) and each wall, and takes
+# the whole hours between them in one batch from the week's prefix sums: a
 # refill sets a window's use to 0; a fixed window's next period follows at
 # once; a first-use window's next period starts at the first draw from it.
 #
@@ -9118,197 +9121,566 @@ def _fleet_walk_full(accts, bw):
     return tot
 
 
-def _fleet_walk_joint(accts, binds, orders, demand, now, rooms=None, walls=None):
-    """One sampled week walked (69 §4.6). accts and binds as
-    _fleet_walk_accounts gives them (accts is changed: give it a copy);
-    orders {stream: [acct], the draw order}; demand {stream: [168 dollars an
-    hour]} for every row ("proxy" is all work, its demand the week's whole
-    spend; None the spend with no selection, which binds on all work's
-    windows). -> {row: [dry_at (None for never), dry_s, unmet, usd]}, and
-    with `rooms` ({row: list}) each listed row's room at each hour's end
-    over its full week's room appended there; with `walls` ({}), the instant
-    each account first had no room left for the stream drawing on it. Rows
-    with one set of terms (_fleet_walk_groups) are tracked as one: their
-    room, and so their dry spells, are the same; their unmet is each row's
-    own demand over those spells."""
+def _fleet_walk_plan(accts, binds, orders, now):
+    """What no sampled week changes (69 §4.6), built once per computation
+    from _fleet_walk_accounts' accts and binds and the streams' orders: the
+    streams in draw order, the rows and their sets of terms
+    (_fleet_walk_groups), each window's start [used, next] and static facts,
+    each group's terms, and the use at which a window meets a term's wall."""
     horizon = now + FORECAST_SLOTS * 3600
     INF = math.inf
-    frm = {a: (INF if v["from"] is None else v["from"]) for a, v in accts.items()}
+    rows = list(binds)
+    grp = _fleet_walk_groups(binds)
+    gs = list(dict.fromkeys(grp.values()))
     streams = [s for s in _forecast_streams([k for k in orders if k is not None])
                if s is None or s in binds]
     srow = {s: "proxy" if s is None else s for s in streams}
-    rows = list(binds)
-    grp = _fleet_walk_groups(binds)
-    gs = list(dict.fromkeys(grp.values()))  # each group by its first row
-    racc = {g: list(binds[g]) for g in gs}
-    # Each group's terms: per account its windows' state and [cap, pp]. The
-    # room they leave on an account, in dollars, is kept (memo) until the
-    # account's windows move: a take, a drain or a refill bumps ver.
-    terms = {g: [(a, [(accts[a]["wins"][wid], cap, pp) for wid, (cap, pp) in bw.items()], {})
-                 for a, bw in binds[g].items()] for g in gs}
-    ver = dict.fromkeys(accts, 0)
+    terms = {g: {a: [((a, wid), cap, pp) for wid, (cap, pp) in bw.items()]
+                 for a, bw in binds[g].items()} for g in gs}
+    # A batch (below) keeps every window it draws on short of every wall on
+    # it, by a margin over _WALK_EPS: a term's room (cap - used) x pp is
+    # read as none at or under _WALK_EPS.
+    limit = {}
+    for g in gs:
+        for ts in terms[g].values():
+            for k, cap, pp in ts:
+                lim = cap - max(1e-6, 2.0 * _WALK_EPS / pp)
+                if lim < limit.get(k, INF):
+                    limit[k] = lim
+    frm = {a: (INF if v["from"] is None else v["from"]) for a, v in accts.items()}
+    return {
+        "now": now, "horizon": horizon, "rows": rows, "grp": grp, "gs": gs,
+        "streams": streams, "srow": srow, "sgrp": {s: grp[srow[s]] for s in streams},
+        "orders": {s: list(orders.get(s) or ()) for s in streams}, "binds": binds,
+        "terms": terms, "racc": {g: list(binds[g]) for g in gs},
+        "members": {g: [row for row in rows if grp[row] == g] for g in gs},
+        "full": {g: _fleet_walk_full(accts, binds[g]) for g in gs},
+        "W0": {(a, wid): (w["used"], w["next"]) for a, v in accts.items()
+               for wid, w in v["wins"].items()},
+        "wstat": {(a, wid): (w["period"], w["first_use"],
+                             [((a, sw), k) for sw, k in w["drain"].items()])
+                  for a, v in accts.items() for wid, w in v["wins"].items()},
+        "limit": limit, "frm": frm}
 
-    def wroom(ws, memo, a):
-        m = memo.get(a)
-        v = ver[a]
-        if m is not None and m[0] == v:
-            return m[1]
+
+def _fleet_walk_week(plan, demand):
+    """One sampled week's demand, prepared once (69 §4.6): demand {stream:
+    [168 dollars an hour]} with "proxy" for all work. -> the streams that
+    draw in each hour with their rates, each row's demand and the week's
+    total, and prefix sums of each stream's demand (each row's too, taken
+    when a walk first counts unmet)."""
+    zero = [0.0] * FORECAST_SLOTS
+    zc = [0.0] * (FORECAST_SLOTS + 1)
+    streams = plan["streams"]
+    active = [[] for _ in range(FORECAST_SLOTS)]
+    cum, big = {}, {}
+    zn = [0] * (FORECAST_SLOTS + 1)
+    for s in streams:
+        xs = demand[s]
+        if any(xs):
+            cum[s] = list(itertools.accumulate(xs, initial=0.0))
+            # how many hours to each hour draw more than _WALK_EPS, the
+            # least a step takes
+            big[s] = list(itertools.accumulate((v / 3600.0 * 3600.0 > _WALK_EPS for v in xs),
+                                               initial=0))
+            for i, v in enumerate(xs):
+                if v > 0:
+                    active[i].append((s, v / 3600.0))
+        else:
+            cum[s], big[s] = zc, zn
+    # (each hour's list is in the plan's stream order, the draw order)
+    rdem = {row: demand["proxy"] if row == "proxy" else demand.get(row, zero)
+            for row in plan["rows"]}
+    # The week's spend, hour by hour as each hour's rate over the hour.
+    usd = {}
+    for row, xs in rdem.items():
+        u = 0.0
+        for v in xs:
+            u += v / 3600.0 * 3600.0
+        usd[row] = u
+    return {"active": active, "rdem": rdem, "usd": usd, "cum": cum, "big": big, "rcum": None}
+
+
+def _fleet_walk_rcum(week):
+    """The prefix sums of each row's demand, taken once."""
+    if week["rcum"] is None:
+        zc = [0.0] * (FORECAST_SLOTS + 1)
+        week["rcum"] = {row: list(itertools.accumulate(xs, initial=0.0)) if any(xs) else zc
+                        for row, xs in week["rdem"].items()}
+    return week["rcum"]
+
+
+def _fleet_walk_start(plan):
+    """A walk's state at now, before its first step."""
+    gs = plan["gs"]
+    return {"W": {k: list(v) for k, v in plan["W0"].items()}, "frm": dict(plan["frm"]),
+            "cur": dict.fromkeys(plan["streams"]), "t": plan["now"], "i": 0, "first": True,
+            "waiting": {a for a, v in plan["frm"].items() if v > plan["now"]},
+            "dry_from": dict.fromkeys(gs), "dry_at": dict.fromkeys(gs),
+            "dry_s": dict.fromkeys(gs, 0.0), "unmet": dict.fromkeys(plan["rows"], 0.0),
+            "spells": {g: [] for g in gs}, "gifts": []}
+
+
+def _fleet_walk_copy(st):
+    """A walk state's own copy (a snapshot to resume from stays as it was)."""
+    return {"W": {k: v[:] for k, v in st["W"].items()}, "frm": dict(st["frm"]),
+            "cur": dict(st["cur"]), "t": st["t"], "i": st["i"], "first": st["first"],
+            "waiting": set(st["waiting"]), "dry_from": dict(st["dry_from"]),
+            "dry_at": dict(st["dry_at"]), "dry_s": dict(st["dry_s"]),
+            "unmet": dict(st["unmet"]), "spells": {g: [x[:] for x in v]
+                                                   for g, v in st["spells"].items()},
+            "gifts": [dict(r) for r in st["gifts"]]}
+
+
+def _fleet_walk_joint(plan, week, st=None, gifts=(), track=None, rooms=None, snaps=None,
+                      unmet=True, walls=None):
+    """One sampled week walked (69 §4.6), from `st` (a fresh start when
+    None; a given state is changed) to the horizon. -> the state: per group
+    of rows sharing their terms dry_at (None for never), dry_s and its dry
+    spells [[start, end]]; per row unmet (with `unmet`); a record per gift.
+
+    The walk steps to each instant (a refill, an account's `from`, a gift)
+    and each wall, and between them takes whole hours in one batch from the
+    week's prefix sums: with no instant and no wall in them every draw is
+    linear in the hours' demand. The last hour of a batch is found by
+    bisection on the prefix sums (the fit is monotone); the hour an instant
+    or a wall falls in is stepped as one.
+
+    gifts: [{at, acct, effects, anchor, lift, row}] sorted by at, each
+    applied at its instant (_fleet_walk_gift). track: the groups whose dry
+    spells are kept (every group when None; the others' streams still
+    draw). rooms: {group: list}, each group's room at each hour's end over
+    its full week's room appended there. snaps: a dict taking, for every
+    step in which a tracked group goes dry, the state at that step's start
+    (from an undo log of the step), keyed by the spell's start: a gifted
+    walk resumes from it (_fleet_walk_resume). walls: {}, the instant each
+    account first had no room left for the stream drawing on it."""
+    INF = math.inf
+    EPS = _WALK_EPS
+    st = _fleet_walk_start(plan) if st is None else st
+    now, horizon = plan["now"], plan["horizon"]
+    W, frm, cur = st["W"], st["frm"], st["cur"]
+    terms, racc, members, sgrp = plan["terms"], plan["racc"], plan["members"], plan["sgrp"]
+    orders, wstat, limit, streams = plan["orders"], plan["wstat"], plan["limit"], plan["streams"]
+    gs = plan["gs"]
+    tracked = gs if track is None else [g for g in gs if g in track]
+    dry_from, dry_at, dry_s, um, spells = (st["dry_from"], st["dry_at"], st["dry_s"],
+                                           st["unmet"], st["spells"])
+    waiting, first, t, recs = st["waiting"], st["first"], st["t"], st["gifts"]
+    active, rdem, cum, big = week["active"], week["rdem"], week["cum"], week["big"]
+    rcum = _fleet_walk_rcum(week) if unmet else None
+    # Every account's `from` as the plan has it bounds a step, a lifted
+    # one's too: a resumed walk takes the same steps as the full one.
+    nexts = sorted({v for v in plan["frm"].values() if now < v < horizon})
+    gifts = [g for g in gifts if g["at"] >= t]
+    gi, ng = 0, len(gifts)
+    wkeys = list(W)
+    logging = snaps is not None
+
+    def room_at(g, a, t, strict):
+        f = frm[a]
+        if (f >= t) if strict else (f > t):
+            return 0.0
         r = INF
-        for w, cap, pp in ws:
-            x = (cap - w["used"]) * pp
+        for k, cap, pp in terms[g][a]:
+            x = (cap - W[k][0]) * pp
             if x < r:
                 r = x
-        r = r if _WALK_EPS < r != INF else 0.0
-        memo[a] = (v, r)
-        return r
+        return r if EPS < r != INF else 0.0
 
-    rterm = {g: {a: (ws, memo) for a, ws, memo in terms[g]} for g in gs}
-
-    def room_for(g, a, t, strict=False):
-        if (frm[a] >= t) if strict else (frm[a] > t):
-            return 0.0
-        ws, memo = rterm[g][a]
-        return wroom(ws, memo, a)
-
-    def row_room(g, t, strict=False):
+    def group_room(g, t, strict):
         tot = 0.0
-        for a, ws, memo in terms[g]:
-            f = frm[a]
-            if f >= t if strict else f > t:
-                continue
-            tot += wroom(ws, memo, a)
+        for a in racc[g]:
+            tot += room_at(g, a, t, strict)
         return tot
 
-    full = {g: _fleet_walk_full(accts, binds[g]) for g in gs}
-    sgrp = {s: grp[srow[s]] for s in streams}
-    members = {g: [row for row in rows if grp[row] == g] for g in gs}
-    cursor = {s: None for s in streams}
-    out = {row: [None, 0.0, 0.0, 0.0] for row in rows}
-    gout = {g: [None, 0.0] for g in gs}  # dry_at, dry_s
-    dry_from = {g: None for g in gs}
-    nexts = sorted({v for v in frm.values() if now < v < horizon})
-    waiting = {a for a, v in frm.items() if v > now}
-    zero = [0.0] * FORECAST_SLOTS
-    rdem = {row: demand["proxy"] if row == "proxy" else demand.get(row, zero) for row in rows}
-    first = True
-    t = now
-    for i in range(FORECAST_SLOTS):
+    def draw(k, pts):
+        W[k][0] += pts
+        for r in recs:
+            if r["live"] and r["key"] == k:
+                r["used"] = min(r["added"], r["used"] + pts)
+                if r["used"] + EPS >= r["added"]:
+                    r["live"] = False
+
+    def pick(s, t0):
+        """The account stream s draws on at t0: its cursor while that has
+        room, else the next with room in its order; None for none."""
+        c = cur[s] if s is not None else None
+        g_s = sgrp[s]
+        if c is not None and room_at(g_s, c, t0, False) > EPS:
+            return c
+        order = orders[s]
+        k0 = 0 if c is None else (order.index(c) + 1) % len(order)
+        for a in order[k0:] + order[:k0]:
+            if room_at(g_s, a, t0, False) > EPS:
+                return a
+        return None
+
+    def fit(i, j):
+        """Every stream's demand over hours [i, j) on the account it draws on
+        at the hours' start, with no window it touches reaching a wall and
+        no first-use window starting its period: -> (points per window, the
+        accounts), or None."""
+        t0 = now + i * 3600
+        pts, picks = {}, {}
+        for s in streams:
+            if big[s][j] == big[s][i]:
+                continue  # no hour's draw is above _WALK_EPS: no take, as stepped
+            d = cum[s][j] - cum[s][i]
+            c = pick(s, t0)
+            if c is None:
+                continue  # nothing can serve it: unmet, and nothing moves
+            picks[s] = c
+            for k, cap, pp in terms[sgrp[s]][c]:
+                period, first_use, drain = wstat[k]
+                if first_use and W[k][1] is None and period:
+                    return None
+                p = d / pp
+                pts[k] = pts.get(k, 0.0) + p
+                if s is None:
+                    for sk, kk in drain:
+                        pts[sk] = pts.get(sk, 0.0) + p * kk
+        for k, p in pts.items():
+            if W[k][0] + p >= limit.get(k, INF):
+                return None
+        return pts, picks
+
+    def batch_rooms(i, j, picks):
+        # Each hour's end inside the batch: the batch's start use plus the
+        # draws to that hour, window by window, from the prefix sums.
+        drawn = {}
+        for s, c in picks.items():
+            for k, cap, pp in terms[sgrp[s]][c]:
+                drawn.setdefault(k, []).append((cum[s], 1.0 / pp))
+                if s is None:
+                    for sk, kk in wstat[k][2]:
+                        drawn.setdefault(sk, []).append((cum[s], kk / pp))
+        full = plan["full"]
+        for h in range(i, j):
+            he = now + (h + 1) * 3600
+            for g, series in rooms.items():
+                tot = 0.0
+                for a in racc[g]:
+                    if frm[a] >= he:
+                        continue
+                    r = INF
+                    for k, cap, pp in terms[g][a]:
+                        u = W[k][0]
+                        for carr, f in drawn.get(k, ()):
+                            u += (carr[h + 1] - carr[i]) * f
+                        x = (cap - u) * pp
+                        if x < r:
+                            r = x
+                    tot += r if EPS < r != INF else 0.0
+                series.append(tot / full[g] if full[g] else 0.0)
+
+    i = st["i"]
+    while i < FORECAST_SLOTS:
         hour_end = now + (i + 1) * 3600
-        rate = {s: demand[s][i] / 3600.0 for s in streams}
-        rrate = {row: rdem[row][i] / 3600.0 for row in rows}
-        for row in rows:
-            out[row][3] += rrate[row] * 3600.0
+        if not first and t == now + i * 3600 and not any(frm[a] <= t for a in waiting):
+            # A batch: up to the hour the next instant falls in, the last
+            # hour before any wall.
+            nx = INF
+            for k in wkeys:
+                n = W[k][1]
+                if n is not None and n < nx:
+                    nx = n
+            for v in nexts:
+                if t < v:
+                    if v < nx:
+                        nx = v
+                    break
+            if gi < ng and gifts[gi]["at"] < nx:
+                nx = gifts[gi]["at"]
+            j_inst = FORECAST_SLOTS if nx == INF else \
+                max(i, min(FORECAST_SLOTS, int((nx - now) // 3600)))
+            lo, hi, best = i, j_inst, None
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                p = fit(i, mid)
+                if p is None:
+                    hi = mid - 1
+                else:
+                    lo, best = mid, p
+            if lo > i:
+                j = lo
+                pts, picks = best
+                cur.update(picks)
+                if rooms is not None:
+                    batch_rooms(i, j, picks)
+                for k, p in pts.items():
+                    draw(k, p)
+                if unmet:
+                    for g in tracked:
+                        if dry_from[g] is not None:
+                            for row in members[g]:
+                                um[row] += rcum[row][j] - rcum[row][i]
+                i = j
+                t = now + i * 3600
+                continue
+        act = active[i]
         while t < hour_end:
-            # What lands at t: refills, and accounts that start serving.
+            # The undo log of this step: a window's [used, next] before its
+            # first change, the cursors, the accounts' from and the waiting
+            # set, the gift records, and the spells the step's start closed.
+            touched, curlog, frmlog, waiting0, drylog = {}, {}, {}, None, []
+            recs0 = [dict(r) for r in recs] if logging else None
             landed = set()
             nxt = hour_end
-            for an, a in accts.items():
-                for w in a["wins"].values():
-                    if w["next"] is not None:
-                        if w["next"] <= t:
-                            w["used"] = 0.0
-                            ver[an] += 1
-                            landed.add(an)
-                            if w["first_use"] or not w["period"]:
-                                w["next"] = None
-                            else:
-                                while w["next"] <= t:
-                                    w["next"] += w["period"]
-                        if w["next"] is not None and w["next"] < nxt:
-                            nxt = w["next"]
+            # What lands at t: refills, and accounts that start serving.
+            for k in wkeys:
+                w = W[k]
+                n = w[1]
+                if n is not None:
+                    if n <= t:
+                        if logging and k not in touched:
+                            touched[k] = w[:]
+                        for r in recs:
+                            if r["live"] and r["key"] == k:
+                                r["live"] = False
+                                r["lost"] = r["used"] + EPS < r["added"]
+                        w[0] = 0.0
+                        landed.add(k[0])
+                        period, first_use, _ = wstat[k]
+                        if first_use or not period:
+                            w[1] = n = None
+                        else:
+                            while n <= t:
+                                n += period
+                            w[1] = n
+                    if n is not None and n < nxt:
+                        nxt = n
             if waiting:
                 came = {a for a in waiting if frm[a] <= t}
-                waiting -= came
-                landed |= came
+                if came:
+                    waiting0 = set(waiting)
+                    waiting -= came
+                    landed |= came
+            while gi < ng and gifts[gi]["at"] <= t:
+                gift = gifts[gi]
+                gi += 1
+                a = gift["acct"]
+                if logging:
+                    for wid in [e["window"] for e in gift["effects"]] + \
+                            [e["share_of"] for e in gift["effects"] if e.get("share_of")]:
+                        if (a, wid) in W and (a, wid) not in touched:
+                            touched[(a, wid)] = W[(a, wid)][:]
+                    frmlog.setdefault(a, frm[a])
+                    if waiting0 is None:
+                        waiting0 = set(waiting)
+                recs.append(_fleet_walk_gift(plan, W, frm, waiting, gift, t))
+                landed.add(a)
             for v in nexts:
-                if t < v < nxt:
-                    nxt = v
+                if t < v:
+                    if v < nxt:
+                        nxt = v
                     break
+            if gi < ng and t < gifts[gi]["at"] < nxt:
+                nxt = gifts[gi]["at"]
             # A group's room only grows by what lands, so only a dry group
             # with an account that landed can have room again.
-            for g in gs:
-                if dry_from[g] is not None and (first or not landed.isdisjoint(racc[g])) \
-                        and row_room(g, t) > _WALK_EPS:
-                    gout[g][1] += t - dry_from[g]
-                    dry_from[g] = None
+            if landed or first:
+                for g in tracked:
+                    if dry_from[g] is not None and (first or not landed.isdisjoint(racc[g])) \
+                            and group_room(g, t, False) > EPS:
+                        drylog.append((g, dry_from[g], dry_s[g]))
+                        dry_s[g] += t - dry_from[g]
+                        dry_from[g] = None
+                        spells[g][-1][1] = t
             # A group with room at the last step's end has room now (refills
             # only add); only the first step can start on an empty group.
-            empty = {g: row_room(g, t) <= _WALK_EPS for g in gs
-                     if dry_from[g] is None} if first else {}
+            empty = {g: group_room(g, t, False) <= EPS for g in tracked
+                     if dry_from[g] is None} if first else None
             span = nxt - t
             hit = {}  # acct -> the instant its last take this step ended
-            for s in streams:
-                r = rate[s]
-                if r <= 0:
-                    continue
+            for s, r in act:
                 left = r * span
                 g_s = sgrp[s]
-                bind = binds[srow[s]]
-                order = orders.get(s) or ()
+                order = orders[s]
                 if s is None:
                     # The spend with no selection draws in listing order:
                     # every step starts from the first account with room,
                     # an earlier one that refilled included. A selection
                     # keeps its cursor and never switches back.
-                    cursor[s] = None
-                while left > _WALK_EPS:
-                    cur = cursor[s]
-                    if cur is None or room_for(g_s, cur, t) <= _WALK_EPS:
-                        k = 0 if cur is None else (order.index(cur) + 1) % len(order)
-                        ring = order[k:] + order[:k]
-                        cur = next((a for a in ring if room_for(g_s, a, t) > _WALK_EPS), None)
-                        if cur is None:
+                    if logging and s not in curlog:
+                        curlog[s] = cur[s]
+                    cur[s] = None
+                while left > EPS:
+                    c = cur[s]
+                    if c is None or room_at(g_s, c, t, False) <= EPS:
+                        k0 = 0 if c is None else (order.index(c) + 1) % len(order)
+                        c = None
+                        for a in order[k0:] + order[:k0]:
+                            if room_at(g_s, a, t, False) > EPS:
+                                c = a
+                                break
+                        if c is None:
                             break
-                        cursor[s] = cur
-                    took = min(left, room_for(g_s, cur, t))
+                        if logging and s not in curlog:
+                            curlog[s] = cur[s]
+                        cur[s] = c
+                    took = min(left, room_at(g_s, c, t, False))
                     at = t + (r * span - left) / r
-                    ws = accts[cur]["wins"]
-                    for wid, (cap, pp) in bind[cur].items():
-                        w = ws[wid]
-                        pts = took / pp
-                        w["used"] += pts
-                        if w["first_use"] and w["next"] is None and w["period"]:
-                            w["next"] = at + w["period"]
+                    for k, cap, pp in terms[g_s][c]:
+                        w = W[k]
+                        if logging and k not in touched:
+                            touched[k] = w[:]
+                        p = took / pp
+                        draw(k, p)
+                        period, first_use, drain = wstat[k]
+                        if first_use and w[1] is None and period:
+                            w[1] = at + period
                         if s is None:
-                            for sw, k in w["drain"].items():
-                                ws[sw]["used"] += pts * k
-                    ver[cur] += 1
+                            for sk, kk in drain:
+                                if logging and sk not in touched:
+                                    touched[sk] = W[sk][:]
+                                draw(sk, p * kk)
                     left -= took
-                    hit[cur] = at + took / r
-                    if walls is not None and room_for(g_s, cur, t) <= _WALK_EPS:
-                        walls.setdefault(cur, hit[cur])
-            at_end = {}
-            for g in gs:
-                if dry_from[g] is None and (first or not hit.keys().isdisjoint(racc[g])):
-                    at_end[g] = rr = row_room(g, nxt, strict=True)
-                else:
-                    rr = INF
-                if rr <= _WALK_EPS:
-                    if empty.get(g):
-                        on = t
-                    else:
-                        on = max([hit[a] for a in racc[g] if a in hit] or [t])
+                    hit[c] = at + took / r
+                    if walls is not None and room_at(g_s, c, t, False) <= EPS:
+                        walls.setdefault(c, hit[c])
+            if hit or first:
+                newly = []
+                for g in tracked:
+                    if dry_from[g] is None and (first or not hit.keys().isdisjoint(racc[g])) \
+                            and group_room(g, nxt, True) <= EPS:
+                        on = t if empty is not None and empty.get(g) else \
+                            max([hit[a] for a in racc[g] if a in hit] or [t])
+                        newly.append((g, on))
+                if newly and logging:
+                    # The state at this step's start, from the undo log.
+                    snap = _fleet_walk_copy(st)
+                    for k, v in touched.items():
+                        snap["W"][k] = v[:]
+                    snap["cur"].update(curlog)
+                    snap["frm"].update(frmlog)
+                    if waiting0 is not None:
+                        snap["waiting"] = set(waiting0)
+                    for g, f, s_ in drylog:
+                        snap["dry_from"][g], snap["dry_s"][g] = f, s_
+                        snap["spells"][g][-1][1] = None
+                    snap.update(t=t, i=i, first=first, gifts=recs0,
+                                dry_at=dict(dry_at), unmet=dict(um))
+                    for g, on in newly:
+                        snaps.setdefault(on, snap)
+                for g, on in newly:
                     dry_from[g] = on
-                    if gout[g][0] is None:
-                        gout[g][0] = on
-                f = dry_from[g]
-                if f is not None:
-                    d = nxt - max(t, f)
-                    for row in members[g]:
-                        out[row][2] += rrate[row] * d
+                    spells[g].append([on, None])
+                    if dry_at[g] is None:
+                        dry_at[g] = on
+            if unmet:
+                for g in tracked:
+                    f = dry_from[g]
+                    if f is not None:
+                        d = nxt - max(t, f)
+                        for row in members[g]:
+                            um[row] += rdem[row][i] / 3600.0 * d
             first = False
             t = nxt
         if rooms is not None:
-            # The last step ended at the hour's end: its rooms are these.
-            for row, series in rooms.items():
-                g = grp[row]
-                rr = at_end[g] if g in at_end else row_room(g, hour_end, strict=True)
-                series.append(rr / full[g] if full[g] else 0.0)
-    for g in gs:
+            full = plan["full"]
+            for g, series in rooms.items():
+                series.append(group_room(g, hour_end, True) / full[g] if full[g] else 0.0)
+        i += 1
+    for g in tracked:
         if dry_from[g] is not None:
-            gout[g][1] += horizon - dry_from[g]
-    for row in rows:
-        out[row][0], out[row][1] = gout[grp[row]]
+            dry_s[g] += horizon - dry_from[g]
+            dry_from[g] = None
+            spells[g][-1][1] = horizon
+    st["t"], st["i"], st["first"] = t, FORECAST_SLOTS, first
+    return st
+
+
+def _fleet_walk_gift(plan, W, frm, waiting, gift, t):
+    """Apply one gift to the walk's state at t (69 §4.6, §4.8), in place ->
+    its record. Effects are in the walk's points: {window, effect: refill}
+    sets the window's use to 0; {window, effect: give_back, points} or
+    {..., share_of, factor} takes points, or the share window's use as the
+    walk has it times factor, off the window's use, never below 0 (the
+    give-backs read the use before any refill of the same gift). A
+    restarts_at_use anchor moves each refilled window's next refill to t
+    plus its period; `lift` ends the account's rest or refusal at t. The
+    record: the window of the first effect (key), the points the gift added
+    to it and drew from them since (used), whether its remainder was lost to
+    the window's natural refill before it was spent, and the dollars of room
+    it added for the gift's row (gain, never below 0)."""
+    a = gift["acct"]
+    g = plan["grp"].get(gift.get("row"))
+    terms = plan["terms"]
+    INF = math.inf
+
+    def room():
+        if g is None or a not in terms[g] or frm[a] > t:
+            return 0.0
+        r = INF
+        for k, cap, pp in terms[g][a]:
+            r = min(r, (cap - W[k][0]) * pp)
+        return r if _WALK_EPS < r != INF else 0.0
+    before = room()
+    effects = [e for e in gift["effects"] if (a, e["window"]) in W]
+    backs = {}
+    for e in effects:
+        if e["effect"] == "give_back":
+            if e.get("points") is not None:
+                p = float(e["points"])
+            else:
+                sk = (a, e.get("share_of"))
+                p = W[sk][0] * float(e.get("factor", 1.0)) if sk in W else 0.0
+            backs[e["window"]] = backs.get(e["window"], 0.0) + max(0.0, p)
+    key, added = None, 0.0
+    for e in effects:
+        k = (a, e["window"])
+        if e["effect"] == "give_back" and e["window"] in backs:
+            pts = min(W[k][0], backs.pop(e["window"]))
+            W[k][0] -= pts
+        elif e["effect"] == "refill":
+            pts = W[k][0]
+            W[k][0] = 0.0
+            period = plan["wstat"][k][0]
+            if gift.get("anchor") == "restarts_at_use" and period:
+                W[k][1] = t + period
+        else:
+            continue
+        if key is None:
+            key, added = k, pts
+    if gift.get("lift") and frm[a] > t:
+        frm[a] = t
+        waiting.discard(a)
+    return {"at": t, "acct": a, "key": key, "added": added, "used": 0.0,
+            "live": added > _WALK_EPS, "lost": False, "gain": max(0.0, room() - before)}
+
+
+def _fleet_walk_resume(plan, week, snap, gifts, **kw):
+    """A gifted walk from a base walk's snapshot (69 §4.6): the snapshot's
+    own copy walked on with `gifts` (every gift at or after the snapshot's
+    instant, the new one included), as _fleet_walk_joint takes them. The
+    figures are a full gifted walk's from now."""
+    st = _fleet_walk_copy(snap)
+    return _fleet_walk_joint(plan, week, st, gifts, **kw)
+
+
+def _fleet_walk_rows(plan, week, st):
+    """{row: [dry_at, dry_s, unmet, usd]} from a walk's state."""
+    grp = plan["grp"]
+    return {row: [st["dry_at"][grp[row]], st["dry_s"][grp[row]], st["unmet"][row],
+                  week["usd"][row]] for row in plan["rows"]}
+
+
+def _fleet_walk_out(plan, spells):
+    """[168] 1 where a dry spell of the group holds the hour's end, now +
+    (h + 1) x 3600, else 0 (69 §4.7): the hour's end read before anything
+    lands on it, the walk's `room[h] = 0`."""
+    now = plan["now"]
+    out = [0] * FORECAST_SLOTS
+    for a, b in spells:
+        h = max(0, int((a - now) // 3600) - 1)
+        while h < FORECAST_SLOTS:
+            he = now + (h + 1) * 3600
+            if he > b:
+                break
+            if a <= he:
+                out[h] = 1
+            h += 1
     return out
 
 
@@ -9333,18 +9705,32 @@ def _forecast_weeks(pool, streams, ratio, seed_int, now, samples=FORECAST_SAMPLE
     scale = [held ** (0.5 ** (i / LIVE_HALF_LIFE_H)) if held is not None and i < 24 else 1.0
              for i in range(FORECAST_SLOTS)]
     sels = [s for s in streams if s is not None]
+    # The slots a day at a time: each day's run of hours, read in one go.
+    segs = []
+    for d, h in slots:
+        if segs and segs[-1][0] == d:
+            segs[-1][1].append(h)
+        else:
+            segs.append((d, [h]))
+    segs = [(d, operator.itemgetter(*hs) if len(hs) > 1 else (lambda xs, h=hs[0]: (xs[h],)))
+            for d, hs in segs]
+    lead = [(i, scale[i]) for i in range(FORECAST_SLOTS) if scale[i] != 1.0]
+
+    def series(f, drawn):
+        ser = []
+        for d, get in segs:
+            ser.extend(get(f.get(drawn[d]) or zero))
+        for i, k in lead:
+            ser[i] *= k
+        return ser
 
     def week(drawn):
         out = {}
         tot = [0.0] * FORECAST_SLOTS
         for s in sels:
-            f = fills.get(("selections", s), {})
-            ser = [(f.get(drawn[d]) or zero)[h] * scale[i] for i, (d, h) in enumerate(slots)]
-            out[s] = ser
-            for i, v in enumerate(ser):
-                tot[i] += v
-        f = fills[("proxy", None)]
-        prox = [f[drawn[d]][h] * scale[i] for i, (d, h) in enumerate(slots)]
+            ser = out[s] = series(fills.get(("selections", s), {}), drawn)
+            tot = [a + b for a, b in zip(tot, ser)]
+        prox = series(fills[("proxy", None)], drawn)
         out["proxy"] = [max(p, q) for p, q in zip(prox, tot)]
         out[None] = [max(0.0, p - q) for p, q in zip(prox, tot)]
         return out
@@ -9403,28 +9789,26 @@ def _forecast_compute(t, inputs):
     # rows (binds) are walked and ranked.
     streams = _forecast_streams(inputs["streams"])
     weeks = _forecast_weeks(pool, streams, inputs["ratio"], inputs["seed_int"], now)
-    rows = list(binds)
-    grp = _fleet_walk_groups(binds)
-    gs = list(dict.fromkeys(grp.values()))  # one room series per set of terms
+    plan = _fleet_walk_plan(accts0, binds, inputs["orders"], now)
+    rows, grp, gs = plan["rows"], plan["grp"], plan["gs"]
     per = {row: [] for row in rows}
     outs = {g: [0] * FORECAST_SLOTS for g in gs}
-    rooms = {g: array("d") for g in gs}
     cache = {}
     for wk in weeks:
         got = cache.get(id(wk))
         if got is None:
-            rm = {g: [] for g in gs}
-            got = (_fleet_walk_joint(copy.deepcopy(accts0), binds, inputs["orders"], wk, now, rm), rm)
+            week = _fleet_walk_week(plan, wk)
+            st = _fleet_walk_joint(plan, week)
+            got = (_fleet_walk_rows(plan, week, st),
+                   {g: _fleet_walk_out(plan, st["spells"][g]) for g in gs})
             cache[id(wk)] = got  # the flat ladder's weeks are one week
-        res, rm = got
+        res, out = got
         for row in rows:
             per[row].append(res[row])
         for g in gs:
             o = outs[g]
-            for h, v in enumerate(rm[g]):
-                if v <= _WALK_EPS:
-                    o[h] += 1
-            rooms[g].extend(rm[g])
+            for h, v in enumerate(out[g]):
+                o[h] += v
     n = len(weeks)
     shares = {g: [round(c / n, 4) for c in outs[g]] for g in gs}
     result = {row: dict(_forecast_row(per[row], n, now), out_share=list(shares[grp[row]]),
@@ -9440,6 +9824,17 @@ def _forecast_compute(t, inputs):
     best = max((row for row in rows if row != "proxy"), key=rank, default=None)
     if best is not None and rank(best) > rank("proxy"):
         fans.append(best)
+    # Their rooms, in a second pass over the weeks that keeps no spells.
+    rooms = {grp[row]: array("d") for row in fans}
+    cache = {}
+    for wk in weeks:
+        got = cache.get(id(wk))
+        if got is None:
+            rm = {g: [] for g in rooms}
+            _fleet_walk_joint(plan, _fleet_walk_week(plan, wk), track=(), rooms=rm, unmet=False)
+            got = cache[id(wk)] = rm
+        for g, series in got.items():
+            rooms[g].extend(series)
     for row in fans:
         arr = rooms[grp[row]]
         cols = [arr[h::FORECAST_SLOTS] for h in range(FORECAST_SLOTS)]

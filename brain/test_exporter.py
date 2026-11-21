@@ -14502,8 +14502,8 @@ class TestForecast(SizingBase):
             inp = one_inputs(p, now, room=None, ratio=ratio, accts=accts, pp=pp)
             fc = ex._forecast_compute(T, inp)["rows"]["proxy"]
             held = [v for d in days[14:] for v in d]
-            res = ex._fleet_walk_joint(copy.deepcopy(inp["accounts"]), inp["binds"], inp["orders"],
-                                       {"proxy": held, None: held}, now)["proxy"]
+            res = walk_rows(inp["accounts"], inp["binds"], inp["orders"],
+                            {"proxy": held, None: held}, now)["proxy"]
             hits_dry += fc["dry_h"]["p10"] <= round(res[1] / 3600, 1) <= fc["dry_h"]["p90"]
             hits_usd += fc["usd"]["p10"] <= res[3] <= fc["usd"]["p90"]
         return hits_dry / 100, hits_usd / 100
@@ -14648,6 +14648,21 @@ class TestForecast(SizingBase):
             self.assertEqual(r["room_pct"]["p10"][h] == 0, r["out_share"][h] >= 0.1, h)
 
 
+def walk_rows(accts, binds, orders, demand, now, rooms=None, walls=None):
+    """The fast walk as the figures read it: -> {row: [dry_at, dry_s,
+    unmet, usd]}, with `rooms` ({row: list}) each row's room at each hour's
+    end appended (its set of terms' series) and `walls` as the walk keeps
+    them."""
+    plan = ex._fleet_walk_plan(accts, binds, orders, now)
+    week = ex._fleet_walk_week(plan, demand)
+    rm = None if rooms is None else {g: [] for g in {plan["grp"][r] for r in rooms}}
+    st = ex._fleet_walk_joint(plan, week, rooms=rm, walls=walls)
+    if rooms is not None:
+        for row, series in rooms.items():
+            series.extend(rm[plan["grp"][row]])
+    return ex._fleet_walk_rows(plan, week, st)
+
+
 def joint_walk(accounts, demand, classes=None, sizing=None, preferred=None, now=1795100000,
                rooms=False, edit=None):
     """The joint walk on a figure (69 §4.6): accounts {acct: anth(...)},
@@ -14678,8 +14693,683 @@ def joint_walk(accounts, demand, classes=None, sizing=None, preferred=None, now=
     dem["proxy"] = [sum(float(v) for v in demand.values())] * 168
     rm = {row: [] for row in binds} if rooms else None
     walls = {}
-    res = ex._fleet_walk_joint(accts, binds, orders, dem, now, rm, walls)
+    res = walk_rows(accts, binds, orders, dem, now, rm, walls)
     return res, walls, rm, fig
+
+
+# ---- the fast walk against push 3's (quota-model 69 §4.6, §4.7, §9) --------------
+
+def reference_walk(accts, binds, orders, demand, now, rooms=None, walls=None):
+    """The hour-by-hour walk push 3 shipped, kept here as the reference the
+    fast walk (ex._fleet_walk_joint) is held to, figure for figure. One sampled week walked (69 §4.6). accts and binds as
+    _fleet_walk_accounts gives them (accts is changed: give it a copy);
+    orders {stream: [acct], the draw order}; demand {stream: [168 dollars an
+    hour]} for every row ("proxy" is all work, its demand the week's whole
+    spend; None the spend with no selection, which binds on all work's
+    windows). -> {row: [dry_at (None for never), dry_s, unmet, usd]}, and
+    with `rooms` ({row: list}) each listed row's room at each hour's end
+    over its full week's room appended there; with `walls` ({}), the instant
+    each account first had no room left for the stream drawing on it. Rows
+    with one set of terms (ex._fleet_walk_groups) are tracked as one: their
+    room, and so their dry spells, are the same; their unmet is each row's
+    own demand over those spells."""
+    horizon = now + ex.FORECAST_SLOTS * 3600
+    INF = math.inf
+    frm = {a: (INF if v["from"] is None else v["from"]) for a, v in accts.items()}
+    streams = [s for s in ex._forecast_streams([k for k in orders if k is not None])
+               if s is None or s in binds]
+    srow = {s: "proxy" if s is None else s for s in streams}
+    rows = list(binds)
+    grp = ex._fleet_walk_groups(binds)
+    gs = list(dict.fromkeys(grp.values()))  # each group by its first row
+    racc = {g: list(binds[g]) for g in gs}
+    # Each group's terms: per account its windows' state and [cap, pp]. The
+    # room they leave on an account, in dollars, is kept (memo) until the
+    # account's windows move: a take, a drain or a refill bumps ver.
+    terms = {g: [(a, [(accts[a]["wins"][wid], cap, pp) for wid, (cap, pp) in bw.items()], {})
+                 for a, bw in binds[g].items()] for g in gs}
+    ver = dict.fromkeys(accts, 0)
+
+    def wroom(ws, memo, a):
+        m = memo.get(a)
+        v = ver[a]
+        if m is not None and m[0] == v:
+            return m[1]
+        r = INF
+        for w, cap, pp in ws:
+            x = (cap - w["used"]) * pp
+            if x < r:
+                r = x
+        r = r if ex._WALK_EPS < r != INF else 0.0
+        memo[a] = (v, r)
+        return r
+
+    rterm = {g: {a: (ws, memo) for a, ws, memo in terms[g]} for g in gs}
+
+    def room_for(g, a, t, strict=False):
+        if (frm[a] >= t) if strict else (frm[a] > t):
+            return 0.0
+        ws, memo = rterm[g][a]
+        return wroom(ws, memo, a)
+
+    def row_room(g, t, strict=False):
+        tot = 0.0
+        for a, ws, memo in terms[g]:
+            f = frm[a]
+            if f >= t if strict else f > t:
+                continue
+            tot += wroom(ws, memo, a)
+        return tot
+
+    full = {g: ex._fleet_walk_full(accts, binds[g]) for g in gs}
+    sgrp = {s: grp[srow[s]] for s in streams}
+    members = {g: [row for row in rows if grp[row] == g] for g in gs}
+    cursor = {s: None for s in streams}
+    out = {row: [None, 0.0, 0.0, 0.0] for row in rows}
+    gout = {g: [None, 0.0] for g in gs}  # dry_at, dry_s
+    dry_from = {g: None for g in gs}
+    nexts = sorted({v for v in frm.values() if now < v < horizon})
+    waiting = {a for a, v in frm.items() if v > now}
+    zero = [0.0] * ex.FORECAST_SLOTS
+    rdem = {row: demand["proxy"] if row == "proxy" else demand.get(row, zero) for row in rows}
+    first = True
+    t = now
+    for i in range(ex.FORECAST_SLOTS):
+        hour_end = now + (i + 1) * 3600
+        rate = {s: demand[s][i] / 3600.0 for s in streams}
+        rrate = {row: rdem[row][i] / 3600.0 for row in rows}
+        for row in rows:
+            out[row][3] += rrate[row] * 3600.0
+        while t < hour_end:
+            # What lands at t: refills, and accounts that start serving.
+            landed = set()
+            nxt = hour_end
+            for an, a in accts.items():
+                for w in a["wins"].values():
+                    if w["next"] is not None:
+                        if w["next"] <= t:
+                            w["used"] = 0.0
+                            ver[an] += 1
+                            landed.add(an)
+                            if w["first_use"] or not w["period"]:
+                                w["next"] = None
+                            else:
+                                while w["next"] <= t:
+                                    w["next"] += w["period"]
+                        if w["next"] is not None and w["next"] < nxt:
+                            nxt = w["next"]
+            if waiting:
+                came = {a for a in waiting if frm[a] <= t}
+                waiting -= came
+                landed |= came
+            for v in nexts:
+                if t < v < nxt:
+                    nxt = v
+                    break
+            # A group's room only grows by what lands, so only a dry group
+            # with an account that landed can have room again.
+            for g in gs:
+                if dry_from[g] is not None and (first or not landed.isdisjoint(racc[g])) \
+                        and row_room(g, t) > ex._WALK_EPS:
+                    gout[g][1] += t - dry_from[g]
+                    dry_from[g] = None
+            # A group with room at the last step's end has room now (refills
+            # only add); only the first step can start on an empty group.
+            empty = {g: row_room(g, t) <= ex._WALK_EPS for g in gs
+                     if dry_from[g] is None} if first else {}
+            span = nxt - t
+            hit = {}  # acct -> the instant its last take this step ended
+            for s in streams:
+                r = rate[s]
+                if r <= 0:
+                    continue
+                left = r * span
+                g_s = sgrp[s]
+                bind = binds[srow[s]]
+                order = orders.get(s) or ()
+                if s is None:
+                    # The spend with no selection draws in listing order:
+                    # every step starts from the first account with room,
+                    # an earlier one that refilled included. A selection
+                    # keeps its cursor and never switches back.
+                    cursor[s] = None
+                while left > ex._WALK_EPS:
+                    cur = cursor[s]
+                    if cur is None or room_for(g_s, cur, t) <= ex._WALK_EPS:
+                        k = 0 if cur is None else (order.index(cur) + 1) % len(order)
+                        ring = order[k:] + order[:k]
+                        cur = next((a for a in ring if room_for(g_s, a, t) > ex._WALK_EPS), None)
+                        if cur is None:
+                            break
+                        cursor[s] = cur
+                    took = min(left, room_for(g_s, cur, t))
+                    at = t + (r * span - left) / r
+                    ws = accts[cur]["wins"]
+                    for wid, (cap, pp) in bind[cur].items():
+                        w = ws[wid]
+                        pts = took / pp
+                        w["used"] += pts
+                        if w["first_use"] and w["next"] is None and w["period"]:
+                            w["next"] = at + w["period"]
+                        if s is None:
+                            for sw, k in w["drain"].items():
+                                ws[sw]["used"] += pts * k
+                    ver[cur] += 1
+                    left -= took
+                    hit[cur] = at + took / r
+                    if walls is not None and room_for(g_s, cur, t) <= ex._WALK_EPS:
+                        walls.setdefault(cur, hit[cur])
+            at_end = {}
+            for g in gs:
+                if dry_from[g] is None and (first or not hit.keys().isdisjoint(racc[g])):
+                    at_end[g] = rr = row_room(g, nxt, strict=True)
+                else:
+                    rr = INF
+                if rr <= ex._WALK_EPS:
+                    if empty.get(g):
+                        on = t
+                    else:
+                        on = max([hit[a] for a in racc[g] if a in hit] or [t])
+                    dry_from[g] = on
+                    if gout[g][0] is None:
+                        gout[g][0] = on
+                f = dry_from[g]
+                if f is not None:
+                    d = nxt - max(t, f)
+                    for row in members[g]:
+                        out[row][2] += rrate[row] * d
+            first = False
+            t = nxt
+        if rooms is not None:
+            # The last step ended at the hour's end: its rooms are these.
+            for row, series in rooms.items():
+                g = grp[row]
+                rr = at_end[g] if g in at_end else row_room(g, hour_end, strict=True)
+                series.append(rr / full[g] if full[g] else 0.0)
+    for g in gs:
+        if dry_from[g] is not None:
+            gout[g][1] += horizon - dry_from[g]
+    for row in rows:
+        out[row][0], out[row][1] = gout[grp[row]]
+    return out
+
+def reference_compute(inputs, weeks):
+    """Push 3's _forecast_compute over reference_walk, hour by hour, every
+    set of terms' rooms recorded: -> {row: forecast}."""
+    now, binds = inputs["now"], inputs["binds"]
+    rows = list(binds)
+    grp = ex._fleet_walk_groups(binds)
+    gs = list(dict.fromkeys(grp.values()))
+    per = {row: [] for row in rows}
+    outs = {g: [0] * 168 for g in gs}
+    rooms = {g: [] for g in gs}
+    for wk in weeks:
+        rm = {g: [] for g in gs}
+        res = reference_walk(copy.deepcopy(inputs["accounts"]), binds, inputs["orders"], wk, now, rm)
+        for row in rows:
+            per[row].append(res[row])
+        for g in gs:
+            for h, v in enumerate(rm[g]):
+                outs[g][h] += v <= ex._WALK_EPS
+            rooms[g].extend(rm[g])
+    n = len(weeks)
+    result = {row: dict(ex._forecast_row(per[row], n, now),
+                        out_share=[round(c / n, 4) for c in outs[grp[row]]], room_pct=None)
+              for row in rows}
+
+    def rank(row):
+        return (result[row]["gap_share"], result[row]["dry_h"]["p50"])
+    fans = ["proxy"]
+    best = max((row for row in rows if row != "proxy"), key=rank, default=None)
+    if best is not None and rank(best) > rank("proxy"):
+        fans.append(best)
+    for row in fans:
+        arr = rooms[grp[row]]
+        cols = [arr[h::168] for h in range(168)]
+        result[row]["room_pct"] = {k: [round(100.0 * ex._forecast_q(col, p), 2) for col in cols]
+                                   for k, p in ex._FORECAST_QS}
+    return result
+
+
+def random_shape(rng, now):
+    """A made-up fleet for the walk: 1-5 accounts, each with a weekly
+    window (its next refill somewhere in the week or past it), sometimes a
+    scoped window the unlabelled spend drains, sometimes a first-use 30-day
+    window, some with a period inside the week; each account serving now,
+    later, or never; rows binding random windows at random caps and sizes,
+    some sharing all work's terms or each other's; orders shuffled; demand
+    with idle hours, sometimes a stream idle for its first day or so, and
+    hours drawing no more than _WALK_EPS. -> (accts, binds, orders,
+    demand)."""
+    accts = {}
+    names = [f"acct-{c}" for c in "abcde"[:rng.randint(1, 5)]]
+    for a in names:
+        wins = {"seven_day": {"used": rng.choice([0.0, rng.uniform(0, 100), 100.0]),
+                              "period": WEEK, "first_use": False,
+                              "next": now + rng.uniform(-HOUR, 9 * DAY), "drain": {}}}
+        if rng.random() < 0.6:
+            wins["scoped:Fable"] = {"used": rng.uniform(0, 100), "period": WEEK, "first_use": False,
+                                    "next": now + rng.uniform(0, 8 * DAY), "drain": {}}
+            wins["seven_day"]["drain"]["scoped:Fable"] = rng.uniform(0.2, 2.0)
+        if rng.random() < 0.3:
+            # a first-use window, some with a period inside the week: one
+            # not started yet starts at its first draw, perhaps after idle
+            # hours a batch covers
+            wins["window:30d"] = {"used": rng.uniform(0, 100),
+                                  "period": rng.choice([30 * DAY, rng.uniform(2 * HOUR, 2 * DAY)]),
+                                  "first_use": True,
+                                  "next": None if rng.random() < 0.6 else now + rng.uniform(0, 5 * DAY),
+                                  "drain": {}}
+        frm = rng.choice([0.0, 0.0, 0.0, now + rng.uniform(0, 6 * DAY), None])
+        accts[a] = {"from": frm, "wins": wins}
+
+    def terms(a, wids):
+        return {wid: [rng.choice([100.0, 100.0, rng.uniform(60, 100)]), rng.uniform(5, 40)]
+                for wid in wids}
+    binds = {"proxy": {a: terms(a, ["seven_day"] + (["window:30d"] if "window:30d" in accts[a]["wins"]
+                                                    and rng.random() < 0.5 else []))
+                       for a in names}}
+    sels = rng.sample(["sel-a", "sel-b", "sel-c", "zeta", "lane:opus", "lane:fable",
+                       "lane:sonnet"], rng.randint(0, 5))
+    for s in sels:
+        roll = rng.random()
+        if roll < 0.25:
+            binds[s] = copy.deepcopy(binds["proxy"])
+        elif roll < 0.45 and len(binds) > 1:
+            binds[s] = copy.deepcopy(binds[rng.choice([k for k in binds if k != "proxy"])])
+        else:
+            pick = rng.sample(names, rng.randint(1, len(names)))
+            binds[s] = {a: terms(a, rng.sample(sorted(accts[a]["wins"]),
+                                               rng.randint(1, len(accts[a]["wins"]))))
+                        for a in pick}
+    orders = {None: rng.sample(names, len(names))}
+    for s in sels:
+        orders[s] = rng.sample(list(binds[s]), len(binds[s]))
+    demand = {}
+    for s in sels + [None]:
+        base = rng.choice([0.0, rng.uniform(1, 60)])
+        demand[s] = [0.0 if rng.random() < 0.3 else base * rng.uniform(0.2, 3.0) for _ in range(168)]
+        if rng.random() < 0.3:
+            n0 = rng.randint(1, 30)
+            demand[s][:n0] = [0.0] * n0
+        if rng.random() < 0.15:
+            for i in rng.sample(range(168), 6):
+                demand[s][i] = rng.choice([1e-10, ex._WALK_EPS, 2e-9])
+    demand["proxy"] = [sum(demand[s][i] for s in sels + [None]) for i in range(168)]
+    return accts, binds, orders, demand
+
+
+def live_shaped(now):
+    """A made-up fleet shaped like a small team's: three Max accounts with a
+    weekly and a scoped Fable window (drained by unlabelled work), one at
+    its wall; twelve selections over four sets of terms; inputs for
+    _forecast_compute and the weeks to walk."""
+    names = ["max-a", "max-b", "max-c"]
+    accts = {a: {"from": 0.0 if a != "max-c" else now + 30 * HOUR, "wins": {
+        "seven_day": {"used": u, "period": WEEK, "first_use": False, "next": now + nx, "drain":
+                      {"scoped:Fable": 0.8}},
+        "scoped:Fable": {"used": f, "period": WEEK, "first_use": False, "next": now + fx,
+                         "drain": {}}}}
+        for a, u, nx, f, fx in (("max-a", 62.0, 40 * HOUR, 30.0, 70 * HOUR),
+                                ("max-b", 88.0, 100 * HOUR, 75.0, 20 * HOUR),
+                                ("max-c", 100.0, 30 * HOUR, 100.0, 30 * HOUR))}
+    opus = {a: {"seven_day": [100.0, 32.0 + i]} for i, a in enumerate(names)}
+    fable = {a: {"scoped:Fable": [100.0, 6.8 + i / 10], "seven_day": [100.0, 13.0 + i]}
+             for i, a in enumerate(names)}
+    sonnet = {a: {"seven_day": [100.0, 15.0 + i]} for i, a in enumerate(names[:2])}
+    binds = {"proxy": {a: {"seven_day": [100.0, 26.0 + i]} for i, a in enumerate(names)}}
+    for s, b in (("sel-a", opus), ("sel-b", opus), ("lane:opus", opus), ("sel-c", opus),
+                 ("sel-d", fable), ("lane:fable", fable), ("sel-e", fable),
+                 ("sel-f", sonnet), ("lane:sonnet", sonnet), ("lane:default", binds["proxy"]),
+                 ("lane:haiku", binds["proxy"]), ("sel-g", opus)):
+        binds[s] = copy.deepcopy(b)
+    orders = {None: sorted(names)}
+    for s in binds:
+        if s != "proxy":
+            orders[s] = sorted(binds[s])
+    rng = random.Random(11)
+    weeks = []
+    for _ in range(60):
+        dem = {}
+        for s in [k for k in binds if k != "proxy"] + [None]:
+            lvl = rng.choice([0.0, 0.0, rng.uniform(0.5, 6.0)]) if s else rng.uniform(20, 70)
+            dem[s] = [0.0 if (i % 24) in (3, 4, 5, 6) or rng.random() < 0.15
+                      else lvl * rng.uniform(0.3, 2.5) for i in range(168)]
+        dem["proxy"] = [sum(dem[s][i] for s in dem) for i in range(168)]
+        weeks.append(dem)
+    inputs = {"key": "k", "now": now, "accounts": accts, "binds": binds, "orders": orders,
+              "streams": [k for k in binds if k != "proxy"]}
+    return inputs, weeks
+
+
+def hand_fleet(now):
+    """A made-up fleet whose instants fall mid-hour, for snapshots and
+    resumes worked by hand. Every account's weekly window but acct-b's (at
+    100 h) refills past the horizon; demand is constant. acct-a ($1,012) serves all work ($10 an
+    hour, acct-a then acct-b) and sel-a ($10 an hour, acct-a only), so
+    sel-a runs dry in hour 50; acct-b starts serving at 50.25 h. sel-b ($10
+    an hour) runs acct-c dry at 10 h and waits for acct-d, which starts at
+    12.5 h with $80; sel-d ($1 an hour) runs acct-e dry at 12.55 h, in the
+    step acct-d starts in. -> (accts, binds, orders, demand)."""
+    def win(used, nxt=9 * DAY):
+        return {"seven_day": {"used": used, "period": WEEK, "first_use": False,
+                              "next": now + nxt, "drain": {}}}
+    accts = {"acct-a": {"from": 0.0, "wins": win(0.0)},
+             "acct-b": {"from": now + 50.25 * HOUR, "wins": win(70.0, 100 * HOUR)},
+             "acct-c": {"from": 0.0, "wins": win(0.0)},
+             "acct-d": {"from": now + 12.5 * HOUR, "wins": win(0.0)},
+             "acct-e": {"from": 0.0, "wins": win(0.0)}}
+    binds = {"proxy": {"acct-a": {"seven_day": [100.0, 10.12]},
+                       "acct-b": {"seven_day": [100.0, 10.12]}},
+             "sel-a": {"acct-a": {"seven_day": [100.0, 10.12]}},
+             "sel-b": {"acct-c": {"seven_day": [100.0, 1.0]}, "acct-d": {"seven_day": [100.0, 0.8]}},
+             "sel-d": {"acct-e": {"seven_day": [100.0, 0.1255]}}}
+    orders = {None: ["acct-a", "acct-b"], "sel-a": ["acct-a"], "sel-b": ["acct-c", "acct-d"],
+              "sel-d": ["acct-e"]}
+    demand = {None: [10.0] * 168, "sel-a": [10.0] * 168, "sel-b": [10.0] * 168,
+              "sel-d": [1.0] * 168}
+    demand["proxy"] = [31.0] * 168
+    return accts, binds, orders, demand
+
+
+class TestFastWalk(unittest.TestCase):
+    """69 §9: the walk that jumps between instants and walls equals push 3's
+    hour-by-hour walk (reference_walk), figure for figure, and a gifted
+    walk resumed from a snapshot equals the full gifted walk."""
+
+    NOW = 1795100000.5  # half past a second, as a render's clock is
+
+    def same_week(self, accts, binds, orders, demand, msg):
+        ref_rooms = {row: [] for row in binds}
+        ref_walls = {}
+        ref = reference_walk(copy.deepcopy(accts), binds, orders, demand, self.NOW, ref_rooms,
+                             ref_walls)
+        plan = ex._fleet_walk_plan(accts, binds, orders, self.NOW)
+        week = ex._fleet_walk_week(plan, demand)
+        rooms = {g: [] for g in plan["gs"]}
+        walls = {}
+        st = ex._fleet_walk_joint(plan, week, rooms=rooms, walls=walls)
+        got = ex._fleet_walk_rows(plan, week, st)
+        for row in binds:
+            g = plan["grp"][row]
+            a, b = ref[row], got[row]
+            if a[0] is None or b[0] is None:
+                self.assertEqual(a[0], b[0], (msg, row, "dry_at"))
+            else:
+                self.assertAlmostEqual(a[0], b[0], delta=1e-6, msg=(msg, row, "dry_at"))
+            self.assertAlmostEqual(a[1], b[1], delta=1e-6, msg=(msg, row, "dry_s"))
+            self.assertAlmostEqual(a[2], b[2], delta=1e-6 * max(1.0, a[2]), msg=(msg, row, "unmet"))
+            self.assertEqual(a[3], b[3], (msg, row, "usd"))
+            # out is the hours whose end has no room at all (69 §4.7): push 3
+            # read an hour with room up to _WALK_EPS x full as out too.
+            self.assertEqual([int(v == 0.0) for v in ref_rooms[row]],
+                             ex._fleet_walk_out(plan, st["spells"][g]), (msg, row, "out"))
+            self.assertEqual(len(rooms[g]), 168)
+            for h, (x, y) in enumerate(zip(ref_rooms[row], rooms[g])):
+                self.assertAlmostEqual(x, y, delta=1e-9, msg=(msg, row, "room", h))
+        self.assertEqual(set(ref_walls), set(walls), (msg, "walls"))
+        for a in walls:
+            self.assertAlmostEqual(ref_walls[a], walls[a], delta=1e-6, msg=(msg, a, "wall"))
+        return st
+
+    def test_random_shapes_walk_as_push_3_walked_them(self):
+        rng = random.Random(69)
+        for n in range(300):
+            accts, binds, orders, demand = random_shape(rng, self.NOW)
+            self.same_week(accts, binds, orders, demand, n)
+
+    def test_a_live_shaped_fleet_has_push_3s_figures(self):
+        inputs, weeks = live_shaped(self.NOW)
+        for n, wk in enumerate(weeks[:20]):
+            self.same_week(inputs["accounts"], inputs["binds"], inputs["orders"], wk, n)
+        want = reference_compute(inputs, weeks)
+        with mock.patch.object(ex, "_forecast_weeks", return_value=weeks):
+            got = ex._forecast_compute(T, dict(inputs, pool={"pool": [], "flat": False},
+                                               ratio=1.0, seed="s", seed_int=1))["rows"]
+        self.assertEqual(set(got), set(want))
+        fans = [row for row in got if got[row]["room_pct"] is not None]
+        self.assertIn("proxy", fans)
+        for row in want:
+            for k in ("first_dry", "gap_share", "dry_h", "unmet", "usd", "out_share", "room_pct"):
+                self.assertEqual(got[row][k], want[row][k], (row, k))
+        self.assertGreater(want["proxy"]["gap_share"], 0, "the fixture runs dry")
+        self.assertIsNotNone(want["proxy"]["first_dry"]["hist"])
+
+    def gifts_fixture(self):
+        inputs, weeks = live_shaped(self.NOW)
+        plan = ex._fleet_walk_plan(inputs["accounts"], inputs["binds"], inputs["orders"], self.NOW)
+        return plan, [ex._fleet_walk_week(plan, wk) for wk in weeks]
+
+    def same_state(self, plan, a, b, msg):
+        for g in plan["gs"]:
+            if a["dry_at"][g] is None or b["dry_at"][g] is None:
+                self.assertEqual(a["dry_at"][g], b["dry_at"][g], (msg, g))
+            else:
+                self.assertAlmostEqual(a["dry_at"][g], b["dry_at"][g], delta=1e-6, msg=(msg, g))
+            self.assertAlmostEqual(a["dry_s"][g], b["dry_s"][g], delta=1e-6, msg=(msg, g))
+            self.assertEqual(len(a["spells"][g]), len(b["spells"][g]), (msg, g))
+            for x, y in zip(a["spells"][g], b["spells"][g]):
+                self.assertAlmostEqual(x[0], y[0], delta=1e-6, msg=(msg, g))
+                self.assertAlmostEqual(x[1], y[1], delta=1e-6, msg=(msg, g))
+        for row in plan["rows"]:
+            self.assertAlmostEqual(a["unmet"][row], b["unmet"][row],
+                                   delta=1e-6 * max(1.0, a["unmet"][row]), msg=(msg, row))
+        self.assertEqual(len(a["gifts"]), len(b["gifts"]), msg)
+        for x, y in zip(a["gifts"], b["gifts"]):
+            for k in ("at", "acct", "key", "live", "lost"):
+                self.assertEqual(x[k], y[k], (msg, k))
+            for k in ("added", "used", "gain"):
+                self.assertAlmostEqual(x[k], y[k], delta=1e-6, msg=(msg, k))
+
+    def test_a_gifted_walk_resumed_from_a_snapshot_is_the_full_one(self):
+        # 69 §4.6: the base walk keeps the start of each step in which a row
+        # runs dry, keyed by the spell's start; a gift used there walks on
+        # from the snapshot and reads as the whole gifted walk from now.
+        plan, weeks = self.gifts_fixture()
+        gifts = [
+            {"acct": "max-a", "effects": [{"window": "seven_day", "effect": "refill"},
+                                          {"window": "scoped:Fable", "effect": "refill"}],
+             "anchor": "kept", "row": "proxy"},
+            {"acct": "max-b", "effects": [{"window": "scoped:Fable", "effect": "refill"},
+                                          {"window": "seven_day", "effect": "give_back",
+                                           "share_of": "scoped:Fable", "factor": 0.4}],
+             "anchor": "restarts_at_use", "row": "sel-d"},
+            {"acct": "max-c", "effects": [{"window": "seven_day", "effect": "refill"}],
+             "anchor": "kept", "lift": True, "row": "sel-a"}]
+        resumed = 0
+        for n, week in enumerate(weeks):
+            snaps = {}
+            base = ex._fleet_walk_joint(plan, week, snaps=snaps)
+            starts = {sp[0] for g in plan["gs"] for sp in base["spells"][g]}
+            self.assertEqual(set(snaps), starts, "a snapshot for each spell's start")
+            for on in [x for x in sorted(snaps) if x < plan["horizon"]][:3]:
+                for gift in gifts:
+                    gift = dict(gift, at=on)
+                    full = ex._fleet_walk_joint(plan, week, gifts=[gift])
+                    back = ex._fleet_walk_resume(plan, week, snaps[on], [gift])
+                    self.same_state(plan, full, back, (n, on, gift["acct"]))
+                    self.assertEqual(len(back["gifts"]), 1)
+                    resumed += 1
+        self.assertGreater(resumed, 50)
+
+    def hand(self):
+        accts, binds, orders, demand = hand_fleet(self.NOW)
+        plan = ex._fleet_walk_plan(accts, binds, orders, self.NOW)
+        return plan, ex._fleet_walk_week(plan, demand)
+
+    def test_a_snapshot_is_the_state_at_its_steps_start(self):
+        # acct-d starts serving at 12.5 h, which ends sel-b's spell, and
+        # acct-e runs dry in that step: the snapshot keyed by sel-d's spell
+        # start is the walk at 12.5 h, before either.
+        plan, week = self.hand()
+        H, now = HOUR, self.NOW
+        snaps = {}
+        base = ex._fleet_walk_joint(plan, week, snaps=snaps)
+        self.assertEqual(base["spells"]["sel-b"], [[now + 10 * H, now + 12.5 * H],
+                                                   [now + 20.5 * H, plan["horizon"]]])
+        self.assertAlmostEqual(base["spells"]["sel-d"][0][0], now + 12.55 * H, delta=1e-3)
+        self.assertAlmostEqual(base["spells"]["sel-a"][0][0], now + 50.95 * H, delta=1e-3)
+        snap = snaps[base["spells"]["sel-d"][0][0]]
+        self.assertEqual(snap["t"], now + 12.5 * H)
+        self.assertEqual(snap["waiting"], {"acct-b", "acct-d"}, "acct-d is still to start")
+        self.assertEqual(snap["dry_from"]["sel-b"], now + 10 * H)
+        self.assertEqual(snap["spells"]["sel-b"], [[now + 10 * H, None]], "the spell open")
+        self.assertEqual(snap["cur"]["sel-b"], "acct-c")
+        self.assertEqual(snap["W"][("acct-d", "seven_day")][0], 0.0)
+        self.assertAlmostEqual(snap["W"][("acct-e", "seven_day")][0], 12.5 / 0.1255, delta=1e-9)
+        self.assertEqual(snap["dry_from"]["sel-d"], None)
+        for on, snap in snaps.items():
+            self.same_state(plan, base, ex._fleet_walk_resume(plan, week, snap, []), on)
+
+    def test_a_gifted_walk_resumes_from_each_of_its_own_snapshots(self):
+        # A gift at 12.5 h lifts acct-b's rest and gives back 60 of its 70
+        # points, in the step acct-d starts and acct-e runs dry in. Resumed
+        # from any of the gifted walk's snapshots, with the gifts at or
+        # after it, the walk is the full gifted one: acct-b's own start at
+        # 50.25 h still bounds a step after the lift.
+        plan, week = self.hand()
+        H, now = HOUR, self.NOW
+        gift = {"at": now + 12.5 * H, "acct": "acct-b", "row": "proxy", "anchor": "kept",
+                "lift": True, "effects": [{"window": "seven_day", "effect": "give_back",
+                                           "points": 60.0}]}
+        snaps = {}
+        full = ex._fleet_walk_joint(plan, week, gifts=[gift], snaps=snaps)
+        rec = full["gifts"][0]
+        self.assertEqual((rec["key"], rec["added"]), (("acct-b", "seven_day"), 60.0))
+        self.assertAlmostEqual(rec["gain"], 90 * 10.12, delta=1e-9, msg="none before the lift")
+        at = snaps[full["spells"]["sel-d"][0][0]]
+        self.assertEqual(at["t"], gift["at"])
+        self.assertEqual(at["frm"]["acct-b"], now + 50.25 * H, "the lift undone")
+        self.assertEqual(at["waiting"], {"acct-b", "acct-d"})
+        self.assertEqual(at["gifts"], [])
+        later = snaps[now + 20.5 * H]
+        self.assertEqual(later["frm"]["acct-b"], gift["at"])
+        on = full["spells"]["sel-a"][0][0]
+        self.assertEqual(snaps[on]["t"], now + 50.25 * H)
+        self.assertEqual(snaps[on]["gifts"][0]["used"], 0.0, "drawn from in that step only")
+        self.assertTrue(rec["lost"], "acct-b's refill at 100 h takes what is left")
+        # sel-a draws first: it takes acct-a's last $7 at 50.25 h, and all
+        # work's $7.50 to 51 h and $10 an hour to 100 h fall on acct-b
+        self.assertAlmostEqual(rec["used"], (7.5 + 49 * 10.0) / 10.12, delta=1e-9)
+        self.assertEqual(len(snaps), 4)
+        for on, snap in snaps.items():
+            back = ex._fleet_walk_resume(plan, week, snap, [g for g in [gift] if g["at"] >= snap["t"]])
+            self.same_state(plan, full, back, on)
+
+    def gift_on(self, effects, anchor="kept", lift=False):
+        # acct-a: weekly window at 40 of 100 points ($10 a point for the
+        # row), next refill at 100 h; a scoped window at 50. acct-b rests
+        # until 10 h, its weekly window at 20. The gift at 5 h.
+        now = self.NOW
+        accts = {"acct-a": {"from": 0.0, "wins": {
+            "seven_day": {"used": 40.0, "period": WEEK, "first_use": False,
+                          "next": now + 100 * HOUR, "drain": {}},
+            "scoped:X": {"used": 50.0, "period": WEEK, "first_use": False,
+                         "next": now + 120 * HOUR, "drain": {}}}},
+            "acct-b": {"from": now + 10 * HOUR, "wins": {
+                "seven_day": {"used": 20.0, "period": WEEK, "first_use": False,
+                              "next": now + 100 * HOUR, "drain": {}}}}}
+        binds = {"proxy": {a: {"seven_day": [100.0, 10.0]} for a in accts}}
+        plan = ex._fleet_walk_plan(accts, binds, {None: ["acct-a", "acct-b"]}, now)
+        st = ex._fleet_walk_start(plan)
+        t = now + 5 * HOUR
+        gift = {"at": t, "acct": "acct-b" if lift else "acct-a", "row": "proxy",
+                "anchor": anchor, "lift": lift, "effects": effects}
+        rec = ex._fleet_walk_gift(plan, st["W"], st["frm"], st["waiting"], gift, t)
+        return st, rec, t
+
+    def test_a_refill_restarting_at_use_moves_the_next_refill(self):
+        st, rec, t = self.gift_on([{"window": "seven_day", "effect": "refill"}],
+                                  anchor="restarts_at_use")
+        self.assertEqual(st["W"][("acct-a", "seven_day")], [0.0, t + WEEK])
+        self.assertEqual((rec["key"], rec["added"], rec["live"]), (("acct-a", "seven_day"), 40.0, True))
+        self.assertAlmostEqual(rec["gain"], 400.0, delta=1e-9, msg="$1,000 of room where $600 was")
+        st, rec, t = self.gift_on([{"window": "seven_day", "effect": "refill"}])
+        self.assertEqual(st["W"][("acct-a", "seven_day")], [0.0, self.NOW + 100 * HOUR], "kept")
+
+    def test_a_give_back_gains_only_what_it_adds(self):
+        st, rec, t = self.gift_on([{"window": "seven_day", "effect": "give_back", "points": 25.0}])
+        self.assertEqual(st["W"][("acct-a", "seven_day")][0], 15.0)
+        self.assertEqual(rec["added"], 25.0)
+        self.assertAlmostEqual(rec["gain"], 250.0, delta=1e-9, msg="$850 of room where $600 was")
+        st, rec, t = self.gift_on([{"window": "seven_day", "effect": "give_back", "points": 55.0}])
+        self.assertEqual((st["W"][("acct-a", "seven_day")][0], rec["added"]), (0.0, 40.0), "never below 0")
+
+    def test_a_share_of_give_back_reads_the_use_before_the_refill(self):
+        st, rec, t = self.gift_on([{"window": "scoped:X", "effect": "refill"},
+                                   {"window": "seven_day", "effect": "give_back",
+                                    "share_of": "scoped:X", "factor": 0.4}])
+        self.assertEqual(st["W"][("acct-a", "scoped:X")][0], 0.0)
+        self.assertAlmostEqual(st["W"][("acct-a", "seven_day")][0], 40.0 - 0.4 * 50.0, delta=1e-12)
+        self.assertEqual((rec["key"], rec["added"]), (("acct-a", "scoped:X"), 50.0))
+        self.assertAlmostEqual(rec["gain"], 200.0, delta=1e-9)
+
+    def test_a_lift_starts_the_account_at_the_gift(self):
+        st, rec, t = self.gift_on([{"window": "seven_day", "effect": "give_back", "points": 0.0}],
+                                  lift=True)
+        self.assertEqual(st["frm"]["acct-b"], t)
+        self.assertNotIn("acct-b", st["waiting"])
+        self.assertAlmostEqual(rec["gain"], 800.0, delta=1e-9, msg="all of acct-b's room, none before")
+        self.assertFalse(rec["live"], "nothing added")
+        st, rec, t = self.gift_on([{"window": "seven_day", "effect": "give_back", "points": 0.0}])
+        self.assertEqual(st["waiting"], {"acct-b"})
+
+    def test_a_gift_at_the_walks_instant_is_taken(self):
+        plan, week = self.hand()
+        gift = {"at": self.NOW, "acct": "acct-c", "row": "sel-b", "anchor": "kept",
+                "effects": [{"window": "seven_day", "effect": "give_back", "points": 0.0}]}
+        st = ex._fleet_walk_joint(plan, week, gifts=[gift])
+        self.assertEqual([r["at"] for r in st["gifts"]], [self.NOW])
+
+    def test_an_hour_drawing_no_more_than_eps_moves_no_cursor(self):
+        # sel-x's first account is at its wall until its refill at 10 h; up
+        # to 20 h sel-x draws 1e-10 an hour, which no step takes, so its
+        # cursor stays unset and it draws on acct-p after.
+        now = self.NOW
+        accts = {a: {"from": 0.0, "wins": {"seven_day": {
+            "used": u, "period": WEEK, "first_use": False, "next": now + nx, "drain": {}}}}
+            for a, u, nx in (("acct-p", 100.0, 10 * HOUR), ("acct-q", 0.0, 9 * DAY))}
+        b = {a: {"seven_day": [100.0, 10.0]} for a in accts}
+        binds = {"proxy": copy.deepcopy(b), "sel-x": copy.deepcopy(b)}
+        orders = {None: ["acct-p", "acct-q"], "sel-x": ["acct-p", "acct-q"]}
+        demand = {None: [0.0] * 168, "sel-x": [1e-10] * 20 + [5.0] * 148}
+        demand["proxy"] = demand["sel-x"][:]
+        st = self.same_week(accts, binds, orders, demand, "eps")
+        self.assertAlmostEqual(st["W"][("acct-p", "seven_day")][0], 148 * 5.0 / 10.0, delta=1e-6)
+        self.assertEqual(st["W"][("acct-q", "seven_day")][0], 0.0)
+
+    def test_the_gift_moves_the_walk(self):
+        # A refill at the proxy's first wall puts it back in service: the
+        # gift's record says what it added and how much was drawn, and the
+        # walk's figures move with it.
+        plan, weeks = self.gifts_fixture()
+        g = plan["grp"]["proxy"]
+        moved = 0
+        for week in weeks:
+            snaps = {}
+            base = ex._fleet_walk_joint(plan, week, snaps=snaps)
+            on = base["dry_at"][g]
+            if on is None:
+                continue
+            gift = {"at": on, "acct": "max-a", "row": "proxy", "anchor": "kept",
+                    "effects": [{"window": "seven_day", "effect": "refill"}]}
+            st = ex._fleet_walk_resume(plan, week, snaps[on], [gift], track={g})
+            rec = st["gifts"][0]
+            self.assertEqual(rec["key"], ("max-a", "seven_day"))
+            self.assertGreater(rec["added"], 0)
+            self.assertLessEqual(rec["used"], rec["added"])
+            self.assertGreaterEqual(rec["gain"], 0)
+            self.assertLessEqual(st["dry_s"][g], base["dry_s"][g] + 1e-6)
+            moved += st["dry_s"][g] < base["dry_s"][g] - 1
+        self.assertGreater(moved, 0)
+
+    def test_out_is_read_off_the_spells(self):
+        plan = ex._fleet_walk_plan({}, {"proxy": {}}, {None: []}, self.NOW)
+        he = [self.NOW + (h + 1) * 3600 for h in range(168)]
+        out = ex._fleet_walk_out(plan, [[he[2], he[4]], [he[10] + 1, he[11] - 1], [he[160] - 5,
+                                                                                  self.NOW + 168 * 3600]])
+        self.assertEqual([h for h, v in enumerate(out) if v], [2, 3, 4] + list(range(160, 168)),
+                         "an hour's end inside a spell or on its ends; a spell between two none")
 
 
 class TestFleetWalkJoint(unittest.TestCase):
@@ -14884,26 +15574,26 @@ class TestFleetWalkJoint(unittest.TestCase):
         # 69 §4.6: two rows binding the same account the same way have one
         # room, tracked once; each row's unmet is its own demand over the
         # shared dry spells. Out of room at 2 h: `lane:opus` asks $10 an
-        # hour of its own, `scribe` nothing.
+        # hour of its own, `quill` nothing.
         a = {"max-a": {"from": 0.0, "wins": {"seven_day": {
             "used": 80.0, "period": WEEK, "first_use": False, "next": None, "drain": {}}}}}
         same = {"max-a": {"seven_day": [100.0, 1.0]}}
-        binds = {"proxy": same, "lane:opus": dict(same), "scribe": dict(same)}
+        binds = {"proxy": same, "lane:opus": dict(same), "quill": dict(same)}
         self.assertEqual(ex._fleet_walk_groups(binds),
-                         {"proxy": "proxy", "lane:opus": "proxy", "scribe": "proxy"})
-        orders = {None: ["max-a"], "lane:opus": ["max-a"], "scribe": ["max-a"]}
-        dem = {"lane:opus": [10.0] * 168, "scribe": [0.0] * 168, None: [0.0] * 168,
+                         {"proxy": "proxy", "lane:opus": "proxy", "quill": "proxy"})
+        orders = {None: ["max-a"], "lane:opus": ["max-a"], "quill": ["max-a"]}
+        dem = {"lane:opus": [10.0] * 168, "quill": [0.0] * 168, None: [0.0] * 168,
                "proxy": [10.0] * 168}
-        rooms = {"proxy": [], "scribe": []}
-        out = ex._fleet_walk_joint(a, binds, orders, dem, self.NOW, rooms)
-        self.assertEqual(out["lane:opus"][:2], out["scribe"][:2])
-        self.assertAlmostEqual(out["scribe"][0], self.at(2))
+        rooms = {"proxy": [], "quill": []}
+        out = walk_rows(a, binds, orders, dem, self.NOW, rooms)
+        self.assertEqual(out["lane:opus"][:2], out["quill"][:2])
+        self.assertAlmostEqual(out["quill"][0], self.at(2))
         self.assertAlmostEqual(out["lane:opus"][2], 10.0 * 166)
-        self.assertEqual(out["scribe"][2:], [0.0, 0.0])
-        self.assertEqual(rooms["proxy"], rooms["scribe"])
+        self.assertEqual(out["quill"][2:], [0.0, 0.0])
+        self.assertEqual(rooms["proxy"], rooms["quill"])
         # Another cap is another set of terms.
-        binds["scribe"] = {"max-a": {"seven_day": [90.0, 1.0]}}
-        self.assertEqual(ex._fleet_walk_groups(binds)["scribe"], "scribe")
+        binds["quill"] = {"max-a": {"seven_day": [90.0, 1.0]}}
+        self.assertEqual(ex._fleet_walk_groups(binds)["quill"], "quill")
 
     def test_within_an_hour_classes_draw_before_bare_lanes(self):
         # 69 §4.6: classes by name, then bare lanes, then no selection, even
@@ -14920,9 +15610,8 @@ class TestFleetWalkJoint(unittest.TestCase):
         orders = {None: ["max-a"], "lane:opus": ["max-a"], "zeta": ["max-a"]}
         one = [40.0] + [0.0] * 167
         walls = {}
-        ex._fleet_walk_joint(a, binds, orders, {"zeta": one, "lane:opus": one, None: [0.0] * 168,
-                                                "proxy": [80.0] + [0.0] * 167}, self.NOW,
-                             walls=walls)
+        walk_rows(a, binds, orders, {"zeta": one, "lane:opus": one, None: [0.0] * 168,
+                                     "proxy": [80.0] + [0.0] * 167}, self.NOW, walls=walls)
         self.assertAlmostEqual(walls["max-a"], self.at(40 / 60))
 
     def test_the_room_at_each_hours_end(self):
@@ -14993,8 +15682,8 @@ class TestFleetWalkJoint(unittest.TestCase):
                 "used": 100.0 - r, "period": WEEK, "first_use": False, "next": self.NOW + nx,
                 "drain": {}}}} for n, (r, pp, nx) in accts0.items()}
             binds = {"proxy": {n: {"seven_day": [100.0, pp]} for n, (_, pp, _) in accts0.items()}}
-            res = ex._fleet_walk_joint(a, binds, {None: order}, {"proxy": series, None: series},
-                                       self.NOW)["proxy"]
+            res = walk_rows(a, binds, {None: order}, {"proxy": series, None: series},
+                            self.NOW)["proxy"]
             first, dry_s = ported(series)
             if first is None:
                 self.assertIsNone(res[0])
@@ -15323,11 +16012,11 @@ class TestForecastWorker(TestForecastOnTheDocument):
         started = threading.Event()
         real = ex._fleet_walk_joint
 
-        def heavy(accts, *a, **k):
+        def heavy(plan, week, *a, **k):
             started.set()
-            for _ in range(40):
-                real(copy.deepcopy(accts), *a[:4])  # the same walk, no series kept
-            return real(accts, *a, **k)
+            for _ in range(200):
+                real(plan, week)  # the same walk again, from a fresh start
+            return real(plan, week, *a, **k)
         with mock.patch.object(ex, "_fleet_walk_joint", side_effect=heavy):
             th = threading.Thread(target=ex._forecast_run, args=(T,))
             th.start()
