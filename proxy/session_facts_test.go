@@ -213,7 +213,7 @@ func TestSessionFactsUnseen(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
 		t.Fatal(err)
 	}
-	if len(m) != 7 || m["seen"] != false || m["v"] != 2.0 || m["as_of"] != "2026-11-01T18:40:00Z" ||
+	if len(m) != 8 || m["seen"] != false || m["v"] != 2.0 || m["as_of"] != "2026-11-01T18:40:00Z" ||
 		m["class"] != "claude-frontier" || m["problems"] == nil {
 		t.Fatalf("unseen = %s", rec.Body)
 	}
@@ -369,7 +369,7 @@ func TestSessionFactsPerModel(t *testing.T) {
 		t.Errorf("claude-capable[1m] = %v", m)
 	}
 	// A model never served in the session, as right after the owner switched.
-	if m := sfGet(t, sess, "claude-opus-5-5"); m["seen"] != false || len(m) != 6 {
+	if m := sfGet(t, sess, "claude-opus-5-5"); m["seen"] != false || len(m) != 7 {
 		t.Errorf("never served = %v", m)
 	}
 	// A direct model's [1m] form finds its bare hops.
@@ -601,7 +601,7 @@ func TestSessionFactsIdleSessionIsUnseenAtReadTime(t *testing.T) {
 		t.Fatalf("at the lifetime: %v", m["seen"])
 	}
 	nowFn = func() time.Time { return sfNow.Add(30 * time.Hour) }
-	if m := sfGet(t, "sess-fable", "claude-frontier[1m]"); m["seen"] != false || len(m) != 7 || m["class"] != "claude-frontier" {
+	if m := sfGet(t, "sess-fable", "claude-frontier[1m]"); m["seen"] != false || len(m) != 8 || m["class"] != "claude-frontier" {
 		t.Fatalf("30h idle: %v", m)
 	}
 }

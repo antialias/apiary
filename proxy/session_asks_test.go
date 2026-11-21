@@ -390,6 +390,17 @@ func sfCoverage(counted, learning, empty, unread, stale, notQuota int) map[strin
 		"stale": stale, "not_quota": notQuota}
 }
 
+// sfResetGolden is the golden's planned resets: acct-a's probably wise one
+// ranks first, acct-b's wise one second.
+func sfResetGolden() []any {
+	return []any{
+		map[string]any{"id": "e:full", "account": "acct-a@example.com", "label": "One full limit reset",
+			"trigger": "owner", "verdict": "probably_wise", "wise_share": 0.84, "rank": 1, "step": 1},
+		map[string]any{"id": "e:fable", "account": "acct-b@example.com", "label": "Fable usage reset",
+			"trigger": "owner", "verdict": "wise", "wise_share": 0.96, "rank": 2, "step": 2},
+	}
+}
+
 func TestSessionFactsGoldenIsCurrent(t *testing.T) {
 	frontierOn := func(session string) {
 		sfServe(session, "claude-frontier", sessionFact{class: "frontier", member: "lane:opus",
@@ -397,6 +408,21 @@ func TestSessionFactsGoldenIsCurrent(t *testing.T) {
 			tier: "included", provider: "anthropic", lane: "opus"})
 	}
 	noAsks := func(p map[string]any) { sfSel(p, "frontier", map[string]any{"asks": []any{}}) }
+	unavailableOn := func(session string) {
+		frontierOn(session)
+		lan.noteSessionUnavailable("frontier", session, sfFixtureNow.Add(52*time.Hour))
+	}
+	// resetRow is frontier with room and left_pct (0: out now), events, and a learned
+	// forecast, stale or not.
+	resetRow := func(room, left float64, events any, stale bool) func(p map[string]any) {
+		return func(p map[string]any) {
+			noAsks(p)
+			sfSel(p, "frontier", map[string]any{"capacity": 646.6, "room": room, "left_pct": left,
+				"coverage": sfCoverage(3, 0, 0, 0, 0, 0), "more_at": 1800187200, "back_at": nil,
+				"events": events, "forecast": map[string]any{"basis": "learned", "stale": stale,
+					"computed_at": 1799999400, "horizon_at": 1800604800, "samples": 400}})
+		}
+	}
 	cases := []struct {
 		name, session, model string
 		edit                 func(p map[string]any)
@@ -440,6 +466,19 @@ func TestSessionFactsGoldenIsCurrent(t *testing.T) {
 			edit: func(p map[string]any) { delete(sfFleetSelections(p), "frontier") }},
 		{name: "brain unreachable", session: "sess-unreachable", model: "claude-frontier", serve: func() { frontierOn("sess-unreachable") },
 			after: func() { lan.pref.mu.Lock(); lan.pref.ok = false; lan.pref.mu.Unlock() }},
+		// reset_now (quota-model 69 §6.3, §9): set on a row out now with a
+		// planned reset, seen and unseen; null with room, with events null,
+		// and while the forecast is stale.
+		{name: "reset out now", session: "sess-reset", model: "claude-frontier",
+			serve: func() { unavailableOn("sess-reset") }, edit: resetRow(0, 0, sfResetGolden(), false)},
+		{name: "reset unseen", session: "sess-reset-unseen", model: "claude-frontier",
+			edit: resetRow(0, 0, sfResetGolden(), false)},
+		{name: "reset with room", session: "sess-reset-room", model: "claude-frontier",
+			serve: func() { frontierOn("sess-reset-room") }, edit: resetRow(77.59, 12.0, sfResetGolden(), false)},
+		{name: "reset events null", session: "sess-reset-none", model: "claude-frontier",
+			serve: func() { unavailableOn("sess-reset-none") }, edit: resetRow(0, 0, nil, false)},
+		{name: "reset stale", session: "sess-reset-stale", model: "claude-frontier",
+			serve: func() { unavailableOn("sess-reset-stale") }, edit: resetRow(0, 0, sfResetGolden(), true)},
 	}
 	var got []sfGoldenCase
 	for _, c := range cases {
@@ -463,7 +502,7 @@ func TestSessionFactsGoldenIsCurrent(t *testing.T) {
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(map[string]any{
 		"_comment": "Written by the switch proxy's TestSessionFactsGoldenIsCurrent (session_asks_test.go): " +
-			"GET /_switch/session replies for quota-model 68 §9's cases, from testdata/preferred_c2.json as edited " +
+			"GET /_switch/session replies for quota-model 68 §9's and 69 §9's cases, from testdata/preferred_c2.json as edited " +
 			"per case. The status line's test reads a copy. Regenerate with UPDATE_SESSION_FACTS_GOLDEN=1.",
 		"cases": got,
 	}); err != nil {

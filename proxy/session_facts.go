@@ -144,11 +144,13 @@ type sfSeen struct {
 	UnavailableUntil *string    `json:"unavailable_until"`
 	Room             *sfRoom    `json:"room"`
 	Asks             []string   `json:"asks"`
+	ResetNow         *sfReset   `json:"reset_now"`
 	Problems         []string   `json:"problems"`
 }
 
 // brainFleet is the part of the brain's `fleet` section (quota-model 67 §8)
-// session facts read: its unit and each selection's figure. A selection's
+// session facts read: its unit and each selection's figure, asks, and what
+// reset_now needs (69 §6.3). A selection's
 // accounts are not read: they name accounts, and a reply never carries an
 // account's address.
 type brainFleet struct {
@@ -170,6 +172,28 @@ type fleetSelection struct {
 	// Asks is nil when the brain sends none (a brain older than 68 step 1):
 	// unknown, not "nothing to ask".
 	Asks []fleetAsk `json:"asks"`
+	// Events and Forecast are read for reset_now only (quota-model 69 §6.3),
+	// never for routing, and kept raw: they are decoded on their own path, so
+	// one the proxy cannot read costs reset_now alone, never the figure.
+	Events   json.RawMessage `json:"events"`
+	Forecast json.RawMessage `json:"forecast"`
+}
+
+// fleetEvent is one event the selection's figure values (69 §6.1), read for
+// its account's short name, its label, its verdict and its rank, and nothing
+// more: the valuation is the brain's and the page's.
+type fleetEvent struct {
+	Account string  `json:"account"`
+	Label   string  `json:"label"`
+	Verdict *string `json:"verdict"`
+	Rank    *int    `json:"rank"`
+}
+
+// fleetForecast is the selection's forecast as far as reset_now trusts its
+// verdicts: learned, and not stale.
+type fleetForecast struct {
+	Basis string `json:"basis"`
+	Stale *bool  `json:"stale"`
 }
 
 // fleetAsk is one thing only the owner can fix (68 §3.2). Its account is read
@@ -312,6 +336,75 @@ func (tn *tenant) roomFor(selection string) (room *sfRoom, asks []string, proble
 	return r, asks, ""
 }
 
+// sfReset is a reset worth using now (quota-model 69 §6.3): the account's
+// short name as the asks give it, and the event's label.
+type sfReset struct {
+	Account string `json:"account"`
+	Label   string `json:"label"`
+}
+
+// resetNowFor is the selection's first event by rank whose verdict is wise or
+// probably wise, while the selection is out now: its figure's own room is 0.
+// nil when there is none or it is unknown: the brain unreachable, no readable
+// fleet, no entry for the selection, no events, no verdicts, a forecast not
+// learned or stale (the inputs changed, so a verdict on hand may be for a reset
+// the owner has just used), or events or a forecast the proxy cannot read.
+// The proxy never redeems one; this only names it.
+func (tn *tenant) resetNowFor(selection string) *sfReset {
+	if selection == "" {
+		return nil
+	}
+	tn.pref.mu.RLock()
+	ok, fl := tn.pref.ok, tn.pref.fleet
+	tn.pref.mu.RUnlock()
+	if !ok || fl == nil {
+		return nil
+	}
+	sel, has := fl.Selections[selection]
+	if !has || !outNow(sel.Room) {
+		return nil
+	}
+	var f *fleetForecast
+	if json.Unmarshal(sel.Forecast, &f) != nil ||
+		f == nil || f.Basis != "learned" || f.Stale == nil || *f.Stale {
+		return nil
+	}
+	var events []*fleetEvent
+	if json.Unmarshal(sel.Events, &events) != nil {
+		return nil
+	}
+	var first *fleetEvent
+	for _, e := range events {
+		if e == nil {
+			return nil
+		}
+		if e.Verdict == nil || (*e.Verdict != "wise" && *e.Verdict != "probably_wise") || e.Rank == nil {
+			continue
+		}
+		if first == nil || *e.Rank < *first.Rank {
+			first = e
+		}
+	}
+	if first == nil || first.Account == "" || first.Label == "" {
+		return nil
+	}
+	name := "an account"
+	if n := tn.accountShortName(first.Account); n != nil {
+		name = *n
+	}
+	return &sfReset{Account: name, Label: first.Label}
+}
+
+// outNow: the figure's own room is a number, and 0. A null or absent room is
+// unknown, not out.
+func outNow(room json.RawMessage) bool {
+	var r *float64
+	if json.Unmarshal(room, &r) != nil || r == nil {
+		return false
+	}
+	return *r == 0
+}
+
 // isoSeconds is a brain time in integer seconds as ISO; nil for none.
 func isoSeconds(s *int64) *string {
 	if s == nil {
@@ -359,6 +452,7 @@ type sfUnseen struct {
 	Class    string   `json:"class,omitempty"`
 	Room     *sfRoom  `json:"room"`
 	Asks     []string `json:"asks"`
+	ResetNow *sfReset `json:"reset_now"`
 	Problems []string `json:"problems"`
 }
 
@@ -382,7 +476,9 @@ func (tn *tenant) sessionFactsFor(session, model string, now time.Time) any {
 			out.Class = tn.classPickerID(e.Class)
 		}
 		var why string
-		out.Room, out.Asks, why = tn.roomFor(tn.unseenSelection(model))
+		selection := tn.unseenSelection(model)
+		out.Room, out.Asks, why = tn.roomFor(selection)
+		out.ResetNow = tn.resetNowFor(selection)
 		if why != "" {
 			problems = append(problems, why)
 		}
@@ -396,6 +492,7 @@ func (tn *tenant) sessionFactsFor(session, model string, now time.Time) any {
 	}
 	var why string
 	out.Room, out.Asks, why = tn.roomFor(selectionOf(f))
+	out.ResetNow = tn.resetNowFor(selectionOf(f))
 	if why != "" {
 		problems = append(problems, why)
 	}
