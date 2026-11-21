@@ -15830,7 +15830,7 @@ class TestForecastOnTheDocument(SizingBase):
         self.assertEqual((fc["samples"], fc["range"]), (400, True))
         self.assertEqual(set(fc), {"horizon_at", "computed_at", "stale", "samples", "seed", "range",
                                    "first_dry", "gap_share", "dry_h", "unmet", "usd", "out_share",
-                                   "room_pct", "left_h", "basis"})
+                                   "room_pct", "left_h", "plan_out_share", "basis"})
         self.assertEqual(len(fc["room_pct"]["p50"]), 168, "all work has the fan")
         opus = f["selections"]["lane:opus"]["forecast"]
         self.assertIsNone(opus["room_pct"], "a selection no worse than all work has none")
@@ -17923,6 +17923,218 @@ class TestResetCases(TestFleetCases):
         pass
 
 
+class TestPlanOutShare(unittest.TestCase):
+    """69 §4.7, §5.3: forecast.plan_out_share, the strip with the plan used,
+    on every resets case (testdata/resets_cases.json) and one of two weeks
+    drawn unequally, where a give-back leaves part of each week's drought."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(RESETS_CASES) as f:
+            cases = json.load(f)["cases"]
+        # max-a 25 % used, back at 85.25 h; max-c spent, back at 90 h, with a
+        # 10-point give-back ($300). Three draws in four at $50 an hour, the
+        # rest at $30: the plan leaves each its own hours out.
+        two = rcase({"max-a": racct(25, 85.25),
+                     "max-c": racct(100, 90, [rev("e:g", ("seven_day", "give_back", 10))])},
+                    weeks=[{"share": 0.75, "usd_h": {"capable": 50.0}},
+                           {"share": 0.25, "usd_h": {"capable": 30.0}}])
+        # The same with the $30 draws at $10, a week with no gap: the
+        # give-back is used in three draws in four.
+        light = copy.deepcopy(two)
+        light["weeks"][1]["usd_h"]["capable"] = 10.0
+        cases = cases + [dict(two, name="two weeks, a give-back"),
+                         dict(light, name="two weeks, one without a gap")]
+        real = ex._forecast_events
+        cls.runs = []
+        for case in cases:
+            got = {}
+
+            def spy(*a, **k):
+                got["args"], got["ret"] = a, real(*a, **k)
+                return got["ret"]
+            with mock.patch.object(ex, "_forecast_events", side_effect=spy):
+                _, res, _ = resets_run(case)
+            cls.runs.append((case["name"], res, got["args"], got["ret"]))
+
+    def strips(self):
+        for name, res, _, _ in self.runs:
+            for row, fc in res["rows"].items():
+                if fc["plan_out_share"] is not None:
+                    yield name, row, fc
+
+    def test_a_gift_only_adds_room(self):
+        seen = 0
+        for name, row, fc in self.strips():
+            seen += 1
+            self.assertEqual(len(fc["plan_out_share"]), 168)
+            for h, (p, o) in enumerate(zip(fc["plan_out_share"], fc["out_share"])):
+                self.assertLessEqual(p, o, (name, row, h))
+        self.assertGreater(seen, 0)
+
+    def test_it_sums_to_the_planned_walks_hours_out(self):
+        # The strip counts, in each draw, the hours whose end a dry spell of
+        # positive length of the planned walk holds, its ends included: the
+        # mean of those counts over the draws, within each hour's rounding to
+        # 4 places. A spell of L > 0 hours holds floor(L) or floor(L) + 1 hour
+        # ends, so each week's count is its planned hours dry (left_h's
+        # figure) give or take one per such spell, as out_share's is dry_h's.
+        # A spell of no length (a reset used as the room runs out) holds none.
+        seen = 0
+        for name, res, (plan, _, mult, *_), ret in self.runs:
+            now, n = plan["now"], len(mult)
+            for row, fc in res["rows"].items():
+                pw = (ret.get(row) or {}).get("plan_walks")
+                if pw is None:
+                    continue
+                seen += 1
+                g = plan["grp"][row]
+                counts, lo, hi, dry = [], [], [], []
+                for st in pw:
+                    sp = [(a, b) for a, b in st["spells"][g] if b > a]
+                    counts.append(sum(1 for h in range(168) if any(
+                        a <= now + (h + 1) * 3600 <= b for a, b in sp)))
+                    fl = sum(math.floor((b - a) / 3600 + 1e-9) for a, b in sp)
+                    lo.append(fl)
+                    hi.append(fl + len(sp))
+                    dry.append(st["dry_s"][g] / 3600.0)
+                mean = sum(counts[u] for u in mult) / n
+                self.assertAlmostEqual(sum(fc["plan_out_share"]), mean, delta=168 * 0.5e-4,
+                                       msg=(name, row))
+                for u in range(len(pw)):
+                    self.assertLessEqual(lo[u], counts[u], (name, row, u))
+                    self.assertLessEqual(counts[u], hi[u], (name, row, u))
+                if fc["left_h"] is not None:
+                    xs = [dry[u] for u in mult]
+                    self.assertEqual(fc["left_h"], {k: round(ex._forecast_q(xs, p), 1)
+                                                    for k, p in ex._FORECAST_QS}, (name, row))
+        self.assertGreater(seen, 0)
+
+    def test_no_planned_step_no_strip(self):
+        # Only a valued row (the fan rows) whose plan has a step has one; a
+        # row out now, which carries all work's steps, is not valued: null.
+        nulls = out_now = 0
+        for name, res, _, _ in self.runs:
+            for row, fc in res["rows"].items():
+                steps = [f for evs in (res["events"].get(row) or {}).values()
+                         for f in evs.values() if f.get("step") is not None]
+                valued = fc["room_pct"] is not None
+                if steps and valued:
+                    self.assertIsInstance(fc["plan_out_share"], list, (name, row))
+                else:
+                    nulls += 1
+                    out_now += bool(steps)
+                    self.assertIsNone(fc["plan_out_share"], (name, row))
+        self.assertGreater(nulls, 0)
+        self.assertGreater(out_now, 0, "a row out now with all work's steps is tried")
+
+    def test_no_hour_out_where_the_plan_leaves_nothing_dry(self):
+        # A reset used as the room runs out is a handover, not an hour out:
+        # where left_h is 0 in every draw, so is every hour of the strip.
+        seen = 0
+        for name, row, fc in self.strips():
+            if fc["left_h"]["p90"] == 0:
+                seen += 1
+                self.assertEqual(fc["plan_out_share"], [0.0] * 168, (name, row))
+        self.assertGreater(seen, 0)
+        name, res, _, _ = next(r for r in self.runs if r[0].startswith("drawing 44"))
+        self.assertEqual(res["rows"]["proxy"]["left_h"]["p90"], 0.0)
+
+    def test_drawings_44_and_45_have_fewer_out_hours_with_the_plan(self):
+        for d in ("drawing 44", "drawing 45"):
+            name, res, _, _ = next(r for r in self.runs if r[0].startswith(d))
+            for row, fc in res["rows"].items():
+                if fc["plan_out_share"] is not None:
+                    self.assertLess(sum(fc["plan_out_share"]), sum(fc["out_share"]), (d, row))
+            self.assertIsNotNone(res["rows"]["proxy"]["plan_out_share"], d)
+
+    def test_the_draws_are_weighted(self):
+        # Three draws in four hold the $50 week's leftover hours, one the
+        # $30 week's.
+        name, res, (plan, _, mult, *_), ret = next(r for r in self.runs
+                                                   if r[0] == "two weeks, a give-back")
+        self.assertEqual(len(set(mult)), 2)
+        fc = res["rows"]["proxy"]
+        g = plan["grp"]["proxy"]
+        hours = [sum(ex._fleet_walk_out(plan, [(a, b) for a, b in st["spells"][g] if b > a]))
+                 for st in ret["proxy"]["plan_walks"]]
+        self.assertNotEqual(hours[0], hours[1])
+        self.assertAlmostEqual(sum(fc["plan_out_share"]),
+                               0.75 * hours[mult[0]] + 0.25 * hours[mult[-1]], places=2)
+
+
+class TestUseAtHist(unittest.TestCase):
+    """69 §4.7, §4.8: an event's use_at.hist, the share of all draws using it
+    in each hour, as first_dry.hist is; over TestPlanOutShare's runs."""
+
+    @classmethod
+    def setUpClass(cls):
+        TestPlanOutShare.setUpClass()
+        cls.runs = TestPlanOutShare.runs
+
+    def events(self):
+        for name, res, args, _ in self.runs:
+            for row, evs in res["events"].items():
+                for acct, by in evs.items():
+                    for eid, f in by.items():
+                        yield name, res, args, row, acct, eid, f
+
+    def test_it_sums_to_the_share_of_weeks_using_it(self):
+        seen = 0
+        for name, _, _, row, _, eid, f in self.events():
+            if f.get("use_at") is not None:
+                seen += 1
+                self.assertEqual(len(f["use_at"]["hist"]), 168)
+                self.assertAlmostEqual(sum(f["use_at"]["hist"]), f["use_share"],
+                                       delta=168 * 0.5e-4, msg=(name, row, eid))
+        self.assertGreater(seen, 0)
+
+    def test_the_draws_are_weighted(self):
+        # The give-back is used where each week runs out: three draws in four
+        # at the $50 week's hour, one at the $30 week's; with the $10 week,
+        # which has no gap, only the three, a share of all the draws.
+        def hist(name):
+            res = next(r for r in self.runs if r[0] == name)[1]
+            return res["events"]["proxy"]["max-c"]["e:g"]["use_at"]["hist"]
+        self.assertEqual(sorted(x for x in hist("two weeks, a give-back") if x), [0.25, 0.75])
+        self.assertEqual([x for x in hist("two weeks, one without a gap") if x], [0.75])
+
+    def test_null_exactly_where_use_at_is(self):
+        nulls = 0
+        for name, _, _, row, _, eid, f in self.events():
+            u = f.get("use_at")
+            if u is None:
+                nulls += 1
+            else:
+                self.assertEqual(set(u), {"p10", "p90", "hist"}, (name, row, eid))
+            self.assertNotIn("use_at", f.get("now") or {}, (name, row, eid))
+        self.assertGreater(nulls, 0)
+
+    def test_step_one_used_at_the_first_run_out_is_first_dry(self):
+        # The plan's first event, with no expiry in the way, is used at the
+        # row's first spell start in every week it gains in: its hours are
+        # first_dry's, slot for slot.
+        seen = 0
+        for name, res, args, row, acct, eid, f in self.events():
+            if f.get("step") != 1 or res["rows"][row]["room_pct"] is None or \
+                    args[4]["specs"][acct][eid]["to"] is not None:
+                continue
+            seen += 1
+            self.assertEqual(f["use_at"]["hist"], res["rows"][row]["first_dry"]["hist"],
+                             (name, row, eid))
+        self.assertGreater(seen, 2)
+
+    def test_drawings_44_and_45_carry_it(self):
+        # The drawings' cases, which Scry's fixture is made from (the
+        # household tests keep that file current with them).
+        for d in ("drawing 44", "drawing 45"):
+            used = [f for name, _, _, _, _, _, f in self.events()
+                    if name.startswith(d) and f.get("use_at") is not None]
+            self.assertTrue(used, d)
+            for f in used:
+                self.assertEqual(len(f["use_at"]["hist"]), 168, d)
+
+
 class TestResetValuation(TestFleetCases):
     """69 §4.8, §5.1, §5.3, §9: each gift effect, each state and verdict, the
     plan. $3,000 a window ($30 a point), $40 an hour unless said, hours from
@@ -18035,7 +18247,7 @@ class TestResetValuation(TestFleetCases):
         case = rcase(accts, sizes={"max-a": {"seven_day": 3000.0}, "max-b": {"seven_day": 3000.0}},
                      weeks=[{"share": 1.0, "usd_h": {"none": 40.0}}])
         ev = ev_of(self.run_case(case), "e:g")
-        self.assertEqual(ev["use_at"], {"p10": self.at(105), "p90": self.at(105)})
+        self.assertSubset(ev["use_at"], {"p10": self.at(105), "p90": self.at(105)})
         self.assertEqual((ev["gain"]["p50"], ev["gain_basis"]), (480.0, "inferred"))
 
     def test_gap_free_weeks_are_not_counted(self):
@@ -18119,7 +18331,7 @@ class TestResetValuation(TestFleetCases):
         self.assertEqual((ev["verdict"], ev["reason"], ev["reason_share"]),
                          ("wasteful", "closed", 0.7))
         out_28 = RNOW + round(2250 / 28 * HOUR)  # 80.36 h
-        self.assertEqual(ev["use_at"], {"p10": out_28, "p90": out_28})
+        self.assertSubset(ev["use_at"], {"p10": out_28, "p90": out_28})
         # Half the weeks each: the tie goes to short, a table reason ahead
         # of a condition's own (§5.1).
         weeks = [{"share": 0.5, "usd_h": {"capable": 40.0}},
@@ -18252,10 +18464,10 @@ class TestResetValuation(TestFleetCases):
         accts = {"max-a": racct(100, 82, [rev("e:r", to_in=100 * HOUR)]), "max-b": racct(66, 300)}
         sizes = {"max-a": {"seven_day": 2520.0}, "max-b": {"seven_day": 4000.0}}
         ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:r")
-        self.assertEqual(ev["use_at"], {"p10": self.at(34), "p90": self.at(34)})
+        self.assertSubset(ev["use_at"], {"p10": self.at(34), "p90": self.at(34)})
         accts["max-a"]["events"] = [rev("e:r", to_in=160 * HOUR)]
         ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:r")
-        self.assertEqual(ev["use_at"], {"p10": self.at(145), "p90": self.at(145)},
+        self.assertSubset(ev["use_at"], {"p10": self.at(145), "p90": self.at(145)},
                          "the latest start before it expires")
 
     def test_supply_order_is_honoured_in_turn(self):
@@ -18373,7 +18585,7 @@ class TestResetValuation(TestFleetCases):
         accts = {"max-a": racct(50, 100, [rev("e:lim", ("seven_day", "limit", 1.5, None))])}
         fleet = self.run_case(rcase(accts, classes=capped))
         ev = ev_of(fleet, "e:lim", "capable")
-        self.assertEqual(ev["use_at"], {"p10": self.at(22.5), "p90": self.at(22.5)})
+        self.assertSubset(ev["use_at"], {"p10": self.at(22.5), "p90": self.at(22.5)})
         self.assertEqual((ev["gain"]["p50"], ev["spent"]["p50"]), (1200.0, 1.0))
 
     def test_a_limit_used_at_or_after_its_end_gives_nothing(self):
@@ -18419,7 +18631,7 @@ class TestResetValuation(TestFleetCases):
         fleet = self.run_case(rcase(accts, sizes=sizes))
         self.assertEqual(fleet["proxy"]["forecast"]["dry_h"]["p50"], 67.0)
         ev = ev_of(fleet, "e:five")
-        self.assertEqual(ev["use_at"], {"p10": RNOW, "p90": RNOW})
+        self.assertSubset(ev["use_at"], {"p10": RNOW, "p90": RNOW})
         self.assertEqual(ev["worth_h"]["p50"], 4.0)
         # With the weekly back later than A's room lasts, the lift only moves
         # the drought.

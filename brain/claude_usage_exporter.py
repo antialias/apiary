@@ -93,7 +93,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 # through this name: it follows no redirect. A patch seam like urlopen.
 key_urlopen = urllib.request.build_opener(_NoRedirect).open
 from array import array
-from collections import OrderedDict, deque
+from collections import Counter, OrderedDict, deque
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -10174,7 +10174,9 @@ def _forecast_events(plan, weeks, mult, bases, evin, fans, walks=None):
     row) valued in every sampled week, judged across them and planned (69
     §4.8, §5.1, §5.3), and the events of each other row that is out now read
     off all work's used-now walks (§4.9) -> {row: {"events": {acct: {id:
-    fields}}, "left_h"}}; a row neither valued nor out now is absent.
+    fields}}, "left_h", "plan_walks"}}; a row neither valued nor out now is
+    absent. plan_walks: on a valued row whose plan has a step, each distinct
+    week's walk with the plan used, the row's spells kept; else None.
 
     weeks: the distinct prepared weeks (_fleet_walk_week); mult: the sampled
     week each of the N draws is; bases: each distinct week's base walk, with
@@ -10286,9 +10288,15 @@ def _forecast_events(plan, weeks, mult, bases, evin, fans, walks=None):
         src = used or (over(nows) if nows is not None else ex)
         lefts = [r["left"] for r in src if r["left"] is not None]
         mores = [r["more"] for r in src if r["more"] is not None]
+        # use_at has no median (69 §4.7): its interval, and the share of all
+        # draws using it in each hour, as first_dry.hist is.
+        hist = [0] * FORECAST_SLOTS
+        for r in used:
+            hist[min(FORECAST_SLOTS - 1, max(0, int((r["use_at"] - now) // 3600)))] += 1
         return {"use_at": None if not used else {
                     "p10": _fleet_secs(_forecast_q([r["use_at"] for r in used], 0.1)),
-                    "p90": _fleet_secs(_forecast_q([r["use_at"] for r in used], 0.9))},
+                    "p90": _fleet_secs(_forecast_q([r["use_at"] for r in used], 0.9)),
+                    "hist": [round(c / n, 4) for c in hist]},
                 "use_share": round(len(used) / n, 4),
                 "gain": q3([r["gain"] for r in ex], 2),
                 "gain_basis": "inferred" if any(r["inferred"] for r in used) else "read",
@@ -10490,7 +10498,9 @@ def _forecast_events(plan, weeks, mult, bases, evin, fans, walks=None):
                 bw = plan["binds"][row].get(a) or {}
                 f["reaches_short"] = left["p50"] > 0 and bool(set(f.pop("touches")) & set(bw))
         ranked(row, res, worth)
+        # The strip with the plan used (69 §5.3) reads the walks left_h reads.
         out[row] = {"events": res, "left_h": left,
+                    "plan_walks": turn["cur"] if turn["planned"] else None,
                     "_planned": tuple(turn["planned"]), "_placed": turn["placed"]}
 
     # The rows out now that are not valued (69 §4.9): their events read off
@@ -10541,7 +10551,7 @@ def _forecast_events(plan, weeks, mult, bases, evin, fans, walks=None):
         for f in res.values():
             f.pop("touches", None)
         ranked(row, res, worth)
-        out[row] = {"events": res, "left_h": None}
+        out[row] = {"events": res, "left_h": None, "plan_walks": None}
     for v in out.values():
         v.pop("_planned", None)
         v.pop("_placed", None)
@@ -10717,10 +10727,25 @@ def _forecast_compute(t, inputs):
     walks = {}
     events = _forecast_events(plan, [w for w, _ in uniq], mult, [b for _, b in uniq], evin, fans,
                               walks)
+    drawn = Counter(mult)
     for row in rows:
         # With no event to plan, a fan row's plan leaves its whole drought.
         result[row]["left_h"] = events[row]["left_h"] if row in events else \
             dict(result[row]["dry_h"]) if row in fans else None
+        # The strip with the plan used, on a valued row whose plan has a
+        # step: each distinct week's out counted as often as it was drawn,
+        # and rounded, as out_share is (69 §4.7, §5.3). A spell of no length
+        # is a reset used as the room runs out, a handover: not an hour out.
+        pw = (events.get(row) or {}).get("plan_walks")
+        if pw is None:
+            result[row]["plan_out_share"] = None
+            continue
+        po = [0] * FORECAST_SLOTS
+        for u, k in drawn.items():
+            spells = [(a, b) for a, b in pw[u]["spells"][grp[row]] if b > a]
+            for h, v in enumerate(_fleet_walk_out(plan, spells)):
+                po[h] += k * v
+        result[row]["plan_out_share"] = [round(c / n, 4) for c in po]
     secs = time.monotonic() - t0
     return {"key": inputs["key"], "computed_at": _fleet_secs(now), "ratio": inputs["ratio"],
             "horizon_at": _fleet_secs(now + FORECAST_H), "seed": inputs["seed"],
