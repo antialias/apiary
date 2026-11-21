@@ -13974,7 +13974,7 @@ def one_inputs(pool, now, room, cap=100.0, pp=10.0, next_in=None, ratio=None, ac
     return {"key": "k", "now": now, "pool": pool, "ratio": ratio, "seed": seed,
             "seed_int": seed_int, "accounts": a,
             "binds": {"proxy": {n: {"seven_day": [cap, pp]} for n in a}},
-            "orders": {None: sorted(a)}}
+            "orders": {None: sorted(a)}, "streams": []}
 
 
 def synth_days(rng, n, start=D0):
@@ -14880,6 +14880,31 @@ class TestFleetWalkJoint(unittest.TestCase):
         self.assertAlmostEqual(res["proxy"][2], 100.0 * (144 * HOUR - (res["proxy"][0] - self.NOW))
                                / HOUR, delta=1)
 
+    def test_rows_with_one_set_of_terms_share_their_spells_not_their_unmet(self):
+        # 69 §4.6: two rows binding the same account the same way have one
+        # room, tracked once; each row's unmet is its own demand over the
+        # shared dry spells. Out of room at 2 h: `lane:opus` asks $10 an
+        # hour of its own, `scribe` nothing.
+        a = {"max-a": {"from": 0.0, "wins": {"seven_day": {
+            "used": 80.0, "period": WEEK, "first_use": False, "next": None, "drain": {}}}}}
+        same = {"max-a": {"seven_day": [100.0, 1.0]}}
+        binds = {"proxy": same, "lane:opus": dict(same), "scribe": dict(same)}
+        self.assertEqual(ex._fleet_walk_groups(binds),
+                         {"proxy": "proxy", "lane:opus": "proxy", "scribe": "proxy"})
+        orders = {None: ["max-a"], "lane:opus": ["max-a"], "scribe": ["max-a"]}
+        dem = {"lane:opus": [10.0] * 168, "scribe": [0.0] * 168, None: [0.0] * 168,
+               "proxy": [10.0] * 168}
+        rooms = {"proxy": [], "scribe": []}
+        out = ex._fleet_walk_joint(a, binds, orders, dem, self.NOW, rooms)
+        self.assertEqual(out["lane:opus"][:2], out["scribe"][:2])
+        self.assertAlmostEqual(out["scribe"][0], self.at(2))
+        self.assertAlmostEqual(out["lane:opus"][2], 10.0 * 166)
+        self.assertEqual(out["scribe"][2:], [0.0, 0.0])
+        self.assertEqual(rooms["proxy"], rooms["scribe"])
+        # Another cap is another set of terms.
+        binds["scribe"] = {"max-a": {"seven_day": [90.0, 1.0]}}
+        self.assertEqual(ex._fleet_walk_groups(binds)["scribe"], "scribe")
+
     def test_within_an_hour_classes_draw_before_bare_lanes(self):
         # 69 §4.6: classes by name, then bare lanes, then no selection, even
         # for a class whose name sorts after "lane:". One account, 4 points
@@ -15024,6 +15049,29 @@ class TestForecastOnTheDocument(SizingBase):
 
     def fleet(self):
         return ex._preferred_payload(T)["fleet"]
+
+    def test_a_selection_with_no_counted_account_is_not_walked(self):
+        # 69 §4.6: lane:sonnet's account is not counted (not a quota account,
+        # or not yet sized): no figures, no gauges, and never the fan's
+        # second row, though walked it would read out all week.
+        history_days()
+        real = ex._forecast_walk_inputs
+
+        def walk_inputs(*a, **k):
+            accts, binds, orders = real(*a, **k)
+            return accts, dict(binds, **{"lane:sonnet": {}}), orders
+        with mock.patch.object(ex, "_forecast_walk_inputs", side_effect=walk_inputs):
+            self.fleet()
+            self.assertNotIn("lane:sonnet", T.forecast_want["binds"])
+            self.assertIn("lane:sonnet", T.forecast_want["streams"], "its spend is still drawn")
+            self.assertTrue(ex._forecast_run(T))
+            f = self.fleet()
+            text = "\n".join(ex._fleet_metric_lines(f, T.id))
+        self.assertEqual(f["selections"]["lane:sonnet"]["forecast"], {"basis": "no counted account"})
+        self.assertNotIn("lane:sonnet", T.forecast["rows"])
+        self.assertNotIn('fleet_forecast_dry_h{level="selection",name="lane:sonnet"', text)
+        self.assertEqual([k for k, s in f["selections"].items() if s["forecast"].get("room_pct")], [])
+        self.assertEqual(f["selections"]["lane:opus"]["forecast"]["basis"], "learned")
 
     def test_no_history_says_so(self):
         f = self.fleet()
@@ -15208,6 +15256,62 @@ class TestForecastWorker(TestForecastOnTheDocument):
         self.assertEqual(out["added"], 1)
         self.assertIsNot(pool_at(D0 + 4 * DAY), q)
 
+    def test_renders_during_a_computation_leave_one_computation_per_key(self):
+        # 69 §4.9: the raw ratio drifts with every render, by less than the
+        # quarter that counts; renders while the worker computes leave no
+        # second computation of the same key.
+        self.computed()
+        self.reread()
+        drift = iter(range(1, 100))
+        real_inputs, real_compute = ex._forecast_inputs, ex._forecast_compute
+        calls = []
+        inside, go = threading.Event(), threading.Event()
+
+        def inputs(*a, **k):
+            i = real_inputs(*a, **k)
+            if i["ratio"] is not None:
+                i["ratio"] *= 1 + next(drift) / 1000.0
+            return i
+
+        def compute(t, want):
+            calls.append(want["key"])
+            inside.set()
+            go.wait(10)
+            return real_compute(t, want)
+        with mock.patch.object(ex, "_forecast_inputs", side_effect=inputs), \
+                mock.patch.object(ex, "_forecast_compute", side_effect=compute):
+            self.fleet()
+            th = threading.Thread(target=ex._forecast_run, args=(T,))
+            th.start()
+            self.assertTrue(inside.wait(5))
+            for _ in range(3):
+                self.assertTrue(self.fleet()["proxy"]["forecast"]["stale"])
+            go.set()
+            th.join(30)
+            self.assertFalse(ex._forecast_run(T), "the want left meanwhile is not stale")
+            self.assertFalse(self.fleet()["proxy"]["forecast"]["stale"])
+            self.assertFalse(ex._forecast_run(T))
+        self.assertEqual(len(calls), 1, "one computation for the key")
+        # A key change during a computation is still computed after it.
+        with mock.patch.object(ex, "_forecast_compute", side_effect=compute):
+            inside.clear()
+            go.clear()
+            self.reread()
+            with T.lock:
+                T.state[acct(ACCT_A, 70.0)["name"]] = read(acct(ACCT_A, 70.0))
+            self.fleet()
+            th = threading.Thread(target=ex._forecast_run, args=(T,))
+            th.start()
+            self.assertTrue(inside.wait(5))
+            with T.lock:
+                T.state[acct(ACCT_A, 80.0)["name"]] = read(acct(ACCT_A, 80.0))
+            self.fleet()
+            go.set()
+            th.join(30)
+            self.assertTrue(ex._forecast_run(T), "the newer key is computed")
+        self.assertEqual(len(calls), 3)
+        self.assertNotEqual(calls[1], calls[2])
+
     def test_a_render_during_a_computation_reads_the_last_result_quickly(self):
         # The worker in real work (each week walked forty times over, so the
         # computation holds the interpreter for seconds): a render meanwhile
@@ -15336,7 +15440,7 @@ class TestBurnImport(HTTPBase, SizingBase):
                                "accounts": {ACCT_A: [[own - 1, 3.0, 2, 1, False]]},
                                "selections": {"lane:opus": [[own - 2, 1.0, 1, 0, True]]}})
         self.assertEqual(code, 200, out)
-        self.assertEqual(out, {"added": 3, "skipped": 1, "rings": 3})
+        self.assertEqual(out, {"added": 3, "held": 1, "skipped": 1, "rings": 3})
         burn = T.sizing["burn"]
         self.assertEqual(burn["proxy"]["hours"][own]["usd"], 7.0, "the brain's own hour untouched")
         self.assertEqual(burn["proxy"]["hours"][own - 1],
@@ -15346,7 +15450,8 @@ class TestBurnImport(HTTPBase, SizingBase):
         self.assertEqual(T.sizing["imported_total"], 3)
         self.assertTrue(os.path.exists(T.sizing_file), "saved")
         code, again = self.post({"proxy": [[own - 1, 3.0, 2, 1, False]]})
-        self.assertEqual(again, {"added": 0, "skipped": 0, "rings": 0}, "a second run adds nothing")
+        self.assertEqual(again, {"added": 0, "held": 1, "skipped": 0, "rings": 0},
+                         "a second run adds nothing, and says what it found held")
 
     def test_the_key_guard(self):
         self.assertEqual(self.post({"proxy": []}, key=None)[0], 401)
@@ -15384,10 +15489,20 @@ class TestBurnImport(HTTPBase, SizingBase):
             self.assertEqual(T.sizing["burn"]["proxy"]["hours"], {}, usd)
 
     def test_an_import_marks_the_document(self):
-        T.events_dirty = False
-        code, out = self.post({"proxy": [[self.cur - 5, 1.0, 1, 0, True]]})
+        # do_POST marks in its finally, after the reply is written, so the
+        # client may hold the reply before the mark: wait for the mark itself.
+        marked = threading.Event()
+        tenants = []
+
+        def mark(t=None):
+            tenants.append(t)
+            marked.set()
+
+        with mock.patch.object(ex, "_events_mark", mark):
+            code, out = self.post({"proxy": [[self.cur - 5, 1.0, 1, 0, True]]})
+            self.assertTrue(marked.wait(5), "the import never marked the document")
         self.assertEqual((code, out["added"]), (200, 1))
-        self.assertTrue(T.events_dirty)
+        self.assertEqual(tenants, [T])
 
     def test_a_class_and_a_bare_lane_are_selections(self):
         with mock.patch.object(T, "classes", [{"class": "claude-frontier", "members": []}]):

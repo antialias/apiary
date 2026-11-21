@@ -8470,11 +8470,12 @@ def burn_import_problem(t, body, now, known):
 def burn_import(t, body, now):
     """POST /sizing/burn, a checked body (burn_import_problem): each row a
     bucket marked imported, only for an hour its ring has no bucket for, a
-    row older than BURN_HOURS skipped. -> {added, skipped (too old), rings
-    (those added to)}. Moves the pool and has the rings saved with the
+    row older than BURN_HOURS skipped. -> {added, held (an hour its ring
+    already had, left as it was), skipped (too old), rings (those added
+    to)}. Moves the pool and has the rings saved with the
     batch's end (_sizing_after)."""
     first = int(now // 3600) - BURN_HOURS
-    out = {"added": 0, "skipped": 0, "rings": 0}
+    out = {"added": 0, "held": 0, "skipped": 0, "rings": 0}
     with t.sizing_lock:
         burn = t.sizing["burn"]
         groups = [(burn["proxy"], body.get("proxy", []))]
@@ -8491,6 +8492,8 @@ def burn_import(t, body, now):
                     ring["hours"][hour] = {"usd": float(usd), "n": n, "un": un, "s": s,
                                            "l": None, "i": True}
                     added += 1
+                else:
+                    out["held"] += 1
             out["added"] += added
             out["rings"] += 1 if added else 0
         for level in _BURN_LEVELS:
@@ -9092,6 +9095,29 @@ def _forecast_streams(keys):
         + sorted(k for k in keys if k.startswith("lane:")) + [None]
 
 
+def _fleet_walk_groups(binds):
+    """{row: the row whose terms it shares} (69 §4.6): rows that bind the
+    same accounts' same windows at the same cap and size, in the same order,
+    have one room at every instant, so the walk tracks it once."""
+    first, out = {}, {}
+    for row, bw in binds.items():
+        sig = tuple((a, tuple((wid, cap, pp) for wid, (cap, pp) in w.items())) for a, w in bw.items())
+        out[row] = first.setdefault(sig, row)
+    return out
+
+
+def _fleet_walk_full(accts, bw):
+    """A row's full week's room in dollars (69 §4.7's room_pct denominator):
+    per account the least cap x size over its windows of a week or longer
+    (all its windows when it has none so long)."""
+    tot = 0.0
+    for a, w in bw.items():
+        long_ = {wid: v for wid, v in w.items()
+                 if (accts[a]["wins"][wid]["period"] or 0) >= 7 * 86400} or w
+        tot += min(cap * pp for cap, pp in long_.values()) if long_ else 0.0
+    return tot
+
+
 def _fleet_walk_joint(accts, binds, orders, demand, now, rooms=None, walls=None):
     """One sampled week walked (69 §4.6). accts and binds as
     _fleet_walk_accounts gives them (accts is changed: give it a copy);
@@ -9099,9 +9125,12 @@ def _fleet_walk_joint(accts, binds, orders, demand, now, rooms=None, walls=None)
     hour]} for every row ("proxy" is all work, its demand the week's whole
     spend; None the spend with no selection, which binds on all work's
     windows). -> {row: [dry_at (None for never), dry_s, unmet, usd]}, and
-    with `rooms` ({row: list}) each row's room at each hour's end over its
-    full week's room appended there; with `walls` ({}), the instant each
-    account first had no room left for the stream drawing on it."""
+    with `rooms` ({row: list}) each listed row's room at each hour's end
+    over its full week's room appended there; with `walls` ({}), the instant
+    each account first had no room left for the stream drawing on it. Rows
+    with one set of terms (_fleet_walk_groups) are tracked as one: their
+    room, and so their dry spells, are the same; their unmet is each row's
+    own demand over those spells."""
     horizon = now + FORECAST_SLOTS * 3600
     INF = math.inf
     frm = {a: (INF if v["from"] is None else v["from"]) for a, v in accts.items()}
@@ -9109,12 +9138,14 @@ def _fleet_walk_joint(accts, binds, orders, demand, now, rooms=None, walls=None)
                if s is None or s in binds]
     srow = {s: "proxy" if s is None else s for s in streams}
     rows = list(binds)
-    racc = {row: list(binds[row]) for row in rows}
-    # Each row's terms: per account its windows' state and [cap, pp]. The
+    grp = _fleet_walk_groups(binds)
+    gs = list(dict.fromkeys(grp.values()))  # each group by its first row
+    racc = {g: list(binds[g]) for g in gs}
+    # Each group's terms: per account its windows' state and [cap, pp]. The
     # room they leave on an account, in dollars, is kept (memo) until the
     # account's windows move: a take, a drain or a refill bumps ver.
-    terms = {row: [(a, [(accts[a]["wins"][wid], cap, pp) for wid, (cap, pp) in bw.items()], {})
-                   for a, bw in binds[row].items()] for row in rows}
+    terms = {g: [(a, [(accts[a]["wins"][wid], cap, pp) for wid, (cap, pp) in bw.items()], {})
+                 for a, bw in binds[g].items()] for g in gs}
     ver = dict.fromkeys(accts, 0)
 
     def wroom(ws, memo, a):
@@ -9131,43 +9162,40 @@ def _fleet_walk_joint(accts, binds, orders, demand, now, rooms=None, walls=None)
         memo[a] = (v, r)
         return r
 
-    rterm = {row: {a: (ws, memo) for a, ws, memo in terms[row]} for row in rows}
+    rterm = {g: {a: (ws, memo) for a, ws, memo in terms[g]} for g in gs}
 
-    def room_for(row, a, t, strict=False):
+    def room_for(g, a, t, strict=False):
         if (frm[a] >= t) if strict else (frm[a] > t):
             return 0.0
-        ws, memo = rterm[row][a]
+        ws, memo = rterm[g][a]
         return wroom(ws, memo, a)
 
-    def row_room(row, t, strict=False):
+    def row_room(g, t, strict=False):
         tot = 0.0
-        for a, ws, memo in terms[row]:
+        for a, ws, memo in terms[g]:
             f = frm[a]
             if f >= t if strict else f > t:
                 continue
             tot += wroom(ws, memo, a)
         return tot
 
-    full = {}
-    for row in rows:
-        tot = 0.0
-        for a, bw in binds[row].items():
-            long_ = {wid: v for wid, v in bw.items()
-                     if (accts[a]["wins"][wid]["period"] or 0) >= 7 * 86400} or bw
-            tot += min(cap * pp for cap, pp in long_.values()) if long_ else 0.0
-        full[row] = tot
+    full = {g: _fleet_walk_full(accts, binds[g]) for g in gs}
+    sgrp = {s: grp[srow[s]] for s in streams}
+    members = {g: [row for row in rows if grp[row] == g] for g in gs}
     cursor = {s: None for s in streams}
     out = {row: [None, 0.0, 0.0, 0.0] for row in rows}
-    dry_from = {row: None for row in rows}
+    gout = {g: [None, 0.0] for g in gs}  # dry_at, dry_s
+    dry_from = {g: None for g in gs}
     nexts = sorted({v for v in frm.values() if now < v < horizon})
     waiting = {a for a, v in frm.items() if v > now}
+    zero = [0.0] * FORECAST_SLOTS
+    rdem = {row: demand["proxy"] if row == "proxy" else demand.get(row, zero) for row in rows}
     first = True
     t = now
     for i in range(FORECAST_SLOTS):
         hour_end = now + (i + 1) * 3600
         rate = {s: demand[s][i] / 3600.0 for s in streams}
-        rrate = {row: (demand["proxy"][i] if row == "proxy" else demand.get(row, [0.0] * 168)[i])
-                 / 3600.0 for row in rows}
+        rrate = {row: rdem[row][i] / 3600.0 for row in rows}
         for row in rows:
             out[row][3] += rrate[row] * 3600.0
         while t < hour_end:
@@ -9196,17 +9224,17 @@ def _fleet_walk_joint(accts, binds, orders, demand, now, rooms=None, walls=None)
                 if t < v < nxt:
                     nxt = v
                     break
-            # A row's room only grows by what lands, so only a dry row with
-            # an account that landed can have room again.
-            for row in rows:
-                if dry_from[row] is not None and (first or not landed.isdisjoint(racc[row])) \
-                        and row_room(row, t) > _WALK_EPS:
-                    out[row][1] += t - dry_from[row]
-                    dry_from[row] = None
-            # A row with room at the last step's end has room now (refills
-            # only add); only the first step can start on an empty row.
-            empty = {row: row_room(row, t) <= _WALK_EPS for row in rows
-                     if dry_from[row] is None} if first else {}
+            # A group's room only grows by what lands, so only a dry group
+            # with an account that landed can have room again.
+            for g in gs:
+                if dry_from[g] is not None and (first or not landed.isdisjoint(racc[g])) \
+                        and row_room(g, t) > _WALK_EPS:
+                    gout[g][1] += t - dry_from[g]
+                    dry_from[g] = None
+            # A group with room at the last step's end has room now (refills
+            # only add); only the first step can start on an empty group.
+            empty = {g: row_room(g, t) <= _WALK_EPS for g in gs
+                     if dry_from[g] is None} if first else {}
             span = nxt - t
             hit = {}  # acct -> the instant its last take this step ended
             for s in streams:
@@ -9214,8 +9242,8 @@ def _fleet_walk_joint(accts, binds, orders, demand, now, rooms=None, walls=None)
                 if r <= 0:
                     continue
                 left = r * span
-                row_s = srow[s]
-                bind = binds[row_s]
+                g_s = sgrp[s]
+                bind = binds[srow[s]]
                 order = orders.get(s) or ()
                 if s is None:
                     # The spend with no selection draws in listing order:
@@ -9225,14 +9253,14 @@ def _fleet_walk_joint(accts, binds, orders, demand, now, rooms=None, walls=None)
                     cursor[s] = None
                 while left > _WALK_EPS:
                     cur = cursor[s]
-                    if cur is None or room_for(row_s, cur, t) <= _WALK_EPS:
+                    if cur is None or room_for(g_s, cur, t) <= _WALK_EPS:
                         k = 0 if cur is None else (order.index(cur) + 1) % len(order)
                         ring = order[k:] + order[:k]
-                        cur = next((a for a in ring if room_for(row_s, a, t) > _WALK_EPS), None)
+                        cur = next((a for a in ring if room_for(g_s, a, t) > _WALK_EPS), None)
                         if cur is None:
                             break
                         cursor[s] = cur
-                    took = min(left, room_for(row_s, cur, t))
+                    took = min(left, room_for(g_s, cur, t))
                     at = t + (r * span - left) / r
                     ws = accts[cur]["wins"]
                     for wid, (cap, pp) in bind[cur].items():
@@ -9247,34 +9275,40 @@ def _fleet_walk_joint(accts, binds, orders, demand, now, rooms=None, walls=None)
                     ver[cur] += 1
                     left -= took
                     hit[cur] = at + took / r
-                    if walls is not None and room_for(row_s, cur, t) <= _WALK_EPS:
+                    if walls is not None and room_for(g_s, cur, t) <= _WALK_EPS:
                         walls.setdefault(cur, hit[cur])
             at_end = {}
-            for row in rows:
-                if dry_from[row] is None and (first or not hit.keys().isdisjoint(racc[row])):
-                    at_end[row] = rr = row_room(row, nxt, strict=True)
+            for g in gs:
+                if dry_from[g] is None and (first or not hit.keys().isdisjoint(racc[g])):
+                    at_end[g] = rr = row_room(g, nxt, strict=True)
                 else:
                     rr = INF
                 if rr <= _WALK_EPS:
-                    if empty.get(row):
+                    if empty.get(g):
                         on = t
                     else:
-                        on = max([hit[a] for a in racc[row] if a in hit] or [t])
-                    dry_from[row] = on
-                    if out[row][0] is None:
-                        out[row][0] = on
-                if dry_from[row] is not None:
-                    out[row][2] += rrate[row] * (nxt - max(t, dry_from[row]))
+                        on = max([hit[a] for a in racc[g] if a in hit] or [t])
+                    dry_from[g] = on
+                    if gout[g][0] is None:
+                        gout[g][0] = on
+                f = dry_from[g]
+                if f is not None:
+                    d = nxt - max(t, f)
+                    for row in members[g]:
+                        out[row][2] += rrate[row] * d
             first = False
             t = nxt
         if rooms is not None:
             # The last step ended at the hour's end: its rooms are these.
             for row, series in rooms.items():
-                rr = at_end[row] if row in at_end else row_room(row, hour_end, strict=True)
-                series.append(rr / full[row] if full[row] else 0.0)
+                g = grp[row]
+                rr = at_end[g] if g in at_end else row_room(g, hour_end, strict=True)
+                series.append(rr / full[g] if full[g] else 0.0)
+    for g in gs:
+        if dry_from[g] is not None:
+            gout[g][1] += horizon - dry_from[g]
     for row in rows:
-        if dry_from[row] is not None:
-            out[row][1] += horizon - dry_from[row]
+        out[row][0], out[row][1] = gout[grp[row]]
     return out
 
 
@@ -9364,35 +9398,42 @@ def _forecast_compute(t, inputs):
     now = inputs["now"]
     pool = inputs["pool"]
     accts0, binds = inputs["accounts"], inputs["binds"]
-    streams = _forecast_streams([k for k in binds if k != "proxy"])
+    # Every selection's stream is drawn, a row left unwalked included (its
+    # spend is its own, never the no-selection stream's); only the walked
+    # rows (binds) are walked and ranked.
+    streams = _forecast_streams(inputs["streams"])
     weeks = _forecast_weeks(pool, streams, inputs["ratio"], inputs["seed_int"], now)
     rows = list(binds)
+    grp = _fleet_walk_groups(binds)
+    gs = list(dict.fromkeys(grp.values()))  # one room series per set of terms
     per = {row: [] for row in rows}
-    outs = {row: [0] * FORECAST_SLOTS for row in rows}
-    rooms = {row: array("d") for row in rows}
+    outs = {g: [0] * FORECAST_SLOTS for g in gs}
+    rooms = {g: array("d") for g in gs}
     cache = {}
     for wk in weeks:
         got = cache.get(id(wk))
         if got is None:
-            rm = {row: [] for row in rows}
+            rm = {g: [] for g in gs}
             got = (_fleet_walk_joint(copy.deepcopy(accts0), binds, inputs["orders"], wk, now, rm), rm)
             cache[id(wk)] = got  # the flat ladder's weeks are one week
         res, rm = got
         for row in rows:
             per[row].append(res[row])
-            o = outs[row]
-            for h, v in enumerate(rm[row]):
+        for g in gs:
+            o = outs[g]
+            for h, v in enumerate(rm[g]):
                 if v <= _WALK_EPS:
                     o[h] += 1
-            rooms[row].extend(rm[row])
+            rooms[g].extend(rm[g])
     n = len(weeks)
-    result = {row: dict(_forecast_row(per[row], n, now),
-                        out_share=[round(c / n, 4) for c in outs[row]], room_pct=None)
+    shares = {g: [round(c / n, 4) for c in outs[g]] for g in gs}
+    result = {row: dict(_forecast_row(per[row], n, now), out_share=list(shares[grp[row]]),
+                        room_pct=None)
               for row in rows}
 
-    # The fan rows (69 §4.7, §4.9): all work, and the selection with the
-    # highest share of weeks with a gap, then the longest median hours dry,
-    # when that beats all work's.
+    # The fan rows (69 §4.7, §4.9): all work, and the walked selection with
+    # the highest share of weeks with a gap, then the longest median hours
+    # dry, when that beats all work's.
     def rank(row):
         return (result[row]["gap_share"], result[row]["dry_h"]["p50"])
     fans = ["proxy"]
@@ -9400,7 +9441,7 @@ def _forecast_compute(t, inputs):
     if best is not None and rank(best) > rank("proxy"):
         fans.append(best)
     for row in fans:
-        arr = rooms[row]
+        arr = rooms[grp[row]]
         cols = [arr[h::FORECAST_SLOTS] for h in range(FORECAST_SLOTS)]
         result[row]["room_pct"] = {k: [round(100.0 * _forecast_q(col, p), 2) for col in cols]
                                    for k, p in _FORECAST_QS}
@@ -9434,12 +9475,22 @@ def _forecast_inputs(walk, standings, view, preferred, pool, ratio, now):
     the pool, the seed, the ratio and now, keyed by a SHA-256 of all of them
     but now and the ratio, with the hour and the seed in their place."""
     accts, binds, orders = _forecast_walk_inputs(walk, standings, view, preferred, now)
+    # A selection none of whose accounts is counted with capacity (an
+    # account that is not a quota account, or not yet sized) is not walked:
+    # it would read out all week, and outrank all work for the fan (69
+    # §4.6). All work is always walked. Its stream is still drawn.
+    streams = [k for k in binds if k != "proxy"]
+    binds = {row: bw for row, bw in binds.items()
+             if row == "proxy" or _fleet_walk_full(accts, bw) > 0}
+    orders = {k: v for k, v in orders.items() if k is None or k in binds}
     seed, seed_int, _ = _burn_seed(pool, now)
     keyed = {"accounts": accts, "binds": binds, "orders": {str(k): v for k, v in orders.items()},
-             "seed": seed, "rings": pool.get("digest"), "hour": int(now // 3600)}
+             "streams": streams, "seed": seed, "rings": pool.get("digest"),
+             "hour": int(now // 3600)}
     key = hashlib.sha256(json.dumps(keyed, sort_keys=True, default=str).encode("utf-8")).hexdigest()
     return {"key": key, "now": now, "pool": pool, "ratio": ratio, "seed": seed,
-            "seed_int": seed_int, "accounts": accts, "binds": binds, "orders": orders}
+            "seed_int": seed_int, "accounts": accts, "binds": binds, "orders": orders,
+            "streams": streams}
 
 
 # The worker (69 §4.9): one thread for every tenant. A render that finds the
@@ -9451,21 +9502,32 @@ _forecast_thread = None
 _forecast_thread_lock = threading.Lock()
 
 
+def _forecast_stale(had, inputs):
+    """Are a render's inputs stale against a result, or a pending want (69
+    §4.9): none, another key, or the held ratio moved by over a quarter."""
+    return had is None or had["key"] != inputs["key"] \
+        or _forecast_ratio_moved(had["ratio"], inputs["ratio"])
+
+
 def _forecast_request(t, inputs):
-    """Leave a render's inputs for the worker and wake it. Never blocks on a
+    """Leave a render's inputs for the worker and wake it. A pending want
+    the inputs are not stale against stands: renders during a computation
+    with the same key leave one want, not one each. Never blocks on a
     computation."""
     with t.forecast_lock:
-        if t.forecast_want is None or t.forecast_want["key"] != inputs["key"] \
-                or t.forecast_want["ratio"] != inputs["ratio"]:
+        if _forecast_stale(t.forecast_want, inputs):
             t.forecast_want = inputs
     _forecast_wake.set()
 
 
 def _forecast_run(t):
-    """Compute the inputs a render left for this tenant, if any, and keep the
-    result. -> True when it computed."""
+    """Compute the inputs a render left for this tenant, if any and if they
+    are stale against the result held (one computation per key), and keep
+    the result. -> True when it computed."""
     with t.forecast_lock:
         want, t.forecast_want = t.forecast_want, None
+        if want is not None and not _forecast_stale(t.forecast, want):
+            want = None
     if want is None:
         return False
     res = _forecast_compute(t, want)
@@ -9535,13 +9597,16 @@ def _forecast_attach(t, fleet, walk, standings, view, preferred, now):
         inputs = _forecast_inputs(walk, standings, view, preferred, pool, ratio, now)
         with t.forecast_lock:
             res = t.forecast
-        stale = res is None or res["key"] != inputs["key"] or _forecast_ratio_moved(res["ratio"], ratio)
+        stale = _forecast_stale(res, inputs)
         if stale:
             _forecast_request(t, inputs)
         rows = {}
         for row in rings:
             fc = (res or {}).get("rows", {}).get(row) if res is not None else None
-            if res is None:
+            if row not in inputs["binds"]:
+                # Nothing counted to walk (69 §4.6): no figures, not ranked.
+                rows[row] = {"basis": "no counted account"}
+            elif res is None:
                 rows[row] = {"basis": "not yet computed"}
             elif fc is None:
                 # A selection the last result did not walk: its figures wait.
