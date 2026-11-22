@@ -18663,6 +18663,24 @@ class TestResetValuation(TestFleetCases):
         _, res, _ = resets_run(case)
         self.assertEqual(res["walks"], {"resumed": 5, "full": 0, "now": 5})
 
+    def test_a_drivers_annotator_adds_to_each_published_row(self):
+        # providers.EVENT_ROW_ANNOTATORS: a driver adds keys to an event's
+        # row after the brain's own; the core names no key of its own here.
+        seen = []
+
+        def annotate(t, account, event, row, standings):
+            seen.append((t, account, event["id"], row["verdict"], account in standings))
+            return {"extra": {"of": event["id"]}} if event["id"] == "e:r" else None
+        accts, _ = self.verdict_pool(1.0)
+        with mock.patch.object(ex, "EVENT_ROW_ANNOTATORS", [annotate]):
+            fleet = self.run_case(rcase(accts))
+        rows = fleet["proxy"]["events"]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual("extra" in row, row["id"] == "e:r", row)
+        self.assertTrue(all(t is T and in_standings for t, _, _, _, in_standings in seen))
+        self.assertEqual(ex.EVENT_ROW_ANNOTATORS, [], "the shared edition registers none")
+
     def test_valuations_are_clock_only_and_the_events_key_the_inputs(self):
         accts, _ = self.verdict_pool(1.0)
         fleet, _, inputs = resets_run(rcase(accts))

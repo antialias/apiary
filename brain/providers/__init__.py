@@ -33,6 +33,11 @@ sizing(wid, kind) (pure: no tenant).
 register_route(method, path, handler) adds an HTTP route the core's dispatch
 does not know, served under /t/<tenant>/<path>: handler(tenant,
 request_handler, parsed_url) answers it.
+
+EVENT_ROW_ANNOTATORS: callables annotate(tenant, account, event, row,
+standings) -> dict or None. A driver may add keys to an event's published row
+(fleet.<row>.events[]): the core adds the dict's keys to each row as it builds
+it, from the standing's event, the row so far and every account's standing.
 """
 
 PROVIDERS = {}
@@ -42,6 +47,7 @@ _LEDGER_RATES = {}
 _LEDGER_RATE_TABLES = {}
 _MODEL_MODALITY = {}
 ROUTES = {}
+EVENT_ROW_ANNOTATORS = []
 
 
 def register(pid, spec):

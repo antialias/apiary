@@ -116,8 +116,9 @@ from urllib.parse import parse_qs, urlparse
 #                      listed has no rule, and none of its charges are counted
 #   _MODEL_MODALITY    (provider, model) -> what the model makes, when not chat
 #   ROUTES             (method, path) -> a driver's HTTP handler
-from providers import (PROVIDERS, ROUTES, _API_POTS, _COUNTABLE_UNITS,  # noqa: E402
-                       _LEDGER_RATE_TABLES, _LEDGER_RATES, _MODEL_MODALITY)
+#   EVENT_ROW_ANNOTATORS what a driver adds to each event's published row
+from providers import (PROVIDERS, ROUTES, EVENT_ROW_ANNOTATORS, _API_POTS,  # noqa: E402
+                       _COUNTABLE_UNITS, _LEDGER_RATE_TABLES, _LEDGER_RATES, _MODEL_MODALITY)
 import credstore  # noqa: E402 — the sealed store every tenant file goes through
 import notices  # noqa: E402 — the prepaid "needs payment" notices
 import tenancy  # noqa: E402 — Tenant and the registry
@@ -10891,13 +10892,15 @@ _EVENT_FIELDS = ("verdict", "wise_share", "gap_weeks", "reason", "reason_share",
                  "lost_share", "covers", "left_pct_after", "more_at_after", "now", "reaches_short")
 
 
-def _forecast_event_list(items, valued, standings, missing):
+def _forecast_event_list(t, items, valued, standings, missing):
     """A row's published `events` (69 §6.1) from the render's items
     (_forecast_event_inputs' rows[row]) and the worker's valuation of the
     row ({acct: {id: fields}}, possibly from older inputs): each event's
-    structural fields from its standing, then its valuation; an event the
-    valuation lacks carries the state the standings give it, else
-    `missing`. Sorted by (account, id); rank orders them (§5.3)."""
+    structural fields from its standing, then its valuation, then the keys
+    each EVENT_ROW_ANNOTATORS callable adds (a driver may add keys to an
+    event's row); an event the valuation lacks carries the state the
+    standings give it, else `missing`. Sorted by (account, id); rank orders
+    them (§5.3)."""
     out = []
     for it in items:
         ev = next(e for e in standings[it["acct"]]["allowance"]["events"]
@@ -10911,6 +10914,8 @@ def _forecast_event_list(items, valued, standings, missing):
             st = it["state"] or [missing, None]
             f = {"verdict": st[0], "reason": st[1], "left_pct_after": it["left_pct_after"]}
         row.update({k: f.get(k) for k in _EVENT_FIELDS})
+        for annotate in EVENT_ROW_ANNOTATORS:
+            row.update(annotate(t, it["acct"], ev, row, standings) or {})
         out.append(row)
     # The events no valuation ranked (none yet, or new since) follow the
     # ranked ones by state (69 §5.3).
@@ -10944,7 +10949,7 @@ def _forecast_attach(t, fleet, walk, standings, view, preferred, now):
         rows = {row: {"horizon_at": horizon, "basis": "no history"} for row in rings}
         accts, _, _ = _forecast_walk_inputs(walk, standings, view, preferred, now)
         evin = _forecast_event_inputs(walk, standings, accts, {"proxy": None}, now)
-        events["proxy"] = _forecast_event_list(evin["rows"]["proxy"], {}, standings, "no_history")
+        events["proxy"] = _forecast_event_list(t, evin["rows"]["proxy"], {}, standings, "no_history")
     else:
         ratio = burns["proxy"]["ratio"]
         inputs = _forecast_inputs(walk, standings, view, preferred, pool, ratio, now)
@@ -10974,10 +10979,10 @@ def _forecast_attach(t, fleet, walk, standings, view, preferred, now):
         valued = (res or {}).get("events") or {}
         for row in rings:
             if row in valued and row in items:
-                events[row] = _forecast_event_list(items[row], valued[row], standings, "not_yet")
+                events[row] = _forecast_event_list(t, items[row], valued[row], standings, "not_yet")
         # All work always has its list: before a result, or one with no
         # events to judge, each event carries its standing's state.
-        events["proxy"] = _forecast_event_list(items["proxy"], valued.get("proxy") or {},
+        events["proxy"] = _forecast_event_list(t, items["proxy"], valued.get("proxy") or {},
                                                standings, "not_yet")
     fleet["proxy"]["burn"] = burns["proxy"]
     fleet["proxy"]["forecast"] = rows["proxy"]
