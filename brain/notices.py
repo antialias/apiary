@@ -42,9 +42,20 @@ most once a day.
 There is no "it's back" message and no quiet hours: a message goes when its
 event happens, and its times are in UTC.
 
+The queue. Beside the prepaid rules, an edition's own code may hand this
+sender one message to deliver (queue(id, kind, account, title, summary, desc,
+labels)): its words and its labels are the caller's, and it goes through the
+same bridge, worker, retry rule and file as the prepaid notices. The id is the
+caller's and names one message: queueing an id already queued or sent does
+nothing, so a caller that queues again after a restart sends nothing twice. A
+queued message on a tenant whose notices are off (no bridge, or not bridged)
+is recorded as not sent, with the reason, and never posted. tick() never
+touches the queue, and the queue never touches the prepaid records.
+
 Delivery is the proxy's: Alertmanager-webhook JSON posted to the alert bridge
 (SWITCH_BRIDGE_URL), labels {alertname, alertroute: prepaid, delivery:
-critical, account}, so each goes to chat and a phone push. The tick only
+critical, account} (a queued message's labels are its caller's), so each goes
+to chat and a phone push. The tick only
 decides; one worker thread posts (start(), kick()), so a slow bridge never
 holds compute_preferred or /reports. A message counts as delivered on a 2xx
 whose body says any channel delivered (telegram or ha true), each channel's
@@ -60,13 +71,17 @@ change and read at start, so a restart neither forgets nor resends:
    warned_at, dry_sent_at, last_reminder_at, dry_at (the last dry's start),
    end_at (what ended it, at), samples: [[at, balance]...],
    sent: [<= SENT_MAX notices, oldest first], pending: {id, kind, slot, words,
-   tries, next_at} | null}}}
+   tries, next_at} | null}},
+   "queued": {"pending": [{id, kind, account, words, labels, queued_at, tries,
+   next_at}...], "sent": [<= SENT_MAX, oldest first]}}
 
 It is not fsynced, as the brain's own state file (_save_state) is not: a
 power cut can lose the last change, and with it at most one resend.
 
 /preferred `notices` (payload()) is the contract Scry reads: per prepaid
-account its state, since, name, serves, billing_url, pace, classes and sent.
+account its state, since, name, serves, billing_url, pace, classes and sent;
+and `queued`, the queue's sent ring (each message's id, kind, account, at,
+ok, channels, tries, detail), so a page can say whether one was delivered.
 """
 import json
 import math
@@ -234,12 +249,14 @@ def message(kind, account, v, since=None, test=False):
     return title, summary, desc
 
 
-def alert_body(kind, account, title, summary, desc):
-    """The bridge's Alertmanager-webhook JSON, as the proxy posts it."""
+def alert_body(kind, account, title, summary, desc, labels=None):
+    """The bridge's Alertmanager-webhook JSON, as the proxy posts it. labels:
+    a queued message's own (its caller's); else the prepaid kind's."""
+    if labels is None:
+        labels = {"alertname": ALERTNAMES[kind], "alertroute": "prepaid",
+                  "delivery": "critical", "account": account}
     return {"status": "firing", "alerts": [{
-        "status": "firing",
-        "labels": {"alertname": ALERTNAMES[kind], "alertroute": "prepaid",
-                   "delivery": "critical", "account": account},
+        "status": "firing", "labels": dict(labels),
         "annotations": {"title": title, "summary": summary, "description": desc}}]}
 
 
@@ -260,6 +277,13 @@ def outcome(status, reply):
         return False, channels, "no channel delivered"
     failed = sorted(k for k, v in channels.items() if not v)
     return True, channels, (", ".join(failed) + " not delivered") if failed else None
+
+
+def _new_queue():
+    return {"pending": [], "sent": []}
+
+
+QUEUE_LABELS = ("alertname", "alertroute", "delivery", "account")
 
 
 def _retry_after(tries):
@@ -292,6 +316,7 @@ class Notices:
         self._stop = threading.Event()
         self._worker = None
         self._accounts = None
+        self._queued = None
         self._seq = 0
 
     # -- the file --
@@ -299,7 +324,7 @@ class Notices:
     def _load_locked(self):
         if self._accounts is not None:
             return
-        self._accounts, self._seq = {}, 0
+        self._accounts, self._queued, self._seq = {}, _new_queue(), 0
         try:
             doc = self._read()
         except FileNotFoundError:
@@ -316,6 +341,10 @@ class Notices:
         for acct, rec in doc["accounts"].items():
             if isinstance(rec, dict):
                 self._accounts[acct] = dict(_new_record(), **rec)
+        q = doc.get("queued")
+        if isinstance(q, dict):
+            self._queued = {k: [e for e in (q.get(k) or []) if isinstance(e, dict) and e.get("id")]
+                            for k in ("pending", "sent")}
 
     def _read(self):
         if self.store is not None:
@@ -324,7 +353,8 @@ class Notices:
             return json.load(f)
 
     def _save_locked(self):
-        doc = {"version": 1, "seq": self._seq, "accounts": self._accounts}
+        doc = {"version": 1, "seq": self._seq, "accounts": self._accounts,
+               "queued": self._queued}
         try:
             if self.store is not None:
                 self.store.write_json(self.path, doc, sort_keys=True)
@@ -350,7 +380,7 @@ class Notices:
     def reset(self):
         """Forget everything and remove the file (tests)."""
         with self._lock:
-            self._accounts, self._seq = {}, 0
+            self._accounts, self._queued, self._seq = {}, _new_queue(), 0
             for p in (self.path, self.path + ".tmp"):
                 try:
                     os.remove(p)
@@ -514,12 +544,19 @@ class Notices:
                 out = [(acct, dict(rec["pending"])) for acct, rec in sorted(self._accounts.items())
                        if rec["pending"] is not None and rec["pending"].get("words")
                        and (rec["pending"].get("next_at") or 0) <= now]
+                queued = [dict(q) for q in self._queued["pending"] if (q.get("next_at") or 0) <= now]
             for acct, p in out:
                 ok, channels, detail = self._post(url, p["kind"], acct, *p["words"])
                 with self._lock:
                     self._delivered_locked(acct, p, ok, channels, detail, now)
                     self._save_locked()
-            return len(out)
+            for q in queued:
+                ok, channels, detail = self._post(url, q["kind"], q["account"], *q["words"],
+                                                  labels=q["labels"])
+                with self._lock:
+                    self._queued_delivered_locked(q, ok, channels, detail, now)
+                    self._save_locked()
+            return len(out) + len(queued)
         finally:
             self._deliver_lock.release()
 
@@ -561,12 +598,63 @@ class Notices:
             sent.append(entry)
         del sent[:-SENT_MAX]
 
-    def _post(self, url, kind, acct, title, summary, desc):
+    def _post(self, url, kind, acct, title, summary, desc, labels=None):
         try:
-            status, reply = self.post(url, alert_body(kind, acct, title, summary, desc))
+            status, reply = self.post(url, alert_body(kind, acct, title, summary, desc, labels))
         except Exception as e:  # noqa: BLE001 — no answer at all
             return False, {}, f"{type(e).__name__}: {e}"[:300]
         return outcome(status, reply)
+
+    # -- the queue --
+
+    def queue(self, id, kind, account, title, summary, desc, labels, now=None):
+        """Queue one message of the caller's: delivered by the worker's next
+        pass (kick() it), with the prepaid notices' retry rule under this id.
+        labels are the message's whole label set (alertname, alertroute,
+        delivery, account). An id already queued or sent is not queued again.
+        With the notices off it is recorded as not sent and never posted.
+        Written to the file before it returns. -> True when it was queued."""
+        if not (isinstance(id, str) and id) or not all(isinstance(labels.get(k), str) and labels[k]
+                                                       for k in QUEUE_LABELS):
+            raise ValueError("a queued message needs an id and its labels: " + ", ".join(QUEUE_LABELS))
+        now = time.time() if now is None else now
+        url = self.url()
+        with self._lock:
+            self._load_locked()
+            q = self._queued
+            if any(e["id"] == id for e in q["pending"]) or any(e["id"] == id for e in q["sent"]):
+                return False
+            if not url:
+                self._record_locked(q, {"id": id, "at": now, "kind": kind, "account": account,
+                                        "ok": False, "telegram": None, "ha": None, "channels": {},
+                                        "tries": 0, "detail": NO_BRIDGE if self.bridged else NOT_LAN})
+                self.log(f"notices: {account} {kind} recorded, not sent ({id}; "
+                         f"{NO_BRIDGE if self.bridged else NOT_LAN})")
+            else:
+                q["pending"].append({"id": id, "kind": kind, "account": account,
+                                     "words": [title, summary, desc], "labels": dict(labels),
+                                     "queued_at": now, "tries": 0, "next_at": None})
+            self._save_locked()
+        return True
+
+    def _queued_delivered_locked(self, q, ok, channels, detail, now):
+        tries = (q.get("tries") or 0) + 1
+        self._record_locked(self._queued, {
+            "id": q["id"], "at": now, "kind": q["kind"], "account": q["account"], "ok": ok,
+            "telegram": channels.get("telegram"), "ha": channels.get("ha"), "channels": channels,
+            "tries": tries, "detail": detail})
+        pend = self._queued["pending"]
+        mine = next((e for e in pend if e["id"] == q["id"]), None)
+        if mine is None:
+            return
+        if ok:
+            pend.remove(mine)
+            self.log(f"notices: {q['account']} {q['kind']} sent ({q['id']}" + (f"; {detail}" if detail else "") + ")")
+        else:
+            mine.update(tries=tries, next_at=now + _retry_after(tries))
+            if tries == 1:
+                self.log(f"WARN notices: {q['account']} {q['kind']} not delivered ({detail}); "
+                         f"trying again from {RETRY_FIRST_S:.0f} s, doubling to {RETRY_MAX_S:.0f} s")
 
     # -- the worker --
 
@@ -621,8 +709,9 @@ class Notices:
                     "pace": pace(rec["samples"], v.get("balance"), v.get("unit")),
                     "classes": [dict(c) for c in v.get("classes") or []],
                     "sent": [dict(e) for e in rec["sent"]]}
+            queued = [dict(e) for e in self._queued["sent"]]
         why = None if url else (NO_BRIDGE if self.bridged else NOT_LAN)
-        return {"enabled": bool(url), "why": why, "accounts": accounts}
+        return {"enabled": bool(url), "why": why, "accounts": accounts, "queued": queued}
 
 
 # ---- the owner's test message --------------------------------------------------

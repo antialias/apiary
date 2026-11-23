@@ -16931,6 +16931,87 @@ class TestNoticesDelivery(NoticesBase):
         self.assertFalse(os.path.exists(self.path))
 
 
+class TestNoticesQueue(NoticesBase):
+    """The generic queue beside the prepaid rules: a caller's message, its
+    words and labels, through the same bridge, worker, retry rule and file."""
+
+    LABELS = {"alertname": "WidgetDone", "alertroute": "widgets", "delivery": "critical",
+              "account": "acme"}
+
+    def put(self, n=None, id="w-1", at=N_T0, **over):
+        labels = dict(self.LABELS, **over)
+        return (n or self.n).queue(id, "done", "acme", "Widget done", "It finished.",
+                                   "The widget finished.", labels, now=at)
+
+    def test_queued_then_delivered_with_the_callers_labels(self):
+        self.assertTrue(self.put())
+        self.assertEqual(self.bridge.posts, [], "queueing posts nothing; the worker does")
+        self.assertEqual(self.n.deliver(N_T0), 1)
+        (url, body), = self.bridge.posts
+        a = body["alerts"][0]
+        self.assertEqual((url, a["labels"]), (BRIDGE, self.LABELS))
+        self.assertEqual(a["annotations"], {"title": "Widget done", "summary": "It finished.",
+                                            "description": "The widget finished."})
+        q = self.n.payload({})["queued"]
+        self.assertEqual([(e["id"], e["kind"], e["account"], e["ok"], e["tries"]) for e in q],
+                         [("w-1", "done", "acme", True, 1)])
+        self.assertEqual(self.n.deliver(N_T0 + 60), 0, "sent once")
+
+    def test_an_id_is_one_message(self):
+        self.assertTrue(self.put())
+        self.assertFalse(self.put(), "already pending")
+        self.n.deliver(N_T0)
+        self.assertFalse(self.put(), "already sent")
+        self.n.deliver(N_T0 + 60)
+        self.assertEqual(len(self.bridge.posts), 1)
+
+    def test_a_failure_is_retried_under_the_same_id(self):
+        self.bridge.replies = [(200, {"telegram": False, "ha": False}), (200, {"telegram": True})]
+        self.put()
+        self.n.deliver(N_T0)
+        self.assertEqual(self.n.deliver(N_T0 + 30), 0, "not before RETRY_FIRST_S")
+        self.assertEqual(self.n.deliver(N_T0 + 60), 1)
+        ids = [b["alerts"][0]["labels"]["alertname"] for _, b in self.bridge.posts]
+        self.assertEqual(ids, ["WidgetDone", "WidgetDone"])
+        q = self.n.payload({})["queued"]
+        self.assertEqual([(e["id"], e["ok"], e["tries"]) for e in q], [("w-1", True, 2)])
+
+    def test_a_restart_resends_nothing_sent_and_keeps_what_is_due(self):
+        self.put(id="w-1")
+        self.n.deliver(N_T0)
+        self.put(id="w-2", at=N_T0 + 1)
+        again = self.engine()
+        self.assertFalse(self.put(again, id="w-1"), "the file holds it as sent")
+        self.assertEqual(again.deliver(N_T0 + 2), 1)
+        self.assertEqual([b["alerts"][0]["annotations"]["title"] for _, b in self.bridge.posts],
+                         ["Widget done", "Widget done"])
+        self.assertEqual([e["id"] for e in again.payload({})["queued"]], ["w-1", "w-2"])
+
+    def test_off_records_and_posts_nothing(self):
+        with mock.patch.dict(os.environ, {"SWITCH_BRIDGE_URL": ""}):
+            self.assertTrue(self.put())
+            self.n.deliver(N_T0)
+            q = self.n.payload({})["queued"]
+        self.assertEqual(self.bridge.posts, [])
+        self.assertEqual([(e["ok"], e["detail"]) for e in q], [(False, notices.NO_BRIDGE)])
+        n = notices.Notices(self.path + ".2", post=self.bridge, log=self.logs.append, bridged=False)
+        self.put(n)
+        n.deliver(N_T0)
+        self.assertEqual(self.bridge.posts, [])
+        self.assertEqual([e["detail"] for e in n.payload({})["queued"]], [notices.NOT_LAN])
+
+    def test_the_prepaid_tick_never_touches_the_queue(self):
+        self.put()
+        self.tick(N_T0, dry=True)
+        self.assertEqual(sorted(self.bridge.kinds()), ["PrepaidAccountDry", "WidgetDone"])
+        self.n.tick({}, N_T0 + 10)
+        self.assertEqual([e["id"] for e in self.n.payload({})["queued"]], ["w-1"])
+
+    def test_labels_are_required(self):
+        with self.assertRaises(ValueError):
+            self.put(alertroute="")
+
+
 class TestNoticesWords(unittest.TestCase):
     def test_the_class_coverage_text(self):
         v = nview()
@@ -16960,7 +17041,8 @@ class TestNoticesInTheDocument(PayBase):
     def test_shape(self):
         classes_reset(opus_acct(30, resets=True))
         doc = ex._preferred_payload(T)["notices"]
-        self.assertEqual(doc, {"enabled": False, "why": "no bridge address", "accounts": {}})
+        self.assertEqual(doc, {"enabled": False, "why": "no bridge address", "accounts": {},
+                               "queued": []})
 
     def test_an_api_account_whose_pot_no_dial_draws_is_not_prepaid(self):
         papi.KEYS.persist(T, {"key-a": "sk-test"})
