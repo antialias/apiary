@@ -1,5 +1,5 @@
 {
- "doc": "quota-model 69 \u00a79: the owner's cases (\u00a75.2) and drawings 44 and 45, each a fleet case (fleet_cases.json's shape) with per-account sizes in dollars a window (sizes), the account each selection prefers, events in a short form (an id, effects as [window, effect, points], times relative to now), and the sampled weeks: each a share of the 400, flat at its dollars an hour per stream. `expect` is a subset of the fleet the brain publishes: every forecast and event figure is a quantile across the weeks. Every name and number is made up. Hours are from now, 1795100000; H = now + 7 d.",
+ "doc": "quota-model 69 \u00a79: the owner's cases (\u00a75.2) and drawings 44 and 45, each a fleet case (fleet_cases.json's shape) with per-account sizes in dollars a window (sizes), the account each selection prefers, events in a short form (an id, effects as [window, effect, points], times relative to now), and the sampled weeks: each a share of the 400, flat at its dollars an hour per stream. `expect` is a subset of the fleet the brain publishes: every forecast and event figure is a quantile across the weeks. Every name and number is made up. Hours are from now, 1795100000; H = now + 7 d. `expect_not_wise` lists events whose verdict, on every row that lists them, must not be wise (a rule the valuation must give on its own, with no rule of its own).",
  "cases": [
   {
    "name": "69 \u00a75.2 case 1, before A's wall",
@@ -405,7 +405,9 @@
          "p50": 1.0,
          "p90": 1.0
         },
-        "lost_share": 0.0
+        "lost_share": 0.0,
+        "verdict": "wise",
+        "reason": null
        }
       }
      ]
@@ -698,8 +700,8 @@
   {
    "name": "69 \u00a75.2 case 5",
    "notes": [
-    "A spent, back at 114 h, its reset expiring in 3 d; B unused ($3,000) carries to 75 h; dry 75 h -> 114 h.",
-    "The drought starts after the reset expires: wasteful, expires_first, in every gap week."
+    "A spent, back at 114 h, its reset expiring in 3 d; B unused ($3,000, preferred) carries to 75 h; dry 75 h -> 114 h.",
+    "The drought starts after the reset expires, so no spell start can take it; used now it can (69 \u00a74.8): A's refill waits behind B and serves the 39 h from 75 h, $1,560 of the $3,000 (0.52), the rest lost to A's own refill at 114 h. Wise, now, in every gap week; nothing beside it."
    ],
    "now": 1795100000,
    "accounts": {
@@ -795,13 +797,158 @@
      "events": [
       {
        "id": "cedar_ember:full-reset",
+       "verdict": "wise",
+       "reason": null,
+       "wise_share": 1.0,
+       "gap_weeks": 400,
+       "use_at": {
+        "p10": 1795100000,
+        "p90": 1795100000
+       },
+       "worth_h": {
+        "p10": 39.0,
+        "p50": 39.0,
+        "p90": 39.0
+       },
+       "spent": {
+        "p10": 0.52,
+        "p50": 0.52,
+        "p90": 0.52
+       },
+       "lost_share": 1.0,
+       "now": null,
+       "expires_at": 1795359200
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "69 \u00a75.2 case 5b, expires first",
+   "notes": [
+    "Case 5 with A back at 70 h and B and C back at 160 h: B carries to 75 h, A's own refill at 70 h carries on to 150 h; dry 150 h -> 160 h.",
+    "The drought starts after the reset expires, and used now the refill is taken back by A's own at 70 h, before any of it serves: wasteful, expires_first, in every gap week; `now` says moves."
+   ],
+   "now": 1795100000,
+   "accounts": {
+    "max-a": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 252000
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ]
+       ],
+       "order": 1,
+       "to_in": 259200
+      }
+     ]
+    },
+    "max-b": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 0,
+       "resets_in": 576000
+      }
+     }
+    },
+    "max-c": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 100,
+       "resets_in": 576000
+      }
+     }
+    }
+   },
+   "classes": [
+    {
+     "class": "capable",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizes": {
+    "max-a": {
+     "seven_day": 3000.0
+    },
+    "max-b": {
+     "seven_day": 3000.0
+    },
+    "max-c": {
+     "seven_day": 3000.0
+    }
+   },
+   "preferred": {
+    "capable": "max-b"
+   },
+   "weeks": [
+    {
+     "share": 1.0,
+     "usd_h": {
+      "capable": 40.0
+     }
+    }
+   ],
+   "expect": {
+    "proxy": {
+     "forecast": {
+      "dry_h": {
+       "p10": 10.0,
+       "p50": 10.0,
+       "p90": 10.0
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
        "verdict": "wasteful",
        "reason": "expires_first",
        "reason_share": 1.0,
        "wise_share": 0.0,
        "gap_weeks": 400,
        "use_at": null,
-       "expires_at": 1795359200
+       "worth_h": {
+        "p10": 0.0,
+        "p50": 0.0,
+        "p90": 0.0
+       },
+       "expires_at": 1795359200,
+       "now": {
+        "gain": {
+         "p10": 3000.0,
+         "p50": 3000.0,
+         "p90": 3000.0
+        },
+        "worth_h": {
+         "p10": 0.0,
+         "p50": 0.0,
+         "p90": 0.0
+        },
+        "verdict": "wasteful",
+        "reason": "moves"
+       }
       }
      ]
     }
@@ -811,8 +958,8 @@
    "name": "69 \u00a75.2 case 6",
    "notes": [
     "A 25 % used ($2,250, preferred) carries to 56.25 h; B spent past H; C spent, back at 90 h, holds the reset; A back at 85.25 h.",
-    "Dry 56.25 h -> 85.25 h (29 h). C's reset at the wall: C serves on to its own refill at 90 h (33.75 h, $1,350 of $3,000).",
-    "worth 29 h, a day or more, so wise though spent is 0.45; the rest is lost to C's refill."
+    "Dry 56.25 h -> 85.25 h (29 h). C's reset at the wall: C serves the 29 h the week had no room for ($1,160 of the $3,000 it gives back, 69 \u00a74.8), and on to its own refill at 90 h, hours A's return at 85.25 h would have served anyway.",
+    "worth 29 h, a day or more, so wise though spent is 0.39; the rest is lost to C's refill."
    ],
    "now": 1795100000,
    "accounts": {
@@ -924,9 +1071,9 @@
         "p90": 29.0
        },
        "spent": {
-        "p10": 0.45,
-        "p50": 0.45,
-        "p90": 0.45
+        "p10": 0.39,
+        "p50": 0.39,
+        "p90": 0.39
        },
        "covers": {
         "p10": 1.0,
@@ -943,7 +1090,7 @@
   {
    "name": "69 \u00a75.2 case 7",
    "notes": [
-    "Case 6 across the weeks: 8 in 10 at $40 an hour (a 29 h drought, wise by worth), 2 in 10 at $28 (dry at 80.36 h, a 4.9 h drought, spent 0.09).",
+    "Case 6 across the weeks: 8 in 10 at $40 an hour (a 29 h drought, wise by worth), 2 in 10 at $28 (dry at 80.36 h, a 4.9 h drought, spent 0.05).",
     "Every week has a gap; the rule holds in 0.8 of them: probably_wise, reason short in the rest."
    ],
    "now": 1795100000,
@@ -1331,7 +1478,7 @@
    "name": "drawing 45: out now, three resets in order, 6 hours short",
    "notes": [
     "All spent: sub-one ($2,000) back at 80 h, sub-two ($3,000) at 120 h, codex-one ($720) in 10 d. Dry now to 80 h.",
-    "Step 1, the full reset now: 50 h. Step 2, the banked reset at 50 h, after 1: 18 h. Step 3, the Fable reset (12 weekly points back, $240) at 68 h, after 2: 6 h.",
+    "Step 1, the full reset now: 50 h. Step 2, the banked reset at 50 h, after 1: 18 h. Step 3, the Fable reset (12 weekly points back, $240) at 68 h, after 2: 6 h. Each step after the first has a `now` record, its use_at being later than now (69 \u00a74.8): the banked reset used now, beside the full reset, fills the same 18 h; the Fable reset used now, after both, nothing, and no points to spend (both refilled the weekly already): spent null. Each `now` carries the verdict used now would get.",
     "Left: 74 h -> 80 h (6 h). The paid codex reset would refill a window that binds in that shortfall: reaches_short.",
     "capable is out now: each event read off all work's used-now walks, in turn; the Fable reset used now after the two before it adds nothing: wasteful, after, still step 3 of all work's plan.",
     "sub-two's resets could not be read: no events, its events_basis says why."
@@ -1497,7 +1644,26 @@
         "p90": 0.6
        },
        "more_at_after": 1795884800,
-       "now": null
+       "now": {
+        "gain": {
+         "p10": 720.0,
+         "p50": 720.0,
+         "p90": 720.0
+        },
+        "worth_h": {
+         "p10": 18.0,
+         "p50": 18.0,
+         "p90": 18.0
+        },
+        "spent": {
+         "p10": 1.0,
+         "p50": 1.0,
+         "p90": 1.0
+        },
+        "lost_share": 0.0,
+        "verdict": "wise",
+        "reason": null
+       }
       },
       {
        "id": "codex_paid_reset",
@@ -1547,6 +1713,17 @@
         "p10": 0.5,
         "p50": 0.5,
         "p90": 0.5
+       },
+       "now": {
+        "worth_h": {
+         "p10": 0.0,
+         "p50": 0.0,
+         "p90": 0.0
+        },
+        "spent": null,
+        "lost_share": null,
+        "verdict": "wasteful",
+        "reason": "after"
        }
       }
      ]
@@ -1618,6 +1795,138 @@
      }
     }
    }
+  },
+  {
+   "name": "71 \u00a73.2: every account resting its 5-hour window, the weeklies with room",
+   "notes": [
+    "max-a and max-b each 30 % into the week ($2,100 left of $3,000), back in 100 h and 120 h; both resting their 5-hour windows, A for 3 h and B for 2 h. $10 an hour: the week draws $1,000 before A's weekly refill, under either account's room.",
+    "So the row is out now, for the 2 h until B's rest ends, and never again in the horizon: the only gap is the rest.",
+    "max-a holds a full reset (the weekly and the 5-hour). Used now it ends A's rest 3 h early (worth 2 h, under a day) and gives back the 30 % of the week A has used ($900), room the week never needs: the reset meets the 2 h of demand the rest refused ($20, spent 0.02) and nothing else, and the 30 % is lost to A's refill at 100 h (69 \u00a74.8). Wasteful, the gap too short for it, at every burn up to $40 an hour, by the valuation alone and no rule on rests (quota-model 71 \u00a73.2). From about $42 an hour the two weeklies run out before A's refill and the 30 % is spent whether or not A is resting: wise, by the week, not the rest (test_exporter's TestResetValuation)."
+   ],
+   "now": 1795100000,
+   "accounts": {
+    "max-a": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 30,
+       "resets_in": 360000
+      },
+      "five_hour": {
+       "period_s": 18000,
+       "used": 100,
+       "resets_in": 10800
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "effects": [
+        [
+         "seven_day",
+         "refill"
+        ],
+        [
+         "five_hour",
+         "refill"
+        ]
+       ],
+       "order": 1
+      }
+     ]
+    },
+    "max-b": {
+     "provider": "anthropic",
+     "windows": {
+      "seven_day": {
+       "period_s": 604800,
+       "used": 30,
+       "resets_in": 432000
+      },
+      "five_hour": {
+       "period_s": 18000,
+       "used": 100,
+       "resets_in": 7200
+      }
+     }
+    }
+   },
+   "classes": [
+    {
+     "class": "capable",
+     "members": [
+      {
+       "kind": "anthropic",
+       "lane": "opus",
+       "model": "claude-opus-5-5",
+       "priority": 1
+      }
+     ]
+    }
+   ],
+   "lanes": {},
+   "sizes": {
+    "max-a": {
+     "seven_day": 3000.0,
+     "five_hour": 400.0
+    },
+    "max-b": {
+     "seven_day": 3000.0,
+     "five_hour": 400.0
+    }
+   },
+   "preferred": {},
+   "weeks": [
+    {
+     "share": 1.0,
+     "usd_h": {
+      "capable": 10.0
+     }
+    }
+   ],
+   "expect": {
+    "proxy": {
+     "forecast": {
+      "first_dry": {
+       "p10": 1795100000,
+       "p90": 1795100000
+      },
+      "dry_h": {
+       "p10": 2.0,
+       "p50": 2.0,
+       "p90": 2.0
+      }
+     },
+     "events": [
+      {
+       "id": "cedar_ember:full-reset",
+       "account": "max-a",
+       "use_at": {
+        "p10": 1795100000,
+        "p90": 1795100000
+       },
+       "verdict": "wasteful",
+       "reason": "short",
+       "wise_share": 0.0,
+       "worth_h": {
+        "p10": 2.0,
+        "p50": 2.0,
+        "p90": 2.0
+       },
+       "spent": {
+        "p10": 0.02,
+        "p50": 0.02,
+        "p90": 0.02
+       },
+       "lost_share": 1.0
+      }
+     ]
+    }
+   },
+   "expect_not_wise": [
+    "cedar_ember:full-reset"
+   ]
   }
  ]
 }

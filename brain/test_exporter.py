@@ -15202,10 +15202,14 @@ class TestFastWalk(unittest.TestCase):
                                    delta=1e-6 * max(1.0, a["unmet"][row]), msg=(msg, row))
         self.assertEqual(len(a["gifts"]), len(b["gifts"]), msg)
         for x, y in zip(a["gifts"], b["gifts"]):
-            for k in ("at", "acct", "key", "live", "lost"):
+            for k in ("at", "acct", "back_at", "inferred", "blocked"):
                 self.assertEqual(x[k], y[k], (msg, k))
-            for k in ("added", "used", "gain"):
+            for k in ("gain", "points"):
                 self.assertAlmostEqual(x[k], y[k], delta=1e-6, msg=(msg, k))
+        self.assertEqual(set(a["fum"]), set(b["fum"]), (msg, "fum"))
+        for s_ in a["fum"]:
+            self.assertAlmostEqual(a["fum"][s_], b["fum"][s_], delta=1e-6 * max(1.0, a["fum"][s_]),
+                                   msg=(msg, "fum", s_))
 
     def test_a_gifted_walk_resumed_from_a_snapshot_is_the_full_one(self):
         # 69 §4.6: the base walk keeps the start of each step in which a row
@@ -15281,8 +15285,9 @@ class TestFastWalk(unittest.TestCase):
         snaps = {}
         full = ex._fleet_walk_joint(plan, week, gifts=[gift], snaps=snaps)
         rec = full["gifts"][0]
-        self.assertEqual((rec["key"], rec["added"]), (("acct-b", "seven_day"), 60.0))
+        self.assertEqual(rec["back_at"], now + 100 * H, "taken back by the weekly's refill")
         self.assertAlmostEqual(rec["gain"], 90 * 10.12, delta=1e-9, msg="none before the lift")
+        self.assertAlmostEqual(rec["points"], 60 * 10.12, delta=1e-9, msg="the 60 given back")
         at = snaps[full["spells"]["sel-d"][0][0]]
         self.assertEqual(at["t"], gift["at"])
         self.assertEqual(at["frm"]["acct-b"], now + 50.25 * H, "the lift undone")
@@ -15292,11 +15297,6 @@ class TestFastWalk(unittest.TestCase):
         self.assertEqual(later["frm"]["acct-b"], gift["at"])
         on = full["spells"]["sel-a"][0][0]
         self.assertEqual(snaps[on]["t"], now + 50.25 * H)
-        self.assertEqual(snaps[on]["gifts"][0]["used"], 0.0, "drawn from in that step only")
-        self.assertTrue(rec["lost"], "acct-b's refill at 100 h takes what is left")
-        # sel-a draws first: it takes acct-a's last $7 at 50.25 h, and all
-        # work's $7.50 to 51 h and $10 an hour to 100 h fall on acct-b
-        self.assertAlmostEqual(rec["used"], (7.5 + 49 * 10.0) / 10.12, delta=1e-9)
         self.assertEqual(len(snaps), 4)
         for on, snap in snaps.items():
             back = ex._fleet_walk_resume(plan, week, snap, [g for g in [gift] if g["at"] >= snap["t"]])
@@ -15328,18 +15328,20 @@ class TestFastWalk(unittest.TestCase):
         st, rec, t = self.gift_on([{"window": "seven_day", "effect": "refill"}],
                                   anchor="restarts_at_use")
         self.assertEqual(st["W"][("acct-a", "seven_day")], [0.0, t + WEEK])
-        self.assertEqual((rec["key"], rec["added"], rec["live"]), (("acct-a", "seven_day"), 40.0, True))
+        self.assertEqual(rec["back_at"], t + WEEK, "taken back a week on")
         self.assertAlmostEqual(rec["gain"], 400.0, delta=1e-9, msg="$1,000 of room where $600 was")
+        self.assertAlmostEqual(rec["points"], 400.0, delta=1e-9, msg="all of it points")
         st, rec, t = self.gift_on([{"window": "seven_day", "effect": "refill"}])
         self.assertEqual(st["W"][("acct-a", "seven_day")], [0.0, self.NOW + 100 * HOUR], "kept")
+        self.assertEqual(rec["back_at"], self.NOW + 100 * HOUR)
 
     def test_a_give_back_gains_only_what_it_adds(self):
         st, rec, t = self.gift_on([{"window": "seven_day", "effect": "give_back", "points": 25.0}])
         self.assertEqual(st["W"][("acct-a", "seven_day")][0], 15.0)
-        self.assertEqual(rec["added"], 25.0)
         self.assertAlmostEqual(rec["gain"], 250.0, delta=1e-9, msg="$850 of room where $600 was")
         st, rec, t = self.gift_on([{"window": "seven_day", "effect": "give_back", "points": 55.0}])
-        self.assertEqual((st["W"][("acct-a", "seven_day")][0], rec["added"]), (0.0, 40.0), "never below 0")
+        self.assertEqual(st["W"][("acct-a", "seven_day")][0], 0.0, "never below 0")
+        self.assertAlmostEqual(rec["gain"], 400.0, delta=1e-9, msg="the 40 it had used, no more")
 
     def test_a_share_of_give_back_reads_the_use_before_the_refill(self):
         st, rec, t = self.gift_on([{"window": "scoped:X", "effect": "refill"},
@@ -15347,8 +15349,11 @@ class TestFastWalk(unittest.TestCase):
                                     "share_of": "scoped:X", "factor": 0.4}])
         self.assertEqual(st["W"][("acct-a", "scoped:X")][0], 0.0)
         self.assertAlmostEqual(st["W"][("acct-a", "seven_day")][0], 40.0 - 0.4 * 50.0, delta=1e-12)
-        self.assertEqual((rec["key"], rec["added"]), (("acct-a", "scoped:X"), 50.0))
+        # The row binds the weekly alone: the 20 given back there are its
+        # points, taken back at the weekly's refill, not the scoped window's.
+        self.assertEqual(rec["back_at"], self.NOW + 100 * HOUR)
         self.assertAlmostEqual(rec["gain"], 200.0, delta=1e-9)
+        self.assertAlmostEqual(rec["points"], 200.0, delta=1e-9)
 
     def test_a_lift_starts_the_account_at_the_gift(self):
         st, rec, t = self.gift_on([{"window": "seven_day", "effect": "give_back", "points": 0.0}],
@@ -15356,9 +15361,28 @@ class TestFastWalk(unittest.TestCase):
         self.assertEqual(st["frm"]["acct-b"], t)
         self.assertNotIn("acct-b", st["waiting"])
         self.assertAlmostEqual(rec["gain"], 800.0, delta=1e-9, msg="all of acct-b's room, none before")
-        self.assertFalse(rec["live"], "nothing added")
+        self.assertEqual((rec["points"], rec["back_at"]), (0.0, None), "hours, not points")
         st, rec, t = self.gift_on([{"window": "seven_day", "effect": "give_back", "points": 0.0}])
         self.assertEqual(st["waiting"], {"acct-b"})
+
+    def test_the_fleet_unmet_is_every_streams_demand_in_its_dry_hours(self):
+        # 69 §4.8: `fum` keeps, per stream, its demand in the hours its row
+        # is dry. On the hand fleet every stream is flat, so it is the
+        # stream's rate times its group's dry seconds, batches and steps
+        # alike; and it counts only the tracked groups' streams.
+        plan, week = self.hand()
+        st = ex._fleet_walk_joint(plan, week)
+        rates = {None: 10.0, "sel-a": 10.0, "sel-b": 10.0, "sel-d": 1.0}
+        want = {s: r / 3600.0 * st["dry_s"][plan["sgrp"][s]] for s, r in rates.items()}
+        self.assertGreater(sum(want.values()), 0.0)
+        self.assertEqual(set(st["fum"]), set(plan["streams"]))
+        for s, v in want.items():
+            self.assertAlmostEqual(st["fum"][s], v, delta=1e-6, msg=s)
+        g = plan["grp"]["sel-b"]
+        only = ex._fleet_walk_joint(plan, week, track=(g,))
+        self.assertAlmostEqual(only["fum"]["sel-b"], 10.0 / 3600.0 * only["dry_s"][g], delta=1e-6)
+        self.assertEqual(sum(v for s, v in only["fum"].items() if s != "sel-b"), 0.0)
+        self.assertEqual(sum(ex._fleet_walk_joint(plan, week, track=())["fum"].values()), 0.0)
 
     def test_a_gift_at_the_walks_instant_is_taken(self):
         plan, week = self.hand()
@@ -15401,10 +15425,8 @@ class TestFastWalk(unittest.TestCase):
                     "effects": [{"window": "seven_day", "effect": "refill"}]}
             st = ex._fleet_walk_resume(plan, week, snaps[on], [gift], track={g})
             rec = st["gifts"][0]
-            self.assertEqual(rec["key"], ("max-a", "seven_day"))
-            self.assertGreater(rec["added"], 0)
-            self.assertLessEqual(rec["used"], rec["added"])
-            self.assertGreaterEqual(rec["gain"], 0)
+            self.assertGreater(rec["points"], 0)
+            self.assertGreaterEqual(rec["gain"], rec["points"] - 1e-9)
             self.assertLessEqual(st["dry_s"][g], base["dry_s"][g] + 1e-6)
             moved += st["dry_s"][g] < base["dry_s"][g] - 1
         self.assertGreater(moved, 0)
@@ -17905,9 +17927,14 @@ def resets_run(case):
                for c in case["classes"]]
     routes = ex._routes(classes, case.get("lanes", {}), roster)
     models = {f"{c['class']}/{ex._member_id(m)}": m["model"] for c in classes for m in c["members"]}
+    # A window's size: dollars for every model, or {model: dollars} with
+    # the reference model's as the window's.
+    def sized(usd):
+        if isinstance(usd, dict):
+            return (usd.get("claude-opus-5-5", usd.get("gpt-6-astra", max(usd.values()))), dict(usd))
+        return (usd, {"claude-opus-5-5": usd, "claude-fable-5-1": usd, "gpt-6-astra": usd})
     view = fleet_view(
-        {a: {wid: (usd, {"claude-opus-5-5": usd, "claude-fable-5-1": usd, "gpt-6-astra": usd})
-             for wid, usd in ws.items()} for a, ws in case["sizes"].items()},
+        {a: {wid: sized(usd) for wid, usd in ws.items()} for a, ws in case["sizes"].items()},
         providers={"anthropic": {"reference": "claude-opus-5-5", "models": {
                        "claude-opus-5-5": {"basis": "reference", "dollars": 1.0}}},
                    "gpt": {"reference": "gpt-6-astra", "models": {
@@ -17988,10 +18015,26 @@ class TestResetCases(TestFleetCases):
             self.assertTrue(any(x.startswith(f"69 §5.2 case {n}") for x in names), n)
         for d in ("drawing 44", "drawing 45"):
             self.assertTrue(any(x.startswith(d) for x in names), d)
+        # quota-model 71 §3.2: no rule says a rest is not run out; this case
+        # holds the valuation to it on its own.
+        self.assertTrue(any(x.startswith("71 §3.2") for x in names))
         for case in doc["cases"]:
             with self.subTest(case=case["name"]):
                 fleet, _, _ = resets_run(case)
                 self.assertSubset(fleet, case["expect"])
+                self.assert_not_wise(fleet, case.get("expect_not_wise") or ())
+
+    def assert_not_wise(self, fleet, ids):
+        rows = [("proxy", fleet["proxy"])] + sorted(fleet["selections"].items())
+        for eid in ids:
+            seen = 0
+            for row, doc in rows:
+                for e in doc.get("events") or ():
+                    if e["id"] == eid:
+                        seen += 1
+                        self.assertNotEqual(e["verdict"], "wise", (row, eid, {
+                            k: e.get(k) for k in ("reason", "wise_share", "worth_h", "spent")}))
+            self.assertGreater(seen, 0, f"{eid} is listed")
 
     def test_no_clock_only_field(self):
         pass
@@ -18348,17 +18391,17 @@ class TestResetValuation(TestFleetCases):
     def test_it_moves_the_drought(self):
         # max-a's five-hour window is shut for 4 h and its weekly has $30
         # (0.75 h) left: the five-hour refill now serves the 0.75 h sooner
-        # and the weekly wall follows, so the drought only moves: spent
-        # under a tenth, worth 0: wasteful, moves.
+        # and the weekly wall follows, so the drought only moves: worth 0,
+        # and the week's unmet demand is what it was: wasteful, moves, with
+        # no use_at (no start where it removes any) and, a lift, no spent.
         accts = {"max-a": racct(99, 100, [rev("e:five", ("five_hour", "refill"))], five=100,
                                 five_back_h=4)}
         case = rcase(accts, sizes={"max-a": {"seven_day": 3000.0, "five_hour": 400.0}})
         fleet = self.run_case(case)
         ev = ev_of(fleet, "e:five", "capable") if fleet["selections"]["capable"]["events"] \
             else ev_of(fleet, "e:five")
-        self.assertEqual((ev["verdict"], ev["reason"]), ("wasteful", "moves"))
-        self.assertEqual(ev["worth_h"]["p50"], 0.0)
-        self.assertGreater(ev["spent"]["p50"], 0.0)
+        self.assertEqual((ev["verdict"], ev["reason"], ev["use_at"]), ("wasteful", "moves", None))
+        self.assertEqual((ev["worth_h"]["p50"], ev["spent"]), (0.0, None))
 
     def test_no_gain_when_no_week_has_one_and_not_when_one_does(self):
         # The five-hour refill on an account its weekly walls: it touches a
@@ -18534,18 +18577,37 @@ class TestResetValuation(TestFleetCases):
         small = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:small")
         self.assertEqual((small["verdict"], small["reason"]), ("wasteful", "after"))
 
-    def test_valued_at_the_last_drought_before_it_expires(self):
+    def test_valued_among_the_droughts_before_it_expires(self):
         # Two droughts: 34 h -> 82 h and, after max-a's refill carries 63 h,
-        # 145 h -> H. A reset expiring at 100 h is valued at the first; one
-        # with no expiry at the first too (the earliest start that gains).
+        # 145 h -> H. With B preferred, A's room is drawn only once B is
+        # out, so used now the reset does what it does at 34 h (48 h; the
+        # spell takes a tie): a reset expiring at 100 h is valued at the
+        # first spell, the only start before it expires; one expiring at
+        # 160 h at the first too, where it removes 48 h against the
+        # second's 23 (69 §4.8: the start where it does the most, among
+        # those before it expires, and now where that does more). With no
+        # preference A is drawn first: used now its $2,520 serve from now
+        # and B's room is kept, and the drought shrinks by 63 h, where at
+        # 34 h A's refill at 82 h takes back $600 it had not spent: now,
+        # under either expiry, and nothing beside it.
         accts = {"max-a": racct(100, 82, [rev("e:r", to_in=100 * HOUR)]), "max-b": racct(66, 300)}
         sizes = {"max-a": {"seven_day": 2520.0}, "max-b": {"seven_day": 4000.0}}
-        ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:r")
+        pref = {"capable": "max-b"}
+        ev = ev_of(self.run_case(rcase(accts, sizes=sizes, preferred=pref)), "e:r")
         self.assertSubset(ev["use_at"], {"p10": self.at(34), "p90": self.at(34)})
+        self.assertEqual((ev["worth_h"]["p50"], ev["spent"]["p50"]), (48.0, 0.76))
+        self.assertEqual((ev["now"]["worth_h"]["p50"], ev["now"]["verdict"]), (48.0, "wise"))
         accts["max-a"]["events"] = [rev("e:r", to_in=160 * HOUR)]
-        ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:r")
-        self.assertSubset(ev["use_at"], {"p10": self.at(145), "p90": self.at(145)},
-                         "the latest start before it expires")
+        ev = ev_of(self.run_case(rcase(accts, sizes=sizes, preferred=pref)), "e:r")
+        self.assertSubset(ev["use_at"], {"p10": self.at(34), "p90": self.at(34)},
+                         "the start where it does the most")
+        self.assertEqual(ev["worth_h"]["p50"], 48.0)
+        for to in (100, 160):
+            accts["max-a"]["events"] = [rev("e:r", to_in=to * HOUR)]
+            ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:r")
+            self.assertSubset(ev["use_at"], {"p10": RNOW, "p90": RNOW}, f"expiring at {to} h")
+            self.assertEqual((ev["verdict"], ev["worth_h"]["p50"], ev["spent"]["p50"], ev["lost_share"],
+                              ev["now"]), ("wise", 63.0, 1.0, 0.0, None), to)
 
     def test_supply_order_is_honoured_in_turn(self):
         # e:first is next in line but worth less alone than e:big: e:big
@@ -18558,9 +18620,11 @@ class TestResetValuation(TestFleetCases):
         self.assertEqual((first["verdict"], first["step"]), ("wise", 1))
         self.assertEqual((big["after"], big["step"]), ("e:first", 2))
         self.assertLess(big["rank"], first["rank"], "ranked by worth alone")
-        # Named next but never planned (no gap for it): the sibling waits for good.
+        # Named next but never planned (it expires before the wall, and the
+        # provider allows it only at the limit, so not now): the sibling
+        # waits for good.
         accts["max-a"]["events"][0] = rev("e:first", ("seven_day", "give_back", 20), order=1,
-                                          to_in=HOUR // 2)
+                                          to_in=HOUR // 2, only_at_limit=True)
         accts["max-a"]["windows"]["seven_day"]["used"] = 90
         big = ev_of(self.run_case(rcase(accts)), "e:big")
         self.assertEqual((big["verdict"], big["reason"]), ("unusable", "not_next"))
@@ -18576,7 +18640,10 @@ class TestResetValuation(TestFleetCases):
             {"kind": "anthropic", "lane": "fable", "model": "claude-fable-5-1", "priority": 1}]}]
         fable = {"period_s": WEEK, "scope": "Fable", "used": 40, "resets_in": 10 * HOUR,
                  "weekly_share": {"allowance_pct_of_weekly": 40.0, "used_pct_of_weekly": 16.0}}
-        ev_ = rev("e:fable", ("scoped:Fable", "refill"), ("seven_day", "give_back", 16, "scoped:Fable"))
+        # (Allowed only at the limit: used now, before Fable refills, the
+        # stated points would be read, and that does more.)
+        ev_ = rev("e:fable", ("scoped:Fable", "refill"), ("seven_day", "give_back", 16, "scoped:Fable"),
+                  only_at_limit=True)
         accts = {"max-a": racct(60, 100, [ev_])}
         accts["max-a"]["windows"]["scoped:Fable"] = fable
         sizes = {"max-a": {"seven_day": 3000.0, "scoped:Fable": 3000.0}}
@@ -18623,7 +18690,9 @@ class TestResetValuation(TestFleetCases):
         # 10 h: the 16 points stated ($480), read.
         fable = {"period_s": WEEK, "scope": "Fable", "used": 40, "resets_in": 10 * HOUR,
                  "weekly_share": {"allowance_pct_of_weekly": 40.0, "used_pct_of_weekly": 16.0}}
-        ev_ = rev("e:fable", ("scoped:Fable", "refill"), ("seven_day", "give_back", 16, "scoped:Fable"))
+        # (Allowed only at the limit, so the wall is its start, not now.)
+        ev_ = rev("e:fable", ("scoped:Fable", "refill"), ("seven_day", "give_back", 16, "scoped:Fable"),
+                  only_at_limit=True)
         accts = {"max-a": racct(90, 100, [ev_])}
         accts["max-a"]["windows"]["scoped:Fable"] = fable
         sizes = {"max-a": {"seven_day": 3000.0}}
@@ -18677,15 +18746,313 @@ class TestResetValuation(TestFleetCases):
         self.assertEqual((ev["verdict"], ev["worth_h"]["p50"]), ("wise", 22.5))
 
     def test_a_limits_spent_counts_only_the_room_above_the_cap(self):
-        # The limit's gift is the 50 points above the full cap. Used at the
-        # wall (37.5 h) to its end at 60 h, A draws 30 of them: 0.6. Used
-        # now at 50 %, A draws 80 points by 60 h, of which 30 above the cap:
-        # 0.6 too, not the 50 points of draws under it.
+        # The limit's gift is the 50 points above the full cap ($1,500). Used
+        # at the wall (37.5 h) to its end at 60 h, it meets the 22.5 h the
+        # week had no room for ($900): 0.6. Used now at 50 %, the same 22.5
+        # h: 0.6 too, not the 50 points of draws under the cap.
         accts = {"max-a": racct(50, 100, [rev("e:lim", ("seven_day", "limit", 1.5, 60 * HOUR))])}
         ev = ev_of(self.run_case(rcase(accts)), "e:lim")
         self.assertEqual(ev["spent"]["p50"], 0.6)
         self.assertEqual(ev["now"]["spent"]["p50"], 0.6)
         self.assertEqual(ev["now"]["worth_h"]["p50"], 22.5)
+
+    def test_spent_is_the_demand_the_gift_meets(self):
+        # 69 §4.8: `spent` is the week's unmet demand the gift removes, as a
+        # share of the room its points give the row. A at 50 % with the week
+        # back at 100 h, $10 an hour: no gap, so the refill used now meets
+        # nothing; none of it is spent and all of it is lost to the refill.
+        accts = {"max-a": racct(50, 100, [rev("e:r")])}
+        ev = ev_of(self.run_case(rcase(accts, usd_h=10.0)), "e:r")
+        self.assertEqual((ev["verdict"], ev["reason"]), ("wasteful", "no_gap"))
+        self.assertEqual((ev["now"]["spent"]["p50"], ev["now"]["lost_share"]), (0.0, 1.0))
+        # At $20 an hour A's own 50 last 75 h: the refill's 50 ($1,500) meet
+        # the 25 h to 100 h ($500), a third of it.
+        ev = ev_of(self.run_case(rcase(accts, usd_h=20.0)), "e:r")
+        self.assertEqual((ev["now"]["spent"]["p50"], ev["now"]["lost_share"]), (0.33, 1.0))
+        # At $40 an hour A walls at 37.5 h: used now the refill meets 37.5 h
+        # ($1,500), all of it, none lost. Used at the wall its 100 points
+        # ($3,000) meet the 62.5 h to the refill ($2,500): 0.83.
+        ev = ev_of(self.run_case(rcase(accts, usd_h=40.0)), "e:r")
+        self.assertEqual((ev["now"]["spent"]["p50"], ev["now"]["lost_share"]), (1.0, 0.0))
+        self.assertEqual((ev["spent"]["p50"], ev["lost_share"]), (0.83, 1.0))
+        # A give-back of 30 at 60 % used now, $40 an hour ($30 a point): A
+        # walls at 30 h without it, at 52.5 h with it: 22.5 h met ($900), all
+        # of the 30 given back. At $10 an hour the week never walls: 0.
+        accts = {"max-a": racct(60, 100, [rev("e:g", ("seven_day", "give_back", 30))])}
+        ev = ev_of(self.run_case(rcase(accts, usd_h=40.0)), "e:g")
+        self.assertEqual((ev["now"]["spent"]["p50"], ev["now"]["lost_share"]), (1.0, 0.0))
+        ev = ev_of(self.run_case(rcase(accts, usd_h=10.0)), "e:g")
+        self.assertEqual(ev["now"]["spent"]["p50"], 0.0, "the week never walls")
+
+    def test_spent_reads_the_whole_forecast_not_the_rows_own_draws(self):
+        # 69 §4.8: a reset is judged by its effect on the whole forecast. A
+        # at the wall, preferred, with B holding $3,000 of room, both back
+        # at 100 h. At $20 an hour B's room carries the week: no gap. A's
+        # refill used now puts A first again and it draws $2,000 of its
+        # points back before 100 h, but B would have served every one of
+        # those hours: the reset meets nothing, spent 0, not 0.67.
+        accts = {"max-a": racct(100, 100, [rev("e:r")]), "max-b": racct(0, 100)}
+        fleet = self.run_case(rcase(accts, usd_h=20.0, preferred={"capable": "max-a"}))
+        self.assertEqual(fleet["proxy"]["forecast"]["dry_h"]["p50"], 0.0)
+        ev = ev_of(fleet, "e:r")
+        self.assertEqual((ev["verdict"], ev["reason"]), ("wasteful", "no_gap"))
+        self.assertEqual((ev["now"]["spent"]["p50"], ev["now"]["lost_share"]), (0.0, 1.0))
+        # At $40 an hour B runs out at 75 h: a 25 h drought. The refill at
+        # the wall meets it ($1,000 of $3,000): 0.33, wise by the day it
+        # removes. Used now A draws all 100 of its points back by 75 h, and
+        # still meets the same 25 h: 0.33, not 1.0.
+        fleet = self.run_case(rcase(accts, preferred={"capable": "max-a"}))
+        self.assertEqual(fleet["proxy"]["forecast"]["dry_h"]["p50"], 25.0)
+        ev = ev_of(fleet, "e:r")
+        self.assertEqual((ev["verdict"], ev["worth_h"]["p50"], ev["spent"]["p50"]), ("wise", 25.0, 0.33))
+        self.assertEqual((ev["now"]["worth_h"]["p50"], ev["now"]["spent"]["p50"]), (25.0, 0.33))
+
+    def test_a_row_the_week_never_needs_the_reset_for_is_not_wise(self):
+        # capable stops at 60 % on the weekly, and draws $2 an hour; free
+        # draws the rest of the account at $10. A at 50 is back in 40 h: the
+        # week puts A past 60 at 25 h and capable is out the 15 h to 40 h,
+        # $30 of its work; free never runs out, and after the refill the
+        # $3,000 carry past the horizon. A's refill at capable's wall gives
+        # it 60 points ($1,800) and meets that $30: 0.02, wasteful, though
+        # the week draws $180 on A after it.
+        capped = [{"class": "capable", "members": [
+            {"kind": "anthropic", "lane": "opus", "model": "claude-opus-5-5", "priority": 1,
+             "stop_at": {"window": "effective", "level": 60}}]},
+                  {"class": "free", "members": [
+            {"kind": "anthropic", "lane": "opus", "model": "claude-opus-5-5", "priority": 1}]}]
+        accts = {"max-a": racct(50, 40, [rev("e:r")])}
+        fleet = self.run_case(rcase(accts, classes=capped,
+                                    weeks=[{"share": 1.0, "usd_h": {"capable": 2.0, "free": 10.0}}]))
+        self.assertIsNone(fleet["selections"]["free"]["events"], "free never runs out")
+        ev = ev_of(fleet, "e:r", "capable")
+        self.assertEqual((ev["verdict"], ev["reason"], ev["worth_h"]["p50"]), ("wasteful", "short", 15.0))
+        self.assertEqual((ev["gain"]["p50"], ev["spent"]["p50"], ev["lost_share"]), (1800.0, 0.02, 1.0))
+
+    def test_a_rest_is_no_gap_of_its_own(self):
+        # 71 §3.2's case: A and B each 30 % in, back at 100 h and 120 h,
+        # both resting their 5-hour windows (3 h and 2 h); A holds a full
+        # reset. "Paused isn't out" falls out of the valuation with no rule
+        # on rests (69 §4.8): used now the reset ends A's rest and gives back
+        # its 30 % ($900); up to $40 an hour the two weeklies' $4,200 carry
+        # the week to A's refill, so the reset meets only the rest's 2 h and
+        # the 30 % is lost: wasteful at every such burn, by the same spent.
+        doc = json.load(open(RESETS_CASES))
+        case = next(c for c in doc["cases"] if c["name"].startswith("71 §3.2"))
+        for usd in (10.0, 25.0, 30.0, 40.0):
+            with self.subTest(usd_h=usd):
+                case["weeks"] = [{"share": 1.0, "usd_h": {"capable": usd}}]
+                ev = ev_of(self.run_case(case), "cedar_ember:full-reset")
+                self.assertEqual((ev["verdict"], ev["reason"], ev["worth_h"]["p50"]),
+                                 ("wasteful", "short", 2.0))
+                self.assertAlmostEqual(ev["spent"]["p50"], 2 * usd / 900.0, delta=0.006)
+                self.assertEqual(ev["lost_share"], 1.0)
+        # At $60 an hour the weeklies run out at 72 h and the 30 % is spent
+        # before 100 h: wise, and as wise with no rest at all; the week, not
+        # the rest, decides it. The reset is used where it does the most
+        # (69 §4.8): at A's wall at 72 h, where it refills the whole weekly
+        # and removes 28 h, not during the rest, where it would give back 30
+        # % and remove 15 h; "use it now" is said beside it, with the 15.
+        case["weeks"] = [{"share": 1.0, "usd_h": {"capable": 60.0}}]
+        ev = ev_of(self.run_case(case), "cedar_ember:full-reset")
+        self.assertSubset(ev["use_at"], {"p10": self.at(72), "p90": self.at(72)})
+        self.assertEqual((ev["verdict"], ev["spent"]["p50"], ev["worth_h"]["p50"]), ("wise", 0.56, 28.0))
+        self.assertEqual((ev["now"]["worth_h"]["p50"], ev["now"]["spent"]["p50"]), (15.0, 1.0))
+        for a in case["accounts"].values():
+            a["windows"].pop("five_hour")
+        ev = ev_of(self.run_case(case), "cedar_ember:full-reset")
+        self.assertSubset(ev["use_at"], {"p10": self.at(70), "p90": self.at(70)})
+        self.assertEqual((ev["verdict"], ev["worth_h"]["p50"], ev["spent"]["p50"]), ("wise", 30.0, 0.6))
+
+    def test_a_lift_and_a_full_reset_on_a_resting_account(self):
+        # One account, 30 % in and back at 100 h, resting 3 h. The 5-hour
+        # refill alone gives hours, not points (69 §4.8): at $20 an hour the
+        # 3 h are a real gap and nothing later needs the account more (its
+        # $2,100 carry 105 h), so it is wise on the hours; the full reset
+        # gives the same 3 h and $900 the week never spends: wasteful. At
+        # $40 the account's room lasts 52.5 h: the lift only moves the
+        # drought; the full reset does the most at the wall at 55.5 h, the
+        # whole weekly for 44.5 h of the 44.5 h drought (0.59 of $3,000):
+        # wise, with "use it now" beside it (22.5 h, its $900 all spent:
+        # wise too, but less). A lift's `spent` is null, not 0: it has no
+        # points to spend; and one that removes nothing has no use_at.
+        sizes = {"max-a": {"seven_day": 3000.0, "five_hour": 400.0}}
+        lift, full = [("five_hour", "refill")], [("seven_day", "refill"), ("five_hour", "refill")]
+        want = {(20.0, "lift"): ("wise", None, 3.0, None, 0), (20.0, "full"): ("wasteful", "short", 3.0, 0.07, 0),
+                (40.0, "lift"): ("wasteful", "moves", 0.0, None, None),
+                (40.0, "full"): ("wise", None, 44.5, 0.59, 55.5)}
+        for (usd, kind), figs in want.items():
+            with self.subTest(usd_h=usd, kind=kind):
+                effs = lift if kind == "lift" else full
+                accts = {"max-a": racct(30, 100, [rev("e:x", *effs)], five=100, five_back_h=3)}
+                ev = ev_of(self.run_case(rcase(accts, usd_h=usd, sizes=sizes)), "e:x")
+                self.assertEqual((ev["verdict"], ev["reason"], ev["worth_h"]["p50"], ev["spent"] and ev["spent"]["p50"],
+                                  ev["use_at"] and (ev["use_at"]["p10"] - RNOW) / HOUR), figs)
+                if kind == "lift":
+                    self.assertIsNone(ev["lost_share"])
+                if kind == "full" and usd == 40.0:
+                    self.assertEqual((ev["now"]["worth_h"]["p50"], ev["now"]["spent"]["p50"],
+                                      ev["now"]["verdict"], ev["now"]["reason"]),
+                                     (22.5, 1.0, "wise", None))
+
+    def test_a_lift_is_wise_on_a_real_gap_with_nothing_after(self):
+        # 69 §9: a lift reads wise when it fills a gap no account has room
+        # for and nothing later needs it more. A alone at 50 %, back at 30 h,
+        # resting 4 h, $40 an hour: its $1,500 carry 37.5 h, past its
+        # refill, so the 4 h are the week's whole drought: wise, worth 4 h,
+        # with no points to spend.
+        sizes = {"max-a": {"seven_day": 3000.0, "five_hour": 400.0}}
+        accts = {"max-a": racct(50, 30, [rev("e:five", ("five_hour", "refill"))], five=100,
+                                five_back_h=4)}
+        ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:five")
+        self.assertEqual((ev["verdict"], ev["worth_h"]["p50"], ev["spent"], ev["lost_share"]),
+                         ("wise", 4.0, None, None))
+        # With B holding room the rest is no gap: nothing to fill.
+        accts["max-b"] = racct(50, 30)
+        both = dict(sizes, **{"max-b": sizes["max-a"]})
+        ev = ev_of(self.run_case(rcase(accts, sizes=both)), "e:five")
+        self.assertEqual((ev["verdict"], ev["reason"]), ("wasteful", "no_gap"))
+        # Alone again, with the weekly back at 100 h: A's room runs out at
+        # 37.5 h, a bigger gap the lift cannot take (it ends a rest, and at
+        # the wall there is none to end: no gain there), so the hours it
+        # gives now are taken from then: moves, with no use_at (no start
+        # where it removes any drought) and no points to spend.
+        del accts["max-b"]
+        accts["max-a"]["windows"]["seven_day"]["resets_in"] = 100 * HOUR
+        ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:five")
+        self.assertEqual((ev["verdict"], ev["reason"], ev["worth_h"]["p50"], ev["use_at"], ev["spent"]),
+                         ("wasteful", "moves", 0.0, None, None))
+
+    def test_use_at_is_the_start_where_the_reset_does_the_most(self):
+        # 69 §4.8: every spell start with a gain is walked and the reset is
+        # used where it removes the most drought, the earliest on a tie. A
+        # at the wall, back at 20 h; B at 90 % carries 7.5 h; $40 an hour:
+        # dry 7.5 h to 20 h, then A's refill carries 75 h, dry again from
+        # 95 h to the horizon (73 h). A's reset at the first spell removes
+        # the 12.5 h and is reset to full at 20 h anyway; at the second it
+        # removes the 73 h: use_at 95 h, wise, where the first spell read
+        # wasteful, short. "Use it now" is beside it: used now, A serves
+        # first and B's 7.5 h are kept for after A's refill, 20 h in all.
+        accts = {"max-a": racct(100, 20, [rev("e:r")]), "max-b": racct(90, 300)}
+        ev = ev_of(self.run_case(rcase(accts)), "e:r")
+        self.assertSubset(ev["use_at"], {"p10": self.at(95), "p90": self.at(95)})
+        self.assertEqual((ev["verdict"], ev["worth_h"]["p50"], ev["spent"]["p50"]), ("wise", 73.0, 0.97))
+        self.assertEqual((ev["now"]["worth_h"]["p50"], ev["now"]["spent"]["p50"]), (20.0, 0.27))
+        # Two spells the reset does the same at take the earlier. A and B
+        # at the wall, A back at 10 h and B at 60 h, $100 an hour: dry now
+        # to 10 h, A's refill carries 30 h, dry 40 h to 60 h, B's carries
+        # 30 h, dry from 90 h. A's reset at 40 h serves 40 h to 70 h (B's
+        # room then runs to 100 h); at 90 h it serves 90 h to 120 h: 30 h
+        # either way, all spent, so 40 h. Now, the first spell's start,
+        # removes 10 h: used now it is taken back by A's own refill at 10
+        # h, and that is beside it.
+        accts = {"max-a": racct(100, 10, [rev("e:r")]), "max-b": racct(100, 60)}
+        ev = ev_of(self.run_case(rcase(accts, usd_h=100.0)), "e:r")
+        self.assertSubset(ev["use_at"], {"p10": self.at(40), "p90": self.at(40)})
+        self.assertEqual((ev["verdict"], ev["worth_h"]["p50"], ev["spent"]["p50"]), ("wise", 30.0, 1.0))
+        self.assertEqual((ev["now"]["worth_h"]["p50"], ev["now"]["spent"]["p50"], ev["now"]["verdict"],
+                          ev["now"]["reason"]), (10.0, 0.33, "wasteful", "short"))
+
+    def test_spent_is_in_the_gifts_points_whatever_each_stream_pays(self):
+        # 69 §4.8: the unmet demand the gift removes is priced on the window
+        # that binds the row's room after it, at each stream's own price
+        # there. A point of A's weekly is $30 of Opus (capable) and $60 of
+        # Fable (deep). A alone at the wall, back in 23 h, capable at $10
+        # an hour and deep at $100: in the 23 h the reset serves they draw
+        # 7.7 + 38.3 = 46 of its 100 points, the rest taken back by A's own
+        # refill: 0.46, wasteful (short) on both rows, where deep's dollars
+        # over capable's points read 0.84 and wise. With deep idle, 0.08;
+        # with capable idle and the deep row read off all work's walk
+        # (§4.9), 0.38, not 0.77 in the mix's dollars. Back in 100 h the
+        # whole gap is served: 66.7 points at $10 and $20, 0.67.
+        two = [{"class": "capable", "members": [
+            {"kind": "anthropic", "lane": "opus", "model": "claude-opus-5-5", "priority": 1}]},
+               {"class": "deep", "members": [
+            {"kind": "anthropic", "lane": "fable", "model": "claude-fable-5-1", "priority": 1}]}]
+        sizes = {"max-a": {"seven_day": {"claude-opus-5-5": 3000.0, "claude-fable-5-1": 6000.0}}}
+        for back, cap_usd, deep_usd, spent, verdict in ((23, 10.0, 100.0, 0.46, "wasteful"),
+                                                        (23, 10.0, 0.0, 0.08, "wasteful"),
+                                                        (23, 0.0, 100.0, 0.38, "wasteful"),
+                                                        (100, 10.0, 20.0, 0.67, "wise")):
+            accts = {"max-a": racct(100, back, [rev("e:r")])}
+            fleet = self.run_case(rcase(accts, classes=two, sizes=sizes,
+                                        weeks=[{"share": 1.0, "usd_h": {"capable": cap_usd, "deep": deep_usd}}]))
+            for row in ("capable", "deep"):
+                ev = ev_of(fleet, "e:r", row)
+                self.assertEqual((ev["verdict"], ev["spent"]["p50"], ev["worth_h"]["p50"]),
+                                 (verdict, spent, float(back)), (back, cap_usd, deep_usd, row))
+
+    def test_spent_reads_every_rows_unmet_against_the_same_base(self):
+        # 69 §4.8: the gifted walk counts every stream's unmet, as the base
+        # walk does, so a row the gift cannot help takes nothing off it.
+        # capable draws on A (Opus) then B (a gpt account); deep on A's
+        # Fable window alone, spent all week with its refill past the
+        # horizon. A at the wall, back at 80 h; B full carries 75 h: capable
+        # dry 75 h to 80 h and 155 h to the horizon; deep dry all week, and
+        # A's weekly reset is no gain to it. Used now the reset serves the
+        # 18 h ($720 of $3,000: 0.24, wasteful, short); a walk that counted
+        # only capable's unmet would read deep's whole week as removed, 1.0,
+        # and wise.
+        accts = {"max-a": racct(100, 80, [rev("e:r")]), "max-b": racct(0, 300, provider="gpt")}
+        accts["max-a"]["windows"]["scoped:Fable"] = {"period_s": WEEK, "scope": "Fable", "used": 100,
+                                                     "resets_in": 300 * HOUR}
+        classes = [{"class": "capable", "members": [
+            {"kind": "anthropic", "lane": "opus", "model": "claude-opus-5-5", "priority": 1},
+            {"kind": "provider", "provider": "gpt", "model": "gpt-6-astra", "priority": 2}]},
+                   {"class": "deep", "members": [
+            {"kind": "anthropic", "lane": "fable", "model": "claude-fable-5-1", "priority": 1}]}]
+        fleet = self.run_case(rcase(accts, classes=classes,
+                                    weeks=[{"share": 1.0, "usd_h": {"capable": 40.0, "deep": 40.0}}]))
+        self.assertEqual((fleet["proxy"]["forecast"]["dry_h"]["p50"],
+                          fleet["selections"]["deep"]["forecast"]["dry_h"]["p50"]), (18.0, 168.0))
+        ev = ev_of(fleet, "e:r")
+        self.assertSubset(ev["use_at"], {"p10": RNOW, "p90": RNOW})
+        self.assertEqual((ev["verdict"], ev["reason"], ev["worth_h"]["p50"], ev["spent"]["p50"]),
+                         ("wasteful", "short", 18.0, 0.24))
+        deep = ev_of(fleet, "e:r", "deep")
+        self.assertEqual((deep["verdict"], deep["reason"]), ("no_gain", "seven_day"))
+
+    def test_spent_is_the_same_whichever_effect_the_provider_lists_first(self):
+        # 69 §4.6, 65 §5: a Fable reset refills the Fable window and gives
+        # back its share of the weekly. On a Fable row the weekly binds (at
+        # 100 used, 30 given back: $900, the gain; the Fable window has 100
+        # room after its refill), and the reset meets the 22.5 h to the
+        # refill ($900): wise, spent 1.0, whichever effect the provider
+        # lists first.
+        deep = [{"class": "deep", "members": [
+            {"kind": "anthropic", "lane": "fable", "model": "claude-fable-5-1", "priority": 1}]}]
+        sizes = {"max-a": {"seven_day": 3000.0, "scoped:Fable": 3000.0}}
+        refill, back = ("scoped:Fable", "refill"), ("seven_day", "give_back", 30, "scoped:Fable")
+        for label, effects in (("refill first", (refill, back)), ("give-back first", (back, refill))):
+            with self.subTest(order=label):
+                accts = {"max-a": racct(100, 100, [rev("e:fable", *effects)])}
+                accts["max-a"]["windows"]["scoped:Fable"] = {
+                    "period_s": WEEK, "scope": "Fable", "used": 60, "resets_in": 100 * HOUR,
+                    "weekly_share": {"allowance_pct_of_weekly": 40.0, "used_pct_of_weekly": 30.0}}
+                fleet = self.run_case(rcase(accts, sizes=sizes, classes=deep,
+                                            weeks=[{"share": 1.0, "usd_h": {"deep": 40.0}}]))
+                ev = ev_of(fleet, "e:fable", "deep")
+                self.assertEqual((ev["verdict"], ev["gain"]["p50"], ev["worth_h"]["p50"]),
+                                 ("wise", 900.0, 22.5))
+                self.assertEqual((ev["spent"]["p50"], ev["lost_share"]), (1.0, 0.0))
+
+    def test_the_gifts_points_are_no_more_than_the_row_gains(self):
+        # capable stops at 60 % on the weekly. A at 80 used is past it: the
+        # row is out, and a give-back of 50 now puts A at 30, of which the
+        # row can draw 30 before its own cap: the gift for it is 30 points
+        # ($900, the gain), not 50, and it spends every one by 22.5 h. The
+        # row's use_at is its second spell, at 145 h after A's refill, where
+        # A at 60 gives the row all 50 ($1,500) for the 23 h to the horizon:
+        # half an hour more (69 §4.8); "use it now" carries the 30.
+        capped = [{"class": "capable", "members": [
+            {"kind": "anthropic", "lane": "opus", "model": "claude-opus-5-5", "priority": 1,
+             "stop_at": {"window": "effective", "level": 60}}]}]
+        accts = {"max-a": racct(80, 100, [rev("e:g", ("seven_day", "give_back", 50))])}
+        ev = ev_of(self.run_case(rcase(accts, classes=capped)), "e:g", "capable")
+        self.assertEqual((ev["now"]["gain"]["p50"], ev["now"]["spent"]["p50"], ev["now"]["worth_h"]["p50"]),
+                         (900.0, 1.0, 22.5))
+        self.assertSubset(ev["use_at"], {"p10": self.at(145), "p90": self.at(145)})
+        self.assertEqual((ev["gain"]["p50"], ev["spent"]["p50"], ev["worth_h"]["p50"]),
+                         (1500.0, 0.61, 23.0))
 
     def test_an_anchor_that_restarts_at_use(self):
         for anchor in ("restarts_at_use", "restarts_now"):
@@ -18711,10 +19078,10 @@ class TestResetValuation(TestFleetCases):
         self.assertSubset(ev["use_at"], {"p10": RNOW, "p90": RNOW})
         self.assertEqual(ev["worth_h"]["p50"], 4.0)
         # With the weekly back later than A's room lasts, the lift only moves
-        # the drought.
+        # the drought: no start where it removes any, so no use_at.
         accts["max-a"]["windows"]["seven_day"]["resets_in"] = 100 * HOUR
         ev = ev_of(self.run_case(rcase(accts, sizes=sizes)), "e:five")
-        self.assertEqual((ev["worth_h"]["p50"], ev["reason"]), (0.0, "moves"))
+        self.assertEqual((ev["worth_h"]["p50"], ev["reason"], ev["use_at"]), (0.0, "moves", None))
 
     def test_a_row_neither_shown_nor_out_now_has_none(self):
         accts, _ = self.verdict_pool(1.0)
@@ -18725,20 +19092,23 @@ class TestResetValuation(TestFleetCases):
                          [{"id": "e:r", "usable": True, "expires_at": None}])
 
     def test_the_walks_are_counted(self):
-        # §4.9: per distinct week, E alone (resumed), in turn after the first
-        # planned one, E used now; no plan walk. Here e:two in turn finds no
-        # gap left after e:one: no walk at all.
+        # §4.9: per distinct week, E alone (resumed) and E used now (a
+        # candidate start, and the "now" figures' walk), in turn after the
+        # first planned one; no plan walk. Here e:two in turn finds no gap
+        # left after e:one: only its now walk.
         case = rcase({"max-a": racct(100, 82, [rev("e:one"), rev("e:two", ("seven_day", "give_back", 80))]),
                       "max-b": racct(66, 144)},
                      sizes={"max-a": {"seven_day": 2520.0}, "max-b": {"seven_day": 4000.0}})
         _, res, _ = resets_run(case)
-        self.assertEqual(res["walks"], {"resumed": 2, "full": 0, "now": 2})
-        # Drawing 45: three alone, two in turn; three used now and the two
-        # weeks the out-now rows read against (each prefix of the plan).
+        self.assertEqual(res["walks"], {"resumed": 2, "full": 0, "now": 3})
+        # Drawing 45: three alone and two in turn, each at the spell that
+        # starts now (resumed); used now beside a spell start for the two
+        # in turn, and the two weeks the out-now rows read against (each
+        # prefix of the plan).
         with open(RESETS_CASES) as f:
             case = next(c for c in json.load(f)["cases"] if c["name"].startswith("drawing 45"))
         _, res, _ = resets_run(case)
-        self.assertEqual(res["walks"], {"resumed": 5, "full": 0, "now": 5})
+        self.assertEqual(res["walks"], {"resumed": 5, "full": 0, "now": 4})
 
     def test_a_drivers_annotator_adds_to_each_published_row(self):
         # providers.EVENT_ROW_ANNOTATORS: a driver adds keys to an event's

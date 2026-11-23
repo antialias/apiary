@@ -9222,6 +9222,7 @@ def _fleet_walk_plan(accts, binds, orders, now):
         "streams": streams, "srow": srow, "sgrp": {s: grp[srow[s]] for s in streams},
         "orders": {s: list(orders.get(s) or ()) for s in streams}, "binds": binds,
         "terms": terms, "racc": {g: list(binds[g]) for g in gs},
+        "pp": {g: {k: pp for ts in terms[g].values() for k, _, pp in ts} for g in gs},
         "members": {g: [row for row in rows if grp[row] == g] for g in gs},
         "full": {g: _fleet_walk_full(accts, binds[g]) for g in gs},
         "W0": {(a, wid): (w["used"], w["next"]) for a, v in accts.items()
@@ -9288,7 +9289,8 @@ def _fleet_walk_start(plan):
             "waiting": {a for a, v in plan["frm"].items() if v > plan["now"]},
             "dry_from": dict.fromkeys(gs), "dry_at": dict.fromkeys(gs),
             "dry_s": dict.fromkeys(gs, 0.0), "unmet": dict.fromkeys(plan["rows"], 0.0),
-            "spells": {g: [] for g in gs}, "gifts": [], "scale": {}}
+            "fum": dict.fromkeys(plan["streams"], 0.0), "spells": {g: [] for g in gs},
+            "gifts": [], "scale": {}}
 
 
 def _fleet_walk_copy(st):
@@ -9297,17 +9299,20 @@ def _fleet_walk_copy(st):
             "cur": dict(st["cur"]), "t": st["t"], "i": st["i"], "first": st["first"],
             "waiting": set(st["waiting"]), "dry_from": dict(st["dry_from"]),
             "dry_at": dict(st["dry_at"]), "dry_s": dict(st["dry_s"]),
-            "unmet": dict(st["unmet"]), "spells": {g: [x[:] for x in v]
-                                                   for g, v in st["spells"].items()},
+            "unmet": dict(st["unmet"]), "fum": dict(st["fum"]),
+            "spells": {g: [x[:] for x in v] for g, v in st["spells"].items()},
             "gifts": [dict(r) for r in st["gifts"]], "scale": dict(st["scale"])}
 
 
 def _fleet_walk_joint(plan, week, st=None, gifts=(), track=None, rooms=None, snaps=None,
-                      unmet=True, walls=None, abort=None):
+                      unmet=True, walls=None, abort=None, snap_for=None):
     """One sampled week walked (69 §4.6), from `st` (a fresh start when
     None; a given state is changed) to the horizon. -> the state: per group
     of rows sharing their terms dry_at (None for never), dry_s and its dry
-    spells [[start, end]]; per row unmet (with `unmet`); a record per gift.
+    spells [[start, end]]; per row unmet (with `unmet`); `fum`, the week's
+    unmet demand per stream, dollars of the stream's own work in the hours
+    its row is dry (69 §4.8's `spent` reads a gift's effect on it, each
+    stream's at its own price on the gift's window); a record per gift.
 
     The walk steps to each instant (a refill, an account's `from`, a gift)
     and each wall, and between them takes whole hours in one batch from the
@@ -9319,11 +9324,12 @@ def _fleet_walk_joint(plan, week, st=None, gifts=(), track=None, rooms=None, sna
     gifts: [{at, acct, effects, anchor, lift, row}] sorted by at, each
     applied at its instant (_fleet_walk_gift). track: the groups whose dry
     spells are kept (every group when None; the others' streams still
-    draw). rooms: {group: list}, each group's room at each hour's end over
-    its full week's room appended there. snaps: a dict taking, for every
-    step in which a tracked group goes dry, the state at that step's start
-    (from an undo log of the step), keyed by the spell's start: a gifted
-    walk resumes from it (_fleet_walk_resume). walls: {}, the instant each
+    draw, and count no unmet). rooms: {group: list}, each group's room at
+    each hour's end over its full week's room appended there. snaps: a dict
+    taking, for every step in which a group of `snap_for` (the tracked
+    groups when None) goes dry, the state at that step's start (from an
+    undo log of the step), keyed by the spell's start: a gifted walk
+    resumes from it (_fleet_walk_resume). walls: {}, the instant each
     account first had no room left for the stream drawing on it. abort: a
     gift's id; when that gift is applied and its record shows it blocked
     or adding no room for its row, the walk stops there with `aborted`
@@ -9338,8 +9344,13 @@ def _fleet_walk_joint(plan, week, st=None, gifts=(), track=None, rooms=None, sna
     orders, wstat, limit, streams = plan["orders"], plan["wstat"], plan["limit"], plan["streams"]
     gs = plan["gs"]
     tracked = gs if track is None else [g for g in gs if g in track]
+    snap_for = set(tracked if snap_for is None else snap_for)
     dry_from, dry_at, dry_s, um, spells = (st["dry_from"], st["dry_at"], st["dry_s"],
                                            st["unmet"], st["spells"])
+    fum = st["fum"]
+    # the streams whose unmet the walk counts: those of the tracked groups
+    fstreams = [s for s in streams if sgrp[s] in tracked]
+    fset = set(fstreams)
     waiting, first, t, recs = st["waiting"], st["first"], st["t"], st["gifts"]
     sc = st["scale"]  # {window: its cap's factor} while a `limit` gift holds
     active, rdem, cum, big = week["active"], week["rdem"], week["cum"], week["big"]
@@ -9376,15 +9387,7 @@ def _fleet_walk_joint(plan, week, st=None, gifts=(), track=None, rooms=None, sna
         return tot
 
     def draw(k, pts):
-        u0 = W[k][0]
-        W[k][0] = u0 + pts
-        for r in recs:
-            if r["live"] and r["key"] == k:
-                f = r["floor"]  # a limit's gift is the room above the full cap
-                d = pts if f is None else max(0.0, u0 + pts - f) - max(0.0, u0 - f)
-                r["used"] = min(r["added"], r["used"] + d)
-                if r["used"] + EPS >= r["added"]:
-                    r["live"] = False
+        W[k][0] += pts
 
     def pick(s, t0):
         """The account stream s draws on at t0: its cursor while that has
@@ -9502,6 +9505,9 @@ def _fleet_walk_joint(plan, week, st=None, gifts=(), track=None, rooms=None, sna
                         if dry_from[g] is not None:
                             for row in members[g]:
                                 um[row] += rcum[row][j] - rcum[row][i]
+                for s in fstreams:
+                    if dry_from[sgrp[s]] is not None:
+                        fum[s] += cum[s][j] - cum[s][i]
                 i = j
                 t = now + i * 3600
                 continue
@@ -9523,10 +9529,6 @@ def _fleet_walk_joint(plan, week, st=None, gifts=(), track=None, rooms=None, sna
                     if n <= t:
                         if logging and k not in touched:
                             touched[k] = w[:]
-                        for r in recs:
-                            if r["live"] and r["key"] == k:
-                                r["live"] = False
-                                r["lost"] = r["used"] + EPS < r["added"]
                         w[0] = 0.0
                         landed.add(k[0])
                         period, first_use, _ = wstat[k]
@@ -9645,7 +9647,7 @@ def _fleet_walk_joint(plan, week, st=None, gifts=(), track=None, rooms=None, sna
                         on = t if empty is not None and empty.get(g) else \
                             max([hit[a] for a in racc[g] if a in hit] or [t])
                         newly.append((g, on))
-                if newly and logging:
+                if logging and any(g in snap_for for g, _ in newly):
                     # The state at this step's start, from the undo log.
                     snap = _fleet_walk_copy(st)
                     for k, v in touched.items():
@@ -9660,9 +9662,10 @@ def _fleet_walk_joint(plan, week, st=None, gifts=(), track=None, rooms=None, sna
                         snap["dry_from"][g], snap["dry_s"][g] = f, s_
                         snap["spells"][g][-1][1] = None
                     snap.update(t=t, i=i, first=first, gifts=recs0,
-                                dry_at=dict(dry_at), unmet=dict(um))
+                                dry_at=dict(dry_at), unmet=dict(um), fum=dict(fum))
                     for g, on in newly:
-                        snaps.setdefault(on, snap)
+                        if g in snap_for:
+                            snaps.setdefault(on, snap)
                 for g, on in newly:
                     dry_from[g] = on
                     spells[g].append([on, None])
@@ -9675,6 +9678,11 @@ def _fleet_walk_joint(plan, week, st=None, gifts=(), track=None, rooms=None, sna
                         d = nxt - max(t, f)
                         for row in members[g]:
                             um[row] += rdem[row][i] / 3600.0 * d
+            for s, r in act:
+                if s in fset:
+                    f = dry_from[sgrp[s]]
+                    if f is not None:
+                        fum[s] += r * (nxt - max(t, f))
             first = False
             t = nxt
         if rooms is not None:
@@ -9714,14 +9722,20 @@ def _fleet_walk_gift(plan, W, frm, waiting, gift, t, recs=(), sc=None):
     with `closed_why`. A gift a condition forbids changes nothing, and its
     record says why (`blocked`) with the room it would have added.
 
-    The record: the gift's id, the window of the first effect that moves
-    points, or with none the one the lift opens (key), the points the gift
-    added there and drew from them since (used), whether its remainder was
-    lost to the window's natural refill before it was spent, the dollars of
-    room it added for its row (gain, never below 0) and for each set of
-    terms on the account (gains), whether a stated give-back was replaced
-    (inferred), the windows it refilled, and the account's next refill and
-    own left % for its row after it."""
+    The record: the gift's id, the dollars of room it added for its row
+    (gain, never below 0) and for each set of terms on the account (gains);
+    the dollars of that its points added, read as if the account were
+    serving (points: 0 for a lift alone, which gives hours, not points; a
+    full reset of a resting account counts its refills, not the rest it
+    ends), and the window of the row's that binds that room after it
+    (window: `spent` prices every stream's work on it; None with no
+    points); when what it put on a window the row binds is taken back
+    (back_at: the earliest natural refill after t of such a window, or a
+    limit's end; None when none is inside the walk); whether a stated
+    give-back was replaced (inferred); the windows it refilled; and the
+    account's next refill and own left % for its row after it. What the
+    gift is worth and how much of it is spent are read from the walk, not
+    the record (69 §4.8)."""
     a = gift["acct"]
     grp, terms = plan["grp"], plan["terms"]
     g0 = grp.get(gift.get("row"))
@@ -9729,8 +9743,11 @@ def _fleet_walk_gift(plan, W, frm, waiting, gift, t, recs=(), sc=None):
     sc = {} if sc is None else sc
     W0 = plan["W0"]
 
-    def room(g):
-        if a not in terms[g] or frm[a] > t:
+    def room(g, serving=False):
+        """The row's room on the account in its dollars (65 §5's min rule);
+        0 while the account rests or is refused, unless `serving` reads the
+        points as if it were serving."""
+        if a not in terms[g] or (frm[a] > t and not serving):
             return 0.0
         r = INF
         for k, cap, pp in terms[g][a]:
@@ -9738,6 +9755,7 @@ def _fleet_walk_gift(plan, W, frm, waiting, gift, t, recs=(), sc=None):
         return r if _WALK_EPS < r != INF else 0.0
     gs = [g for g in plan["gs"] if a in terms[g]]
     before = {g: room(g) for g in gs}
+    pts_before = {g: room(g, True) for g in gs}
     blocked = gift.get("blocked")
     if blocked is None and gift.get("only_at_limit") is not None and g0 in before \
             and before[g0] > _WALK_EPS:
@@ -9773,12 +9791,17 @@ def _fleet_walk_gift(plan, W, frm, waiting, gift, t, recs=(), sc=None):
             else:
                 p, inferred = 0.0, True
             backs[e["window"]] = backs.get(e["window"], 0.0) + max(0.0, p)
-    key, added, refills, floor = None, 0.0, [], None
+    def full_cap(k):
+        # The row's own cap on the window (100 where the row has none).
+        return next((cap for kk, cap, _ in (terms[g0].get(a) or ()) if kk == k), 100.0) \
+            if g0 in terms else 100.0
+    moved, refills = {}, []  # window -> when what the gift put there is taken back
     for e in effects:
         k = (a, e["window"])
         if e["effect"] == "give_back" and e["window"] in backs:
             pts = min(W[k][0], backs.pop(e["window"]))
             W[k][0] -= pts
+            back = W[k][1]
         elif e["effect"] == "refill":
             pts = W[k][0]
             W[k][0] = 0.0
@@ -9786,41 +9809,45 @@ def _fleet_walk_gift(plan, W, frm, waiting, gift, t, recs=(), sc=None):
             period = plan["wstat"][k][0]
             if gift.get("anchor") == "restarts_at_use" and period:
                 W[k][1] = t + period
+            back = W[k][1]
         elif e["effect"] == "limit":
             f = float(e["factor"])
             sc[k] = f
             # Its gift is the room above the row's own full cap on the
-            # window, as the gain reads it (100 where the row has none).
-            full = next((cap for kk, cap, _ in (terms[g0].get(a) or ()) if kk == k), 100.0) \
-                if g0 in terms else 100.0
-            pts = max(0.0, full * (f - 1.0))
-            if key is None:
-                floor = full
+            # window, as the gain reads it, until its end.
+            pts = max(0.0, full_cap(k) * (f - 1.0))
+            back = e.get("until")
         elif e["effect"] == "unlimit":
             sc.pop(k, None)
             continue
         else:
             continue
-        if key is None:
-            key, added = k, pts
+        if pts > _WALK_EPS:
+            had = moved.get(k)
+            moved[k] = back if k not in moved or had is None or (back is not None and back < had) \
+                else had
     lifted = bool(gift.get("lift")) and frm[a] > t
     if lifted:
         frm[a] = t
         waiting.discard(a)
     gains = {g: max(0.0, room(g) - before[g]) for g in gs}
-    if lifted and key is None and g0 in gains:
-        # A lift moves no points: its record follows what it opens, the
-        # row's window with the least room on the account.
-        k, cap, pp = min(terms[g0][a], key=lambda x: (x[1] * sc.get(x[0], 1.0) - W[x[0]][0]) * x[2])
-        key, added = k, max(0.0, cap * sc.get(k, 1.0) - W[k][0])
+    # The room the gift's points add for the row, read as if the account
+    # were serving, so a lift's hours are not in it (69 §4.8: `spent` is a
+    # share of this); and the earliest instant what the gift put on a window
+    # the row binds is taken back (`lost` reads it).
+    pts_gain = max(0.0, room(g0, True) - pts_before[g0]) if g0 in pts_before else 0.0
+    window = min(terms[g0][a], key=lambda x: (x[1] * sc.get(x[0], 1.0) - W[x[0]][0]) * x[2])[0] \
+        if pts_gain > _WALK_EPS else None
+    bound = [k for k, _, _ in (terms[g0].get(a) or ()) if k in moved] if g0 in terms else []
+    backs_at = [moved[k] for k in bound if moved[k] is not None and moved[k] > t]
     nexts = [W[k][1] for k in plan["akeys"].get(a, ()) if W[k][1] is not None and W[k][1] > t]
     left = None
     if g0 in gains:
         left = min(100.0 * max(0.0, cap * sc.get(k, 1.0) - W[k][0]) / (cap * sc.get(k, 1.0))
                    if cap > 0 else 0.0 for k, cap, pp in terms[g0][a])
-    rec = {"at": t, "acct": a, "id": gift.get("id"), "key": key, "added": added, "used": 0.0,
-           "live": added > _WALK_EPS, "lost": False, "gain": gains.get(g0, 0.0), "gains": gains,
-           "floor": floor,
+    rec = {"at": t, "acct": a, "id": gift.get("id"), "row": gift.get("row"),
+           "gain": gains.get(g0, 0.0), "gains": gains, "points": pts_gain, "window": window,
+           "back_at": min(backs_at) if backs_at else None,
            "blocked": blocked, "inferred": inferred, "refilled": refills,
            "more_at_after": min(nexts) if nexts else None, "left_pct_after": left,
            "internal": bool(gift.get("internal"))}
@@ -9834,8 +9861,27 @@ def _fleet_walk_gift(plan, W, frm, waiting, gift, t, recs=(), sc=None):
                 waiting.add(a)
         sc.clear()
         sc.update(sc0)
-        rec.update(live=False, added=0.0, key=None, refilled=[])
+        rec.update(points=0.0, window=None, back_at=None, refilled=[])
     return rec
+
+
+def _fleet_walk_removed(plan, rr, fum0, fum1):
+    """The unmet demand a gift removed (69 §4.8), in the dollars of the room
+    its points gave its row: each stream's unmet before less after
+    (_fleet_walk_joint's `fum`), priced on the window that binds that room
+    after the gift (the record's `window`) at the stream's own row's price
+    there over the valued row's. A stream whose row never draws on that
+    window spends none of the gift, whatever it gained by it."""
+    k, g0 = rr["window"], plan["grp"].get(rr["row"])
+    if k is None or g0 is None:
+        return 0.0
+    pp0, pp, sgrp = plan["pp"][g0][k], plan["pp"], plan["sgrp"]
+    tot = 0.0
+    for s, v in fum0.items():
+        pps = pp[sgrp[s]].get(k)
+        if pps:
+            tot += (v - fum1[s]) * pp0 / pps
+    return tot
 
 
 def _fleet_walk_resume(plan, week, snap, gifts, **kw):
@@ -9914,12 +9960,13 @@ _EVENT_VERDICTS = ("wise", "probably_wise", "probably_wasteful", "wasteful")
 _EVENT_REASONS = ("expires_first", "keep", "after", "no_gap", "no_gain", "moves", "short")
 
 
-def _reset_wise(worth_s, spent):
+def _reset_wise(worth_s, spent, points=True):
     """The wise rule in one week (69 §5.1): the reset removes at least an
     hour of the week's drought, and either a day of it or at least half of
-    what it gives back is spent."""
+    what it gives back is spent. A reset that gives back no points (a lift
+    alone) has nothing to spend: the hour it removes is the whole test."""
     return worth_s >= RESET_MIN_S and (
-        worth_s >= RESET_LONG_S or (spent is not None and spent >= RESET_WISE))
+        not points or worth_s >= RESET_LONG_S or (spent is not None and spent >= RESET_WISE))
 
 
 def _event_condition_why(why):
@@ -10206,9 +10253,14 @@ def _forecast_events(plan, weeks, mult, bases, evin, fans, walks=None):
     def walk_at(u, cur, gifts, g, eid, at):
         snap = (cur.get("_snaps") or {}).get(at)
         sn = {}
-        walks["resumed" if snap is not None else "full"] += 1
+        walks["resumed" if snap is not None else "full" if at > now else "now"] += 1
+        # Every group's spells are walked: `spent` reads the gift's effect on
+        # the whole forecast (69 §4.8). Snapshots are kept for the valued one.
+        # The walk with it used now is whole, gain or none: the "now" figures
+        # and the rows out now (§4.9) read every group off it.
         st = _fleet_walk_joint(plan, weeks[u], None if snap is None else _fleet_walk_copy(snap),
-                               gifts, track=(g,), unmet=False, snaps=sn, abort=eid)
+                               gifts, unmet=False, snaps=sn, snap_for=(g,),
+                               abort=None if at == now else eid)
         if not st.get("aborted"):
             # Its state before the gift is cur's: cur's snapshots before it hold.
             st["_snaps"] = {k: v for k, v in (cur.get("_snaps") or {}).items() if k < at}
@@ -10217,47 +10269,93 @@ def _forecast_events(plan, weeks, mult, bases, evin, fans, walks=None):
 
     def value(spec, row, cur, placed):
         """The event in every distinct week against `cur`, with `placed` used:
-        -> (per-week records, the states with it used where it was)."""
+        -> (per-week records, the states with it used where it was, each
+        week's (dry_s by group, fum, record) with it used now)."""
         g = grp[row]
         to = spec["to"]
         expiring = to is not None and to < horizon
-        recs, states = [], []
+        recs, states, nows = [], [], []
         for u in range(U):
             c = cur[u]
-            starts = [(a, b) for a, b in gaps(c, g) if not expiring or a < to]
-            if expiring:
-                starts.reverse()
+            spells = gaps(c, g)
+            starts = [(a, b) for a, b in spells if not expiring or a < to]
             r = {"use_at": None, "gain": 0.0, "worth": 0.0, "spent": 0.0, "lost": False,
                  "covers": 0.0, "inferred": False, "more": None, "left": None, "spell_s": 0.0,
-                 "gained": False, "blocked": None, "starts": bool(starts)}
+                 "gained": False, "blocked": None, "starts": bool(starts), "points": True}
+            d0 = c["dry_s"][g]
+            # Every spell start where the gift gains is walked, and now, and
+            # the one where it removes the most drought is its use_at (none
+            # where it removes none): the earliest spell on a tie, and now
+            # only where it does strictly more (69 §4.8: a reset is judged by its effect on the whole
+            # forecast, so a rest, or a small gap, never takes it from a
+            # wall it would do more at; used now it does more than at any
+            # gap when a refill it keeps would take the rest back; and where
+            # it does the same, nothing is lost by waiting for the gap). Now
+            # is walked whole even past its expiry, for the "now" figures;
+            # it is a candidate only before it. Its spell, for `keep`, runs
+            # to the end of the first one.
+            cands = list(starts)
+            if not cands or cands[0][0] > now:
+                cands.append((now, spells[0][1] if spells else now))
             chosen = None
-            for a, b in starts:
+            for a, b in cands:
                 gifts = sorted(placed[u] + _event_gifts(spec, a, row, horizon),
                                key=lambda x: x["at"])
                 st = walk_at(u, c, gifts, g, spec["id"], a)
                 rr = _event_record(st, spec["id"])
+                if a == now and a != (starts[0][0] if starts else None):
+                    # Not a spell start: it counts only where it does more.
+                    nows.append((dict(st["dry_s"]), st["fum"], rr))
+                    worth = max(0.0, d0 - st["dry_s"][g])
+                    if (to is None or now < to) and rr["blocked"] is None and \
+                            rr["gain"] > _WALK_EPS and worth > _WALK_EPS and \
+                            (chosen is None or worth > chosen[0] + _WALK_EPS):
+                        chosen = (worth, a, b, st, rr)
+                        r["gained"] = True
+                    continue
+                if a == now:
+                    nows.append((dict(st["dry_s"]), st["fum"], rr))
+                if rr["blocked"] is None and rr["points"] <= _WALK_EPS:
+                    r.update(spent=None, lost=None, points=False)  # nothing to spend (a lift)
                 if rr["gain"] > _WALK_EPS:
                     r["gained"] = True
-                if st.get("aborted"):
+                if st.get("aborted") or rr["blocked"] is not None or rr["gain"] <= _WALK_EPS:
                     if rr["blocked"] is not None and rr["gain"] > _WALK_EPS and r["blocked"] is None:
                         r["blocked"] = rr["blocked"]
                     continue
-                chosen = (a, b, st, rr)
-                break
+                worth = max(0.0, d0 - st["dry_s"][g])
+                if worth > _WALK_EPS and (chosen is None or worth > chosen[0] + _WALK_EPS):
+                    chosen = (worth, a, b, st, rr)
             if chosen is None:
                 states.append(c)
             else:
-                a, b, st, rr = chosen
-                d0 = c["dry_s"][g]
-                worth = max(0.0, d0 - st["dry_s"][g])
+                worth, a, b, st, rr = chosen
                 r.update(use_at=a, gain=rr["gain"], worth=worth, spell_s=b - a,
-                         spent=min(1.0, rr["used"] / rr["added"]) if rr["added"] > _WALK_EPS else 0.0,
-                         lost=rr["lost"], covers=min(1.0, worth / d0) if d0 > 0 else 0.0,
+                         covers=min(1.0, worth / d0) if d0 > 0 else 0.0,
                          inferred=rr["inferred"], more=rr["more_at_after"],
-                         left=rr["left_pct_after"])
+                         left=rr["left_pct_after"], **spent_of(c["fum"], st["fum"], rr))
                 states.append(st)
             recs.append(r)
-        return recs, states
+        return recs, states, nows
+
+    def spent_of(fum0, fum1, rr, ok=True):
+        """`spent`, `lost` and `points` (69 §4.8): the unmet demand the gift
+        removes over every stream, priced on the window that binds the
+        room its points gave the row, as a share of that room; lost when
+        the points are not all spent before what the gift put on the window
+        is taken back inside the walk (its natural refill, a limit's end).
+        A gift with no points to give (a lift alone) has neither: both None,
+        points False, and the hours it removes are its whole test. One a
+        condition forbade (`ok` False) spent none of them."""
+        has = rr["points"] > _WALK_EPS
+        points = has and ok
+        if not has:
+            return {"spent": None, "lost": None, "points": False}
+        spent = min(1.0, max(0.0, _fleet_walk_removed(plan, rr, fum0, fum1)) / rr["points"]) \
+            if ok else 0.0
+        lost = points and spent + _WALK_EPS < 1.0 and rr["back_at"] is not None \
+            and rr["back_at"] < horizon
+        return {"spent": spent, "lost": lost, "points": points}
 
     def now_walk(spec, row, placed):
         """The event used now in every distinct week, in turn: full walks
@@ -10267,23 +10365,26 @@ def _forecast_events(plan, weeks, mult, bases, evin, fans, walks=None):
             gifts = sorted(placed[u] + _event_gifts(spec, now, row, horizon), key=lambda x: x["at"])
             walks["now"] += 1
             st = _fleet_walk_joint(plan, weeks[u], None, gifts, unmet=False)
-            out.append((dict(st["dry_s"]), _event_record(st, spec["id"])))
+            out.append((dict(st["dry_s"]), st["fum"], _event_record(st, spec["id"])))
         return out
 
-    def now_recs(nw, base_dry, g):
+    def now_recs(nw, base, g):
+        """base: each distinct week's (dry_s by group, fum) without it."""
         recs = []
         for u in range(U):
-            dry, rr = nw[u]
+            dry, fum, rr = nw[u]
+            base_dry, base_fum = base[u][0][g], base[u][1]
             ok = rr["blocked"] is None
             gain = rr["gains"].get(g, 0.0)
-            worth = max(0.0, base_dry[u] - dry[g]) if ok else 0.0
-            recs.append({"use_at": now if ok and gain > _WALK_EPS else None, "gain": gain if ok else 0.0,
+            worth = max(0.0, base_dry - dry[g]) if ok else 0.0
+            recs.append({"use_at": now if ok and gain > _WALK_EPS and worth > _WALK_EPS else None,
+                         "gain": gain if ok else 0.0,
                          "worth": worth, "spell_s": 0.0,
-                         "spent": min(1.0, rr["used"] / rr["added"]) if rr["added"] > _WALK_EPS else 0.0,
-                         "lost": rr["lost"], "covers": min(1.0, worth / base_dry[u]) if base_dry[u] > 0
-                         else 0.0, "inferred": rr["inferred"], "more": rr["more_at_after"],
+                         "covers": min(1.0, worth / base_dry) if base_dry > 0 else 0.0,
+                         "inferred": rr["inferred"], "more": rr["more_at_after"],
                          "left": rr["left_pct_after"], "gained": gain > _WALK_EPS,
-                         "blocked": rr["blocked"] if gain > _WALK_EPS else None, "starts": True})
+                         "blocked": rr["blocked"] if gain > _WALK_EPS else None, "starts": True,
+                         **spent_of(base_fum, fum, rr, ok)})
         return recs
 
     def figures(recs, nows=None):
@@ -10305,18 +10406,31 @@ def _forecast_events(plan, weeks, mult, bases, evin, fans, walks=None):
                 "gain": q3([r["gain"] for r in ex], 2),
                 "gain_basis": "inferred" if any(r["inferred"] for r in used) else "read",
                 "worth_h": q3([r["worth"] / 3600.0 for r in ex], 1),
-                "spent": q3([r["spent"] for r in ex], 2),
-                "lost_share": round(sum(1 for r in used if r["lost"]) / len(used), 4) if used else None,
+                "spent": spent_q(ex),
+                "lost_share": round(sum(1 for r in used if r["lost"]) / len(used), 4)
+                if any(r["points"] for r in used) else None,
                 "covers": q3([r["covers"] for r in ex], 2),
                 "left_pct_after": round(_forecast_q(lefts, 0.5), 1) if lefts else None,
                 "more_at_after": _fleet_secs(_forecast_q(mores, 0.5)) if mores else None}
 
-    def now_figures(recs):
+    def spent_q(ex):
+        # None where the gift gives no points to spend (a lift alone).
+        xs = [r["spent"] for r in ex if r["spent"] is not None]
+        return q3(xs, 2) if xs else None
+
+    def now_figures(recs, spec, gapw, had_planned):
+        """The "now" figures, with the verdict and reason used now would get
+        (69 §4.8), in the event's vocabulary."""
         ex = over(recs)
+        alone = [{"use_at": now, "worth": 0.0, "spell_s": 0.0, "starts": True}] * U \
+            if had_planned else None
+        j = judge(recs, alone, spec, gapw, had_planned)
         return {"gain": q3([r["gain"] for r in ex], 2),
                 "worth_h": q3([r["worth"] / 3600.0 for r in ex], 1),
-                "spent": q3([r["spent"] for r in ex], 2),
-                "lost_share": round(sum(1 for r in ex if r["lost"]) / n, 4)}
+                "spent": spent_q(ex),
+                "lost_share": round(sum(1 for r in ex if r["lost"]) / n, 4)
+                if any(r["points"] for r in ex) else None,
+                "verdict": j["verdict"], "reason": j["reason"]}
 
     def judge(recs, alone, spec, gapw, had_planned):
         """The verdict, its share and the commonest failing week's reason
@@ -10328,25 +10442,28 @@ def _forecast_events(plan, weeks, mult, bases, evin, fans, walks=None):
             if not gapw[u]:
                 continue
             r = recs[u]
-            ok = r["use_at"] is not None and _reset_wise(r["worth"], r["spent"])
+            ok = r["use_at"] is not None and _reset_wise(r["worth"], r["spent"], r["points"])
             outcomes.append(1 if ok else 0)
             if ok:
                 continue
-            if r["use_at"] is None:
-                # It expires first when no gap of the plain week starts
-                # before it does, not when earlier planned events took them.
-                starts = (alone[u] if alone is not None else r)["starts"]
-                if to is not None and to < horizon and not starts:
-                    w = "expires_first"
-                elif had_planned and alone is not None and alone[u]["use_at"] is not None:
-                    a = alone[u]
-                    w = "keep" if a["worth"] < a["spell_s"] - 0.5 and (to is None or to >= horizon) \
-                        else "after"
-                else:
-                    # A gap week no spell could take: a condition forbade the
-                    # gift where it would have given, or it gave nothing.
-                    w = r["blocked"] or "no_gain"
-            elif r["spent"] > 0 and r["worth"] < RESET_MIN_S:
+            # It expires first when no gap of the plain week starts before
+            # it does (used now it did not do enough), not when earlier
+            # planned events took them: after those, one that alone had a
+            # use and now removes under an hour is kept, or came after.
+            starts = (alone[u] if alone is not None else r)["starts"]
+            if to is not None and to < horizon and not starts:
+                w = "expires_first"
+            elif had_planned and alone is not None and alone[u]["use_at"] is not None and \
+                    (r["use_at"] is None or r["worth"] < RESET_MIN_S):
+                a = alone[u]
+                w = "keep" if a["worth"] < a["spell_s"] - 0.5 and (to is None or to >= horizon) \
+                    else "after"
+            elif r["use_at"] is None:
+                # A gap week no start could take: a condition forbade the
+                # gift where it would have given, it removed nothing where
+                # it gained, or it gained nothing.
+                w = r["blocked"] or ("moves" if r["gained"] else "no_gain")
+            elif r["worth"] < RESET_MIN_S:
                 w = "moves"
             else:
                 w = "short"
@@ -10423,7 +10540,7 @@ def _forecast_events(plan, weeks, mult, bases, evin, fans, walks=None):
     def none_rec():
         return {"use_at": None, "gain": 0.0, "worth": 0.0, "spent": 0.0, "lost": False,
                 "covers": 0.0, "inferred": False, "more": None, "left": None, "spell_s": 0.0,
-                "gained": False, "blocked": None, "starts": False}
+                "gained": False, "blocked": None, "starts": False, "points": True}
 
     def out_now(g):
         return bool(bases) and bases[0]["dry_at"][g] == now
@@ -10441,14 +10558,15 @@ def _forecast_events(plan, weeks, mult, bases, evin, fans, walks=None):
                 worth[key] = 0.0
                 judged.append(spec)
                 continue
-            recs, states = value(spec, row, bases, [[] for _ in range(U)])
+            recs, states, nows = value(spec, row, bases, [[] for _ in range(U)])
             tried = any(r["starts"] for r in recs)  # none: it expires before every gap
             if tried and not any(r["gained"] for r in recs):
                 res[key] = blank("no_gain", min(spec["touches"]) if spec["touches"] else None)
-            elif tried and not any(r["use_at"] is not None for r in recs):
+            elif tried and not any(r["use_at"] is not None for r in recs) and \
+                    any(r["blocked"] is not None for r in recs):
                 res[key] = blank("unusable", commonest([r["blocked"] for r in recs]))
             else:
-                alone[key] = (recs, states)
+                alone[key] = (recs, states, nows)
                 worth[key] = _forecast_q([r["worth"] for r in over(recs)], 0.5)
                 judged.append(spec)
         judged.sort(key=lambda s: (-worth[(s["acct"], s["id"])], *tie(s, row)))
@@ -10459,21 +10577,23 @@ def _forecast_events(plan, weeks, mult, bases, evin, fans, walks=None):
             key = (spec["acct"], spec["id"])
             planned, placed, cur = turn["planned"], turn["placed"], turn["cur"]
             if not has_gap:
-                recs, states = [none_rec() for _ in range(U)], cur
+                recs, states, nw = [none_rec() for _ in range(U)], cur, now_walk(spec, row, placed)
             elif not planned:
-                recs, states = alone[key]  # nothing planned before it: in turn is alone
+                recs, states, nw = alone[key]  # nothing planned before it: in turn is alone
             else:
-                recs, states = value(spec, row, cur, placed)
-            nw = now_walk(spec, row, placed)
+                recs, states, nw = value(spec, row, cur, placed)
             if row == "proxy":
                 proxy_now[key] = (nw, tuple(planned), [list(p) for p in placed])
-            nr = now_recs(nw, [c["dry_s"][g] for c in cur], g)
+            nr = now_recs(nw, [(c["dry_s"], c["fum"]) for c in cur], g)
             f = dict(judge(recs, (alone.get(key) or (None,))[0], spec, gapw, bool(planned)),
                      after=planned[-1][1] if planned else None, rank=None, step=None,
                      reaches_short=None)
             f.update(figures(recs, nr))
-            # "Use it now", beside a use_at later than now (69 §4.8).
-            f["now"] = None if out_now(g) else now_figures(nr)
+            # "Use it now", beside a use_at later than now in some week (69
+            # §4.8); none when every week that uses it uses it now.
+            used = [r["use_at"] for r in recs if r["use_at"] is not None]
+            f["now"] = None if used and max(used) <= now else \
+                now_figures(nr, spec, gapw, bool(planned))
             res[key] = f
             if f["verdict"] in ("wise", "probably_wise"):
                 for u in range(U):
@@ -10511,7 +10631,7 @@ def _forecast_events(plan, weeks, mult, bases, evin, fans, walks=None):
     # all work's used-now walks, each against the week with all work's events
     # planned before it used, every row tracked.
     prox = out.get("proxy")
-    base_all = {(): [b["dry_s"] for b in bases]}
+    base_all = {(): [(b["dry_s"], b["fum"]) for b in bases]}
     for row in plan["rows"]:
         g = grp[row]
         if row in out or prox is None or not out_now(g):
@@ -10528,9 +10648,10 @@ def _forecast_events(plan, weeks, mult, bases, evin, fans, walks=None):
             nw, prefix, placed = proxy_now[key]
             if prefix not in base_all:
                 walks["now"] += U
-                base_all[prefix] = [_fleet_walk_joint(plan, weeks[u], None, placed[u],
-                                                      unmet=False)["dry_s"] for u in range(U)]
-            recs = now_recs(nw, [d[g] for d in base_all[prefix]], g)
+                base_all[prefix] = [(lambda st: (st["dry_s"], st["fum"]))(
+                    _fleet_walk_joint(plan, weeks[u], None, placed[u], unmet=False))
+                    for u in range(U)]
+            recs = now_recs(nw, base_all[prefix], g)
             mine = prox["events"].get(key) or {}
             if mine.get("verdict") in ("no_gain", "unusable"):
                 res[key] = blank(mine["verdict"], mine["reason"])
