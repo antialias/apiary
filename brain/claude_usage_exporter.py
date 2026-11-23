@@ -117,8 +117,11 @@ from urllib.parse import parse_qs, urlparse
 #   _MODEL_MODALITY    (provider, model) -> what the model makes, when not chat
 #   ROUTES             (method, path) -> a driver's HTTP handler
 #   EVENT_ROW_ANNOTATORS what a driver adds to each event's published row
-from providers import (PROVIDERS, ROUTES, EVENT_ROW_ANNOTATORS, _API_POTS,  # noqa: E402
-                       _COUNTABLE_UNITS, _LEDGER_RATE_TABLES, _LEDGER_RATES, _MODEL_MODALITY)
+#   FORECAST_RESULT_HOOKS what runs on each forecast result the worker stores
+#   ROW_ANNOTATORS     what a driver adds to each fleet row as the forecast is attached
+from providers import (PROVIDERS, ROUTES, EVENT_ROW_ANNOTATORS, FORECAST_RESULT_HOOKS,  # noqa: E402
+                       ROW_ANNOTATORS, _API_POTS, _COUNTABLE_UNITS, _LEDGER_RATE_TABLES,
+                       _LEDGER_RATES, _MODEL_MODALITY)
 import credstore  # noqa: E402 — the sealed store every tenant file goes through
 import notices  # noqa: E402 — the prepaid "needs payment" notices
 import tenancy  # noqa: E402 — Tenant and the registry
@@ -10832,8 +10835,9 @@ def _forecast_request(t, inputs):
 
 def _forecast_run(t):
     """Compute the inputs a render left for this tenant, if any and if they
-    are stale against the result held (one computation per key), and keep
-    the result. -> True when it computed."""
+    are stale against the result held (one computation per key), hand the
+    result to each FORECAST_RESULT_HOOKS callable, then keep it, so no render
+    reads it before every hook has. -> True when it computed."""
     with t.forecast_lock:
         want, t.forecast_want = t.forecast_want, None
         if want is not None and not _forecast_stale(t.forecast, want):
@@ -10841,6 +10845,12 @@ def _forecast_run(t):
     if want is None:
         return False
     res = _forecast_compute(t, want)
+    for hook in FORECAST_RESULT_HOOKS:
+        try:
+            hook(t, res)
+        except Exception:  # noqa: BLE001 — a hook's failure leaves the result as computed
+            log(f"ERROR forecast result hook {getattr(hook, '__name__', hook)} ({t.id}):\n"
+                + traceback.format_exc())
     with t.forecast_lock:
         t.forecast = res
     _events_mark(t)  # a new result is a change: the publisher sends it
@@ -10932,7 +10942,8 @@ def _forecast_attach(t, fleet, walk, standings, view, preferred, now):
     """Put each row's `burn` and `forecast` on a rendered figure (69 §6.1):
     the burn right now from the rings, the forecast the worker last computed
     with `stale` when the render's inputs differ from its, which leaves them
-    for the worker. Takes _sizing_lock; never call it under _plock."""
+    for the worker, then the keys each ROW_ANNOTATORS callable adds to a
+    row. Takes _sizing_lock; never call it under _plock."""
     with t.sizing_lock:
         burn = t.sizing["burn"]
         pool = _burn_pool(t, now)
@@ -10991,6 +11002,15 @@ def _forecast_attach(t, fleet, walk, standings, view, preferred, now):
         sel["burn"] = burns[key]
         sel["forecast"] = rows[key]
         sel["events"] = events[key]
+    for annotate in ROW_ANNOTATORS:
+        for key, doc in [("proxy", fleet["proxy"])] + list(fleet["selections"].items()):
+            try:
+                more = annotate(t, key, doc, standings) or {}
+            except Exception:  # noqa: BLE001 — an annotator's failure adds nothing; the render stands
+                log(f"ERROR row annotator {getattr(annotate, '__name__', annotate)} ({t.id}, {key}):\n"
+                    + traceback.format_exc())
+                continue
+            doc.update(more)
 
 
 def _fleet_figure(standings, routes, models, view, limits, now, stale_max, health,

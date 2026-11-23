@@ -16148,6 +16148,83 @@ class TestForecastWorker(TestForecastOnTheDocument):
         self.assertFalse(self.fleet()["proxy"]["forecast"]["stale"])
 
 
+class TestForecastHooks(_LogCapture, SizingBase):
+    """The two generic hooks (quota-model 71 §7): each FORECAST_RESULT_HOOKS
+    callable is handed the result _forecast_run stored, and one that raises is
+    logged while the result stands; each ROW_ANNOTATORS callable adds its keys
+    to every published fleet row."""
+
+    def setUp(self):
+        super().setUp()
+        self.capture_log()
+        reset_sizing_memory()
+        in_zone(self)
+        self.view = fleet_view({ACCT_A: {"seven_day": (1000.0, {"claude-opus-5-5": 1000.0})}})
+        p = mock.patch.object(ex, "_sizing_fleet_view", side_effect=lambda t: self.view)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def fleet(self):
+        return ex._preferred_payload(T)["fleet"]
+
+    def test_each_hook_gets_the_stored_result(self):
+        seen = []
+
+        def boom(t, res):
+            seen.append("boom")
+            raise RuntimeError("a hook's own fault")
+
+        def hook(t, res):
+            with t.forecast_lock:
+                seen.append((t, res, t.forecast is res))
+            res["rows"]["proxy"] = dict(res["rows"]["proxy"], added=True)
+        history_days()
+        self.fleet()
+        T.events_dirty = False
+        with mock.patch.object(ex, "FORECAST_RESULT_HOOKS", [boom, hook]):
+            self.assertTrue(ex._forecast_run(T))
+        self.assertEqual(seen, ["boom", (T, T.forecast, False)],
+                         "every hook runs, before the result is stored")
+        self.assertTrue(T.forecast["rows"]["proxy"]["added"], "what a hook adds is stored with it")
+        self.assertTrue(self.fleet()["proxy"]["forecast"]["added"])
+        self.assertTrue([l for l in self.logged if l.startswith(f"ERROR forecast result hook boom ({T.id})")],
+                        self.logged)
+        self.assertTrue(T.events_dirty, "the document is marked: the result stands")
+        self.assertEqual(self.fleet()["proxy"]["forecast"]["basis"], "learned")
+        with mock.patch.object(ex, "FORECAST_RESULT_HOOKS", [hook]):
+            self.assertFalse(ex._forecast_run(T), "nothing computed")
+        self.assertEqual(len(seen), 2, "no result, no hook")
+
+    def test_a_row_annotator_adds_to_every_row(self):
+        calls = []
+
+        def annotate(t, row, doc, standings):
+            calls.append(row)
+            self.assertIn("forecast", doc)
+            return {"note": row} if row == "proxy" else None
+        with mock.patch.object(ex, "ROW_ANNOTATORS", [annotate]):
+            f = self.fleet()
+        self.assertEqual(f["proxy"]["note"], "proxy")
+        self.assertEqual(sorted(calls), sorted(["proxy", *f["selections"]]))
+        self.assertTrue(all("note" not in s for s in f["selections"].values()))
+
+    def test_a_row_annotator_that_raises_adds_nothing(self):
+        def boom(t, row, doc, standings):
+            raise RuntimeError("an annotator's own fault")
+
+        def fine(t, row, doc, standings):
+            return {"note": row}
+        with mock.patch.object(ex, "ROW_ANNOTATORS", [boom, fine]):
+            f = self.fleet()
+        self.assertEqual(f["proxy"]["note"], "proxy", "the render stands, the next annotator runs")
+        self.assertTrue([l for l in self.logged if l.startswith(f"ERROR row annotator boom ({T.id}, proxy)")],
+                        self.logged)
+
+    def test_this_edition_registers_none(self):
+        if os.environ.get("BRAIN_TEST_EDITION", "brain") == "brain":
+            self.assertEqual((ex.FORECAST_RESULT_HOOKS, ex.ROW_ANNOTATORS), ([], []))
+
+
 class TestBurnImport(HTTPBase, SizingBase):
     """69 §6.7: POST /sizing/burn, rows added only for the hours the brain
     has no bucket for, refused whole on any bad row."""

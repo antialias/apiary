@@ -38,6 +38,18 @@ EVENT_ROW_ANNOTATORS: callables annotate(tenant, account, event, row,
 standings) -> dict or None. A driver may add keys to an event's published row
 (fleet.<row>.events[]): the core adds the dict's keys to each row as it builds
 it, from the standing's event, the row so far and every account's standing.
+
+FORECAST_RESULT_HOOKS: callables hook(tenant, result), called by the forecast
+worker on each new result before it stores it (t.forecast), so no render reads
+a result a hook has not seen. A hook may add keys to a row of the result
+(result["rows"][row]). A hook that raises is logged and the result is stored
+as it stands.
+
+ROW_ANNOTATORS: callables annotate(tenant, row, doc, standings) -> dict or
+None, called for each row of the published fleet (row "proxy" or a selection
+key; doc that row's published dict, its burn, forecast and events in place)
+as the forecast is attached: the core adds the dict's keys to the row. One
+that raises is logged, adds nothing to that row, and the render stands.
 """
 
 PROVIDERS = {}
@@ -48,6 +60,8 @@ _LEDGER_RATE_TABLES = {}
 _MODEL_MODALITY = {}
 ROUTES = {}
 EVENT_ROW_ANNOTATORS = []
+FORECAST_RESULT_HOOKS = []
+ROW_ANNOTATORS = []
 
 
 def register(pid, spec):
