@@ -238,9 +238,17 @@ func (tn *tenant) classRowsLoaded() bool {
 // shape one: everything the store might advertise must satisfy
 // classShapedModel, or rule 3 could never refuse the id after a state loss —
 // see the module comment ("never advertise what can't be refused").
+//
+// An image row is exempt from the shape: no picker lists it and the chat door
+// refuses it, so its claude-<name> id is never advertised. It is reached at
+// the image door by its bare name, which may name the one model the class
+// serves (gpt-image-2).
 func classRowGuard(e *registryEntry) string {
 	if strings.Contains(strings.ToLower(e.Name), "[1m]") {
 		return "\"[1m]\" is renderer-owned, never part of an id"
+	}
+	if e.Modality == modalityImage {
+		return ""
 	}
 	id := e.renderedID()
 	if !classShapedModel(id) {

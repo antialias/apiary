@@ -207,6 +207,7 @@ SCOPE_ALIASES = {
 # classes, so a tenant without one routes no class. Schema (see
 # classes.example.json):
 #   [{"class": "frontier",            # ^[a-z]+(-[a-z]+)*$ — becomes claude-<class>
+#                                     # (an image class may carry digits too)
 #     "display": "Frontier (auto)",   # picker display_name (#27); default = name
 #     "guidance": "Top tier for open design and hard decisions",  # optional, null = none
 #     # Guidance is stripped, non-empty, <=300 chars, with no ASCII controls/DEL.
@@ -530,6 +531,20 @@ _CLASS_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")  # a consumer's id
 # a class with one would load and never be offered.
 _CLASS_ID_RE = re.compile(r"^[a-z]+(-[a-z]+)*$")
 _CLASS_ID_RULE = "class name must match ^[a-z]+(-[a-z]+)*$, with no digit (it becomes the claude-<class> picker id)"
+# An image class is never a picker row: the proxy serves it at the image door
+# only, by its bare name. So it may carry digits, and a class may be named for
+# the one model it serves (gpt-image-2); the proxy admits an image row whatever
+# its shape.
+_IMAGE_CLASS_ID_RE = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
+_IMAGE_CLASS_ID_RULE = ("an image class's name must match ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ "
+                        "(lowercase words and digits joined by single hyphens)")
+
+
+def _class_id_error(name, request_kind):
+    """Why name can't be a class of this request_kind, or None."""
+    if request_kind == "image":
+        return None if _IMAGE_CLASS_ID_RE.match(name) else _IMAGE_CLASS_ID_RULE
+    return None if _CLASS_ID_RE.match(name) else _CLASS_ID_RULE
 
 
 def _guidance_error(guidance):
@@ -661,8 +676,9 @@ def _class_error(c, seen, *, lan, check_guidance=True, strict=False):
     if not isinstance(c, dict):
         return "not an object"
     name = str(c.get("class") or "")
-    if not _CLASS_ID_RE.match(name):
-        return _CLASS_ID_RULE
+    reason = _class_id_error(name, c.get("request_kind", "chat"))
+    if reason:
+        return reason
     if name in seen:
         return "duplicate class name"
     if name in _lane_names:
@@ -1006,7 +1022,7 @@ def _validate_classes_doc(t, doc):
             where = f"classes[{i}]" + (f" ({ident!r})" if ident else "")
             errors.append(f"{where}: {reason}")
         name = c.get("class") if isinstance(c, dict) else None
-        if isinstance(name, str) and _CLASS_ID_RE.match(name):
+        if isinstance(name, str) and not _class_id_error(name, c.get("request_kind", "chat")):
             seen.add(name)  # later duplicates must error even if this entry did
     if lanes is not None and not isinstance(lanes, dict):
         errors.append("lanes must be an object {<lane>: {pay, stop_at}}")

@@ -1796,6 +1796,40 @@ class TestBootLoadsClassesAfterTheDrivers(unittest.TestCase):
         self.assertIn("images", windows)
 
 
+class TestImageClassNamesMayCarryDigits(unittest.TestCase):
+    """An image class is reached by its bare name at the image door and is never
+    a picker row, so it may be named for the one model it serves; a chat class
+    stays digit-free (its claude-<class> id must stay outside Anthropic's)."""
+
+    def doc(self, name, kind="image"):
+        d = image_boot_doc()
+        d["classes"][-1]["class"] = name
+        if kind == "chat":
+            d["classes"][-1] = dict(copy.deepcopy(frontier_cfg()[0]), **{"class": name})
+        return d
+
+    def test_an_image_class_named_for_its_model(self):
+        self.assertIsNone(ex._class_id_error("gpt-image-2", "image"))
+        self.assertEqual(ex._class_error(self.doc("gpt-image-2")["classes"][-1], set(), lan=True), None)
+
+    def test_refusals(self):
+        for name, kind, needle in (("k2", "chat", "with no digit"),
+                                   ("gpt-image-2", "chat", "with no digit"),
+                                   ("2-image", "image", "an image class's name"),
+                                   ("gpt_image", "image", "an image class's name"),
+                                   ("gpt-image-1.5", "image", "an image class's name"),
+                                   ("Image", "image", "an image class's name"),
+                                   ("image--best", "image", "an image class's name")):
+            with self.subTest(name=name, kind=kind):
+                self.assertIn(needle, ex._class_id_error(name, kind))
+                c = self.doc(name, kind)["classes"][-1]
+                self.assertIn(needle, ex._class_error(c, set(), lan=True))
+
+    def test_a_duplicate_digit_name_is_still_a_duplicate(self):
+        c = self.doc("gpt-image-2")["classes"][-1]
+        self.assertEqual(ex._class_error(c, {"gpt-image-2"}, lan=True), "duplicate class name")
+
+
 class _LogCapture:
     """Collect ex.log lines for the life of a test."""
 

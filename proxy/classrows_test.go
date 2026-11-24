@@ -134,6 +134,29 @@ func TestDeriveClassRowsNeverAdvertisesUnrefusable(t *testing.T) {
 	}
 }
 
+// An image class may be named for its model: no picker lists an image row, so
+// the shape rule has nothing to protect, and the image door reaches it by its
+// bare name. A chat class of the same name is still refused. The last-good
+// loader admits it the same way.
+func TestImageRowsMayCarryDigits(t *testing.T) {
+	rows := deriveClassRows(map[string]classPref{
+		"gpt-image-2": {RequestKind: "image"},
+		"k2":          {ContextWindow: 200000},
+	}, nil, nil)
+	if len(rows) != 1 || rows[0].Name != "gpt-image-2" || rows[0].Modality != modalityImage || !rows[0].pickerHidden {
+		t.Fatalf("derived %+v, want only the hidden image row gpt-image-2", rows)
+	}
+	withClassRows(t, "")
+	path := filepath.Join(t.TempDir(), "class-rows.json")
+	withClassStateFile(t, path)
+	lan.persistClassRows(rows)
+	lan.loadClassRowsState()
+	got, _ := lan.classRowsSnapshot()
+	if len(got) != 1 || got[0].Name != "gpt-image-2" || got[0].Modality != modalityImage {
+		t.Fatalf("reloaded %+v, want the image row kept", got)
+	}
+}
+
 // The last-good loader applies the same admission rule (a snapshot is state,
 // not an authority): unrefusable shapes and renderer-owned "[1m]" names.
 func TestLoadClassRowsStateAppliesRowGuard(t *testing.T) {
