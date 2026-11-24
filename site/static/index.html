@@ -18,7 +18,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..900,50,1&family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..900,50,1&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><polygon points='50 3 93 27 93 73 50 97 7 73 7 27' fill='%23eda72c'/></svg>">
 <style>
 :root{
@@ -134,6 +134,61 @@ h2{
 .engine pre b{color:var(--honey);font-weight:500}
 .engine pre i{color:#79c96f;font-style:normal}
 
+/* ---------- keepers: the hive-cam sculpture ---------- */
+.hivecam{--bleed:max(24px,calc(50vw - 506px));display:grid;grid-template-columns:minmax(0,36fr) minmax(0,64fr);
+  grid-template-areas:"head art" "list art";column-gap:2.5rem;margin-inline:calc(50% - 50vw);padding-inline:var(--bleed);overflow-x:clip}
+.hivecam-head{grid-area:head;position:relative;z-index:4}
+.hivecam .section-tag{display:flex;align-items:center;gap:.6em;text-transform:none;letter-spacing:.16em;font-size:.78rem}
+.hex-dot{display:inline-block;width:.72em;height:.8em;background:var(--honey);clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%)}
+.hivecam h2{white-space:nowrap;font-size:clamp(2.7rem,5vw,6rem);font-weight:850;font-variation-settings:"opsz" 144,"SOFT" 50,"WONK" 0;
+  line-height:.98;letter-spacing:-.02em;margin-bottom:1.6rem}
+.hivecam .lede{font-size:.95rem;margin-bottom:2.8rem;max-width:30em}
+.keeper-list{grid-area:list;list-style:none;margin:0;padding:0 0 1rem;display:grid;gap:2.2rem;align-content:start}
+.keeper-list li{position:relative;padding-left:1.7rem}
+.keeper-list li::before{content:"";position:absolute;left:0;top:.42rem;width:.95rem;height:1.05rem;background:var(--honey);
+  clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%)}
+.keeper-list h3{font-family:var(--mono);font-weight:600;font-size:1.3rem;line-height:1.35;letter-spacing:.03em;color:var(--honey)}
+.keeper-list .role{margin-top:.25rem;font-size:.7rem;letter-spacing:.2em;text-transform:uppercase;color:#c99234}
+.keeper-list blockquote{margin-top:.7rem;font-size:.86rem;line-height:1.65;color:var(--cream);max-width:36em}
+.keeper-list blockquote a{color:var(--honey)}
+/* the sculpture: photos sit under the art, in the screen holes; captions sit over it */
+.skep{grid-area:art;position:sticky;top:1rem;align-self:start;justify-self:start;margin:-2.5rem calc(-1 * var(--bleed)) 0 0;
+  width:min(calc(100% + var(--bleed)),calc(100vh - 2rem))}
+.skep-stage{position:relative;aspect-ratio:1;container-type:inline-size}
+.skep-art{position:absolute;inset:0;z-index:2;width:100%;height:100%;pointer-events:none;
+  -webkit-mask-image:linear-gradient(180deg,#000 78%,transparent 99%);mask-image:linear-gradient(180deg,#000 78%,transparent 99%)}
+.hc-shot,.hc-cap{position:absolute;left:var(--x);top:var(--y);width:var(--w);height:var(--h)}
+.hc-shot{z-index:1;overflow:hidden;background:#000}
+.hc-shot img{position:absolute;inset:-2%;width:104%;height:104%;max-width:none;object-fit:cover;object-position:var(--pos);filter:saturate(1.08) contrast(1.04)}
+.hc-shot::after{content:"";position:absolute;inset:0;
+  background:repeating-linear-gradient(180deg,rgba(0,0,0,.16) 0 1px,transparent 1px 3px),radial-gradient(ellipse at 50% 45%,transparent 55%,rgba(0,0,0,.5) 100%),
+  linear-gradient(160deg,rgba(255,255,255,.1),transparent 35%)}
+.hc-cap{z-index:3;pointer-events:none;font-family:var(--mono)}
+.hc-rec{position:absolute;top:7%;right:5%;display:flex;align-items:center;gap:.45em;font-size:max(8px,1.05cqw);font-weight:600;letter-spacing:.08em;color:#fff4e0}
+.hc-rec::before{content:"";width:.8em;height:.8em;border-radius:50%;background:#e8402f;box-shadow:0 0 .6em #e8402f;animation:hc-rec 1.6s steps(1) infinite}
+@keyframes hc-rec{50%{opacity:.15}}
+.hc-bottom{position:absolute;left:4%;right:4%;bottom:5%;display:flex;flex-direction:column;align-items:flex-start;gap:.3em}
+.hc-lower{max-width:100%;background:var(--honey);color:var(--wax);padding:.28em .6em .22em;
+  font-size:max(7.5px,.9cqw);letter-spacing:.03em;text-transform:uppercase;line-height:1.3}
+.hc-lower b{font-weight:600}
+.hc-lower span{font-size:.82em;opacity:.85}
+.hc-sub{align-self:stretch;background:rgba(10,8,5,.82);color:var(--cream);padding:.3em .55em;
+  font-size:max(8px,.92cqw);line-height:1.35}
+/* subtitles only where the screens are big enough to read them; the list carries every line */
+.hc-sub{display:none}
+@container (min-width:840px){.hc-sub{display:block}}
+.keepers-note{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--line);font-size:.75rem;color:#8a7f66}
+@media(max-width:860px){
+  .hivecam{grid-template-columns:minmax(0,1fr);grid-template-areas:"head" "art" "list"}
+  .hivecam h2{white-space:normal;font-size:clamp(2.5rem,11vw,3.4rem)}
+  .skep{position:relative;top:0;justify-self:stretch;width:auto;margin:0 calc(-1 * var(--bleed) - 6vw) -6vw}
+  .hc-lower span{display:none}
+  .hivecam .lede{margin-bottom:1.6rem}
+  .hc-lower{font-size:max(7.5px,1.75cqw)}
+  .hc-rec{font-size:max(7px,1.8cqw)}
+}
+@media(prefers-reduced-motion:reduce){.hc-rec::before{animation:none}}
+
 /* ---------- form ---------- */
 form{max-width:660px}
 fieldset{border:0;margin-bottom:2.2rem}
@@ -240,6 +295,72 @@ footer p+p{margin-top:.8em}
 🔀 SWITCHOVER[fable] reason=scoped-cap-83% tier=<i>routine</i> (headroom at destination)
 429 → transparent retry on alternate source · <i>client saw one 200</i></pre>
     </div>
+  </section>
+
+  <section id="keepers">
+    <div class="hivecam">
+      <div class="hivecam-head">
+        <div class="section-tag"><span class="hex-dot" aria-hidden="true"></span>the keepers</div>
+        <h2>Meet your<br>fellow keepers</h2>
+        <p class="lede">Everyone here keeps more than one hive. Apiary makes each keeper’s own hives work as one.</p>
+      </div>
+      <figure class="skep">
+        <div class="skep-stage">
+          <div class="hc-shot" style="--x:37.86%;--y:11.61%;--w:24.11%;--h:17.08%;--pos:50% 62%"><img src="/og/keepers/marigold.webp" width="960" height="960" loading="lazy" decoding="async" alt="A beekeeper asleep in a deck chair under the stars, beside three beehives built like server racks."></div>
+          <div class="hc-shot" style="--x:23.49%;--y:32.24%;--w:21.20%;--h:18.96%;--pos:50% 38%"><img src="/og/keepers/basil.webp" width="960" height="960" loading="lazy" decoding="async" alt="A tall beekeeper points a stick at a board of coloured pegs, between two server-rack beehives joined by a little bridge of marching bees."></div>
+          <div class="hc-shot" style="--x:54.90%;--y:32.19%;--w:23.28%;--h:19.22%;--pos:56% 42%"><img src="/og/keepers/society.webp" width="960" height="960" loading="lazy" decoding="async" alt="A beekeeper running along a long row of server-rack beehives with an armful of servers and honeycomb frames, past a tipped-over wheelbarrow."></div>
+          <div class="hc-shot" style="--x:33.70%;--y:55.26%;--w:28.07%;--h:19.32%;--pos:50% 56%"><img src="/og/keepers/penny.webp" width="960" height="960" loading="lazy" decoding="async" alt="In a walled kitchen garden, a beekeeper in a patched suit squeezes one drop from an eyedropper into a small gilded server-rack hive wearing a crown, while a watering can pours sugar water into a plain one."></div>
+          <img class="skep-art" src="/og/keepers/skep.webp" width="1440" height="1440" loading="lazy" decoding="async" alt="">
+          <div class="hc-cap" style="--x:37.86%;--y:11.61%;--w:24.11%;--h:17.08%;--pos:50% 62%" aria-hidden="true"><span class="hc-rec">REC</span><span class="hc-bottom"><span class="hc-lower"><b>Marigold Thrice</b><span> / three hives, all hers</span></span><span class="hc-sub">“One hive was never enough for me, so now I keep three.”</span></span></div>
+          <div class="hc-cap" style="--x:23.49%;--y:32.24%;--w:21.20%;--h:18.96%;--pos:50% 38%" aria-hidden="true"><span class="hc-rec">REC</span><span class="hc-bottom"><span class="hc-lower"><b>Basil Overbee</b><span> / runs a tight colony</span></span><span class="hc-sub">“Every worker here has a role. Scouts plan, builders build, inspectors check the comb, and I redo the rota most mornings.”</span></span></div>
+          <div class="hc-cap" style="--x:54.90%;--y:32.19%;--w:23.28%;--h:19.22%;--pos:56% 42%" aria-hidden="true"><span class="hc-rec">REC</span><span class="hc-bottom"><span class="hc-lower"><b>The Ten Hive Society</b><span> / not beekeepers by trade</span></span><span class="hc-sub">“None of us keep bees for a living. We bought a hive, then another, and somehow ended up with ten.”</span></span></div>
+          <div class="hc-cap" style="--x:33.70%;--y:55.26%;--w:28.07%;--h:19.32%;--pos:50% 56%" aria-hidden="true"><span class="hc-rec">REC</span><span class="hc-bottom"><span class="hc-lower"><b>Penny Combsworth</b><span> / counts every drop</span></span><span class="hc-sub">“The queen does the thinking. The workers do the building, and they do it perfectly well on sugar water.”</span></span></div>
+        </div>
+      </figure>
+      <ol class="keeper-list">
+        <li>
+          <h3>Marigold Thrice</h3>
+          <p class="role">three hives, all hers</p>
+          <blockquote>“One hive was never enough for me, so now I keep three. The trouble
+          used to come mid-job: a hive would run dry, the whole swarm would down
+          tools, and when the flow came back they’d swear they had finished. They
+          had not finished. Now when one gets low the workers slip next door and
+          carry on. I hear nothing until all three are nearly empty, and it tells
+          me the day that will be.”</blockquote>
+        </li>
+        <li>
+          <h3>Basil Overbee</h3>
+          <p class="role">runs a tight colony</p>
+          <blockquote>“Every worker here has a role. Scouts plan, builders build, inspectors
+          check the comb, and I redo the rota most mornings, depending on who’s
+          having a good week. Nothing touches my rota. I wanted one small thing:
+          when my best forager’s hive runs low, she carries on from my other
+          hive, and nobody swaps her for someone cheaper. Both hives are mine. It
+          doesn’t go near anyone else’s.”</blockquote>
+        </li>
+        <li>
+          <h3>The Ten Hive Society</h3>
+          <p class="role">not beekeepers by trade</p>
+          <blockquote>“None of us keep bees for a living. We just found we couldn’t get our
+          work done without them, so we bought a hive, then another, and somehow
+          ended up with ten. For months we’d work one until it ran dry, pick
+          everything up, carry it to the next and start again, days at a stretch.
+          The honey bill was remarkable. Now it’s one big hive as far as anyone
+          here can tell, and we can finally see where the honey goes.”</blockquote>
+        </li>
+        <li>
+          <h3>Penny Combsworth</h3>
+          <p class="role">counts every drop</p>
+          <blockquote>“The queen does the thinking. The workers do the building, and they do
+          it perfectly well on sugar water. I’m not paying royal-jelly prices for
+          a job a worker can do, and some jobs never leave my own garden at all.
+          Before I let it near a hive I asked who keeps the key to the honey
+          house. The answer is on <a href="https://apiary.wtf/privacy">the privacy page</a>,
+          in plain words. I read the whole thing. I’ve never done that before.”</blockquote>
+        </li>
+      </ol>
+    </div>
+    <p class="keepers-note">All hives shown are honey-cooled.</p>
   </section>
 
   <section id="join">

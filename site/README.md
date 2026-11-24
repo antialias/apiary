@@ -48,6 +48,23 @@ Apps that play an animated preview (Slack and Discord, told apart by User-Agent 
 by `og/animate.sh <page>` from `og/motion/<page>.mp4`, a five-second image-to-video clip of the
 page's art, so its first frame is the still card; it fades back into that frame to loop.
 
+## The keepers
+
+The landing page's "the keepers" section, "Meet your fellow keepers", introduces four beekeepers, each
+a kind of person with more than one account, as if they were members. They are types, not customers:
+pun names, server racks for hives and a honey-cooling joke keep them plainly parody. Nobody real is
+quoted or pictured, and no keeper may be rewritten to read as a real customer's review.
+
+The four appear on a hive-cam sculpture: `static/og/keepers/skep.webp`, a skep of old televisions with
+four screens cut out (transparent). Each keeper's photo sits under a hole, and a code-native caption
+(REC, a name strip, a subtitle) sits over it, all placed by percentages of the art, so the sculpture
+scales as one. The subtitles show only when the sculpture is wide enough to read them; the list beside
+it carries every keeper's full line. The accepted design is `docs/design/keepers/`.
+
+The photos are generated, and every face is behind a veil. They are `static/og/keepers/<name>.webp`
+(960x960), under `/og/` because that is a path apiary.wtf's shared router already sends to this site;
+a new top-level path would need the production router changed first.
+
 ## Deploy (prod: https://apiary.wtf)
 
 The `site` workflow (`.github/workflows/site.yml`) vets and builds on every PR
