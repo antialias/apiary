@@ -138,7 +138,7 @@ func TestProxyReadsTheBrainsPreferredAndAgreesOnEveryCheck(t *testing.T) {
 		{"pay [] refuses a spent allowance", seen{"lane:opus", a}, func(c dialCheck) bool { return c.no() && c.Reason == "pay" }},
 		{"codex gate closed under 100, pay []", seen{"frontier/gpt/gpt-5.6", "gpt"},
 			func(c dialCheck) bool { return c.no() && c.Reason == "pay" && c.Until.known() }},
-		{"the image route paying its credits on the same codex account", seen{"images/gpt/gpt-image-2", "gpt"},
+		{"the image route paying its credits on the same codex account", seen{"image/gpt/gpt-image-2", "gpt"},
 			func(c dialCheck) bool { return c.paid() && c.Pot == "gpt/credits" }},
 	} {
 		if c, ok := got[w.at]; !ok || !w.ok(c) {
@@ -148,8 +148,8 @@ func TestProxyReadsTheBrainsPreferredAndAgreesOnEveryCheck(t *testing.T) {
 
 	// The image door's class decodes as one (C4): its row carries the image
 	// modality, so the chat door refuses it and no picker lists it.
-	if e, ok := lan.matchRegistryClassName("images"); !ok || e.Modality != modalityImage {
-		t.Errorf("class images decoded as %+v, want an image row", e)
+	if e, ok := lan.matchRegistryClassName("image"); !ok || e.Modality != modalityImage {
+		t.Errorf("class image decoded as %+v, want an image row", e)
 	}
 
 	// The ledger the budget gate reads and ledger.go charges by, as the brain

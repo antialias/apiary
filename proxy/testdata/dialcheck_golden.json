@@ -2419,7 +2419,7 @@
   {
    "name": "image: codex open is included",
    "route": {
-    "id": "images/gpt/gpt-image-2",
+    "id": "image/gpt/gpt-image-2",
     "pay": [
      "gpt/credits"
     ],
@@ -2466,7 +2466,7 @@
   {
    "name": "image: codex closed, credits open: paid from gpt/credits",
    "route": {
-    "id": "images/gpt/gpt-image-2",
+    "id": "image/gpt/gpt-image-2",
     "pay": [
      "gpt/credits"
     ],
@@ -2513,7 +2513,7 @@
   {
    "name": "image: codex closed, credits closed: spent until the reset",
    "route": {
-    "id": "images/gpt/gpt-image-2",
+    "id": "image/gpt/gpt-image-2",
     "pay": [
      "gpt/credits"
     ],
@@ -2560,7 +2560,7 @@
   {
    "name": "image: codex closed, credits state unknown, pay listing them: paid, unknown basis (as for chat)",
    "route": {
-    "id": "images/gpt/gpt-image-2",
+    "id": "image/gpt/gpt-image-2",
     "pay": [
      "gpt/credits"
     ],
@@ -2607,7 +2607,7 @@
   {
    "name": "image: codex never measured: unknown until the next poll",
    "route": {
-    "id": "images/gpt/gpt-image-2",
+    "id": "image/gpt/gpt-image-2",
     "pay": [
      "gpt/credits"
     ],
@@ -2654,7 +2654,7 @@
   {
    "name": "image: codex closed, credits open, pay []: no (pay), never paid",
    "route": {
-    "id": "images/gpt/gpt-image-2",
+    "id": "image/gpt/gpt-image-2",
     "pay": [],
     "stop_at": null,
     "scope": null
@@ -7458,7 +7458,7 @@
   {
    "name": "runway with pay []: no (pay) until paid, whatever the balance",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [],
     "stop_at": null,
     "scope": "gpt_image_2"
@@ -7508,7 +7508,7 @@
   {
    "name": "runway funded and paid: paid on its balance",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -7560,7 +7560,7 @@
   {
    "name": "runway funded, the brain's own check (no request): paid",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -7609,7 +7609,7 @@
   {
    "name": "runway never measured: unknown until the next poll",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -7651,7 +7651,7 @@
   {
    "name": "runway's balance unread: paid, basis unknown (the refusal is the worst it costs)",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -7703,7 +7703,7 @@
   {
    "name": "runway on a stale reading: paid on the last balance, basis stale",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -7755,7 +7755,7 @@
   {
    "name": "runway at a zero balance, topup off: no (balance) until paid",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -7811,7 +7811,7 @@
   {
    "name": "runway at a zero balance, no setting: topup is off",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -7863,7 +7863,7 @@
   {
    "name": "runway at a zero balance, topup on: no (balance) until the hourly refill after the reading",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -7919,7 +7919,7 @@
   {
    "name": "runway at a zero balance, topup on, the refill hour passed: the next poll",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -7975,7 +7975,7 @@
   {
    "name": "runway with pay [] at a zero balance is no (pay), not no (balance)",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [],
     "stop_at": null,
     "scope": "gpt_image_2"
@@ -8029,7 +8029,7 @@
   {
    "name": "runway's balance below the request's max_cost: no (balance)",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -8081,7 +8081,7 @@
   {
    "name": "runway's balance exactly the request's max_cost: paid",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -8133,7 +8133,7 @@
   {
    "name": "runway's balance above 0, the cost unknown: paid",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -8185,7 +8185,7 @@
   {
    "name": "runway's rolling count full: no (spent) until the next poll (a rolling count names no reset)",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -8237,7 +8237,7 @@
   {
    "name": "runway's rolling count one short, two outputs asked: no (spent)",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -8289,7 +8289,7 @@
   {
    "name": "runway's rolling count one short, one output asked: paid",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -8341,7 +8341,7 @@
   {
    "name": "runway's rolling count unread: paid",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -8393,7 +8393,7 @@
   {
    "name": "a rolling count of another model does not bind this route",
    "route": {
-    "id": "images/runway/other",
+    "id": "image/runway/other",
     "pay": [
      "runway/balance"
     ],
@@ -8445,7 +8445,7 @@
   {
    "name": "a closed window on runway (a refusal record's): no (spent) until it reopens",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -8507,7 +8507,7 @@
   {
    "name": "runway's budget: spend + reserved + max_cost at the budget is paid",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -8618,7 +8618,7 @@
   {
    "name": "runway's budget: spend + reserved + max_cost over the budget is no (budget) to the period's end",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -8729,7 +8729,7 @@
   {
    "name": "runway's budget with the cost unknown: reached at spend + reserved",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -8840,7 +8840,7 @@
   {
    "name": "runway's route budget counts what this route has reserved",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -8879,7 +8879,7 @@
     "runway/balance": {
      "topup": "off",
      "route_budgets": {
-      "images/runway/gpt_image_2": 10.0
+      "image/runway/gpt_image_2": 10.0
      }
     }
    },
@@ -8933,11 +8933,11 @@
       "unit": "runway_credit",
       "period_spend": 5.0,
       "routes": {
-       "images/runway/gpt_image_2": 5.0
+       "image/runway/gpt_image_2": 5.0
       },
       "unpriced": {},
       "routes_reserved": {
-       "images/runway/gpt_image_2": 4.0
+       "image/runway/gpt_image_2": 4.0
       }
      }
     }
@@ -8957,7 +8957,7 @@
   {
    "name": "another route's reservation is not this route's",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -8996,7 +8996,7 @@
     "runway/balance": {
      "topup": "off",
      "route_budgets": {
-      "images/runway/gpt_image_2": 10.0
+      "image/runway/gpt_image_2": 10.0
      }
     }
    },
@@ -9050,11 +9050,11 @@
       "unit": "runway_credit",
       "period_spend": 5.0,
       "routes": {
-       "images/runway/gpt_image_2": 5.0
+       "image/runway/gpt_image_2": 5.0
       },
       "unpriced": {},
       "routes_reserved": {
-       "images/runway/other": 9.0
+       "image/runway/other": 9.0
       }
      }
     }
@@ -9074,7 +9074,7 @@
   {
    "name": "last month's reservation still holds: a dial in flight has not settled",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -9185,7 +9185,7 @@
   {
    "name": "runway_credit needs no rate table: a budget with room is paid on a ledger with no runway rates",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -9295,7 +9295,7 @@
   {
    "name": "a ledger with no rule for runway_credit: unknown",
    "route": {
-    "id": "images/runway/gpt_image_2",
+    "id": "image/runway/gpt_image_2",
     "pay": [
      "runway/balance"
     ],
@@ -12720,10 +12720,10 @@
    }
   },
   {
-   "name": "images, codex closed (62 M2), pay []: retryable to the codex reset, with the permit",
+   "name": "image, codex closed (62 M2), pay []: retryable to the codex reset, with the permit",
    "routes": [
     {
-     "id": "images/gpt/gpt-image-2",
+     "id": "image/gpt/gpt-image-2",
      "pay": [],
      "stop_at": null,
      "scope": null,
@@ -12766,7 +12766,7 @@
    "want": {
     "members": [
      {
-      "route": "images/gpt/gpt-image-2",
+      "route": "image/gpt/gpt-image-2",
       "accounts": [
        {
         "account": "gpt",
@@ -12786,10 +12786,10 @@
     "options": [
      {
       "kind": "permit",
-      "route": "images/gpt/gpt-image-2",
+      "route": "image/gpt/gpt-image-2",
       "account": "gpt",
       "pot": "gpt/credits",
-      "action": "add gpt/credits to images/gpt/gpt-image-2's pay"
+      "action": "add gpt/credits to image/gpt/gpt-image-2's pay"
      }
     ]
    }
@@ -12798,7 +12798,7 @@
    "name": "image: codex closed, credits closed: the reset, and money to add",
    "routes": [
     {
-     "id": "images/gpt/gpt-image-2",
+     "id": "image/gpt/gpt-image-2",
      "pay": [
       "gpt/credits"
      ],
@@ -12847,7 +12847,7 @@
    "want": {
     "members": [
      {
-      "route": "images/gpt/gpt-image-2",
+      "route": "image/gpt/gpt-image-2",
       "accounts": [
        {
         "account": "gpt",
@@ -12867,7 +12867,7 @@
     "options": [
      {
       "kind": "fund",
-      "route": "images/gpt/gpt-image-2",
+      "route": "image/gpt/gpt-image-2",
       "account": "gpt",
       "pot": "gpt/credits",
       "action": "add money to gpt/credits"
@@ -12876,10 +12876,10 @@
    }
   },
   {
-   "name": "images with no codex account: no body, the typed 503",
+   "name": "image with no codex account: no body, the typed 503",
    "routes": [
     {
-     "id": "images/gpt/gpt-image-2",
+     "id": "image/gpt/gpt-image-2",
      "pay": [
       "gpt/credits"
      ],
@@ -13485,10 +13485,10 @@
    }
   },
   {
-   "name": "images, codex closed, runway pay []: the codex reset, a permit for each",
+   "name": "image, codex closed, runway pay []: the codex reset, a permit for each",
    "routes": [
     {
-     "id": "images/gpt/gpt-image-2",
+     "id": "image/gpt/gpt-image-2",
      "pay": [],
      "stop_at": null,
      "scope": null,
@@ -13497,7 +13497,7 @@
      ]
     },
     {
-     "id": "images/runway/gpt_image_2",
+     "id": "image/runway/gpt_image_2",
      "pay": [],
      "stop_at": null,
      "scope": "gpt_image_2",
@@ -13570,7 +13570,7 @@
    "want": {
     "members": [
      {
-      "route": "images/gpt/gpt-image-2",
+      "route": "image/gpt/gpt-image-2",
       "accounts": [
        {
         "account": "gpt",
@@ -13583,7 +13583,7 @@
       ]
      },
      {
-      "route": "images/runway/gpt_image_2",
+      "route": "image/runway/gpt_image_2",
       "accounts": [
        {
         "account": "runway",
@@ -13603,17 +13603,17 @@
     "options": [
      {
       "kind": "permit",
-      "route": "images/gpt/gpt-image-2",
+      "route": "image/gpt/gpt-image-2",
       "account": "gpt",
       "pot": "gpt/credits",
-      "action": "add gpt/credits to images/gpt/gpt-image-2's pay"
+      "action": "add gpt/credits to image/gpt/gpt-image-2's pay"
      },
      {
       "kind": "permit",
-      "route": "images/runway/gpt_image_2",
+      "route": "image/runway/gpt_image_2",
       "account": "runway",
       "pot": "runway/balance",
-      "action": "add runway/balance to images/runway/gpt_image_2's pay"
+      "action": "add runway/balance to image/runway/gpt_image_2's pay"
      }
     ]
    }
@@ -13622,7 +13622,7 @@
    "name": "runway alone at a zero balance, topup off: not retryable, add money",
    "routes": [
     {
-     "id": "images/runway/gpt_image_2",
+     "id": "image/runway/gpt_image_2",
      "pay": [
       "runway/balance"
      ],
@@ -13676,7 +13676,7 @@
    "want": {
     "members": [
      {
-      "route": "images/runway/gpt_image_2",
+      "route": "image/runway/gpt_image_2",
       "accounts": [
        {
         "account": "runway",
@@ -13696,7 +13696,7 @@
     "options": [
      {
       "kind": "fund",
-      "route": "images/runway/gpt_image_2",
+      "route": "image/runway/gpt_image_2",
       "account": "runway",
       "pot": "runway/balance",
       "action": "add money to runway/balance"
@@ -13708,7 +13708,7 @@
    "name": "runway alone at a zero balance, topup on: retryable at the hourly refill, derived",
    "routes": [
     {
-     "id": "images/runway/gpt_image_2",
+     "id": "image/runway/gpt_image_2",
      "pay": [
       "runway/balance"
      ],
@@ -13762,7 +13762,7 @@
    "want": {
     "members": [
      {
-      "route": "images/runway/gpt_image_2",
+      "route": "image/runway/gpt_image_2",
       "accounts": [
        {
         "account": "runway",
@@ -13782,7 +13782,7 @@
     "options": [
      {
       "kind": "fund",
-      "route": "images/runway/gpt_image_2",
+      "route": "image/runway/gpt_image_2",
       "account": "runway",
       "pot": "runway/balance",
       "action": "add money to runway/balance"
@@ -13794,7 +13794,7 @@
    "name": "runway with pay [] at a zero balance: money and the permit together",
    "routes": [
     {
-     "id": "images/runway/gpt_image_2",
+     "id": "image/runway/gpt_image_2",
      "pay": [],
      "stop_at": null,
      "scope": "gpt_image_2",
@@ -13842,7 +13842,7 @@
    "want": {
     "members": [
      {
-      "route": "images/runway/gpt_image_2",
+      "route": "image/runway/gpt_image_2",
       "accounts": [
        {
         "account": "runway",
@@ -13862,10 +13862,10 @@
     "options": [
      {
       "kind": "fund",
-      "route": "images/runway/gpt_image_2",
+      "route": "image/runway/gpt_image_2",
       "account": "runway",
       "pot": "runway/balance",
-      "action": "add money to runway/balance, and add runway/balance to images/runway/gpt_image_2's pay"
+      "action": "add money to runway/balance, and add runway/balance to image/runway/gpt_image_2's pay"
      }
     ]
    }
@@ -13874,7 +13874,7 @@
    "name": "runway's budget reached with this request's cost: raise it, to the period's end",
    "routes": [
     {
-     "id": "images/runway/gpt_image_2",
+     "id": "image/runway/gpt_image_2",
      "pay": [
       "runway/balance"
      ],
@@ -13982,7 +13982,7 @@
    "want": {
     "members": [
      {
-      "route": "images/runway/gpt_image_2",
+      "route": "image/runway/gpt_image_2",
       "accounts": [
        {
         "account": "runway",
@@ -14002,7 +14002,7 @@
     "options": [
      {
       "kind": "budget",
-      "route": "images/runway/gpt_image_2",
+      "route": "image/runway/gpt_image_2",
       "account": "runway",
       "pot": "runway/balance",
       "action": "raise runway/balance's budget"
@@ -14011,10 +14011,10 @@
    }
   },
   {
-   "name": "images, gpt blocked alone: no time, no option, not retryable",
+   "name": "image, gpt blocked alone: no time, no option, not retryable",
    "routes": [
     {
-     "id": "images/gpt/gpt-image-2",
+     "id": "image/gpt/gpt-image-2",
      "pay": [
       "gpt/credits"
      ],
@@ -14059,7 +14059,7 @@
     "outputs": 1
    },
    "given": {
-    "images/gpt/gpt-image-2": {
+    "image/gpt/gpt-image-2": {
      "gpt": {
       "check": "no",
       "pot": null,
@@ -14072,7 +14072,7 @@
    "want": {
     "members": [
      {
-      "route": "images/gpt/gpt-image-2",
+      "route": "image/gpt/gpt-image-2",
       "accounts": [
        {
         "account": "gpt",
@@ -14093,10 +14093,10 @@
    }
   },
   {
-   "name": "images, gpt blocked beside runway out of money: until paid, add money to runway only",
+   "name": "image, gpt blocked beside runway out of money: until paid, add money to runway only",
    "routes": [
     {
-     "id": "images/gpt/gpt-image-2",
+     "id": "image/gpt/gpt-image-2",
      "pay": [
       "gpt/credits"
      ],
@@ -14107,7 +14107,7 @@
      ]
     },
     {
-     "id": "images/runway/gpt_image_2",
+     "id": "image/runway/gpt_image_2",
      "pay": [
       "runway/balance"
      ],
@@ -14183,7 +14183,7 @@
     "outputs": 1
    },
    "given": {
-    "images/gpt/gpt-image-2": {
+    "image/gpt/gpt-image-2": {
      "gpt": {
       "check": "no",
       "pot": null,
@@ -14196,7 +14196,7 @@
    "want": {
     "members": [
      {
-      "route": "images/gpt/gpt-image-2",
+      "route": "image/gpt/gpt-image-2",
       "accounts": [
        {
         "account": "gpt",
@@ -14209,7 +14209,7 @@
       ]
      },
      {
-      "route": "images/runway/gpt_image_2",
+      "route": "image/runway/gpt_image_2",
       "accounts": [
        {
         "account": "runway",
@@ -14229,7 +14229,7 @@
     "options": [
      {
       "kind": "fund",
-      "route": "images/runway/gpt_image_2",
+      "route": "image/runway/gpt_image_2",
       "account": "runway",
       "pot": "runway/balance",
       "action": "add money to runway/balance"
@@ -14238,10 +14238,10 @@
    }
   },
   {
-   "name": "images, gpt blocked beside runway's refill: the refill's time, retryable",
+   "name": "image, gpt blocked beside runway's refill: the refill's time, retryable",
    "routes": [
     {
-     "id": "images/gpt/gpt-image-2",
+     "id": "image/gpt/gpt-image-2",
      "pay": [
       "gpt/credits"
      ],
@@ -14252,7 +14252,7 @@
      ]
     },
     {
-     "id": "images/runway/gpt_image_2",
+     "id": "image/runway/gpt_image_2",
      "pay": [
       "runway/balance"
      ],
@@ -14328,7 +14328,7 @@
     "outputs": 1
    },
    "given": {
-    "images/gpt/gpt-image-2": {
+    "image/gpt/gpt-image-2": {
      "gpt": {
       "check": "no",
       "pot": null,
@@ -14341,7 +14341,7 @@
    "want": {
     "members": [
      {
-      "route": "images/gpt/gpt-image-2",
+      "route": "image/gpt/gpt-image-2",
       "accounts": [
        {
         "account": "gpt",
@@ -14354,7 +14354,7 @@
       ]
      },
      {
-      "route": "images/runway/gpt_image_2",
+      "route": "image/runway/gpt_image_2",
       "accounts": [
        {
         "account": "runway",
@@ -14374,7 +14374,7 @@
     "options": [
      {
       "kind": "fund",
-      "route": "images/runway/gpt_image_2",
+      "route": "image/runway/gpt_image_2",
       "account": "runway",
       "pot": "runway/balance",
       "action": "add money to runway/balance"
@@ -14383,10 +14383,10 @@
    }
   },
   {
-   "name": "images, gpt blocked over a spent window with a usable reset: blocked wins, no time, no option",
+   "name": "image, gpt blocked over a spent window with a usable reset: blocked wins, no time, no option",
    "routes": [
     {
-     "id": "images/gpt/gpt-image-2",
+     "id": "image/gpt/gpt-image-2",
      "pay": [
       "gpt/credits"
      ],
@@ -14455,7 +14455,7 @@
     "outputs": 1
    },
    "given": {
-    "images/gpt/gpt-image-2": {
+    "image/gpt/gpt-image-2": {
      "gpt": {
       "check": "no",
       "pot": null,
@@ -14468,7 +14468,7 @@
    "want": {
     "members": [
      {
-      "route": "images/gpt/gpt-image-2",
+      "route": "image/gpt/gpt-image-2",
       "accounts": [
        {
         "account": "gpt",

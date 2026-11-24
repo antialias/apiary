@@ -1773,9 +1773,7 @@ def boot_brain(entry, classes_doc, windows=None):
 def image_boot_doc():
     """A classes.json with a chat class and an image class on gpt (a shared
     driver's image model), and the windows history a running brain left."""
-    # migrate_images.py's IMAGES_CLASS, written out: the migrations are household
-    # and the shared edition carries none of them.
-    images = {"class": "images", "display": "Images", "request_kind": "image",
+    images = {"class": "image", "display": "Image", "request_kind": "image",
               "members": [{"priority": 1, "kind": "provider", "provider": "gpt",
                            "model": "gpt-image-2", "pay": ["gpt/credits"]}]}
     doc = {"classes": [copy.deepcopy(c) for c in frontier_cfg()] + [images]}
@@ -1789,11 +1787,11 @@ class TestBootLoadsClassesAfterTheDrivers(unittest.TestCase):
 
     def test_an_image_class_survives_the_boot(self):
         doc = image_boot_doc()
-        prior = {"images": {"window": None, "previous": None, "changed_at": None}}
+        prior = {"image": {"window": None, "previous": None, "changed_at": None}}
         pref, windows, log_text = boot_brain("brain.py", doc, prior)
-        self.assertNotIn("dropped 'images'", log_text)
-        self.assertIn("images", pref["classes"], log_text[-2000:])
-        self.assertIn("images", windows)
+        self.assertNotIn("dropped 'image'", log_text)
+        self.assertIn("image", pref["classes"], log_text[-2000:])
+        self.assertIn("image", windows)
 
 
 class TestImageClassNamesMayCarryDigits(unittest.TestCase):
@@ -16626,8 +16624,8 @@ class FakeBridge:
 def nview(balance=None, read_at=None, dry=False, **over):
     v = {"name": "Acme", "serves": "image generation", "billing_url": "https://pay.example/acme",
          "dry": dry, "balance": balance, "read_at": read_at, "unit": "acme_credit",
-         "resets_at": None, "classes": [{"class": "images", "covered_by": "other/model-x"},
-                                        {"class": "images-acme", "covered_by": None}]}
+         "resets_at": None, "classes": [{"class": "image", "covered_by": "other/model-x"},
+                                        {"class": "image-acme", "covered_by": None}]}
     v.update(over)
     return v
 
@@ -16672,21 +16670,21 @@ class TestNoticesCoverage(unittest.TestCase):
     def ctx(own_checks, other_check="no"):
         own = {"kind": "provider", "provider": "acme", "model": "m1"}
         other = {"kind": "provider", "provider": "other", "model": "model-x"}
-        return {"classes": [{"class": "images", "members": [own, other]}],
-                "routes": {"images/acme/m1": {"accounts": ["acme", "acme-two"]},
-                           "images/other/model-x": {"accounts": ["other"]}},
-                "checks": {"images/acme/m1": own_checks,
-                           "images/other/model-x": {"other": {"check": other_check}}}}
+        return {"classes": [{"class": "image", "members": [own, other]}],
+                "routes": {"image/acme/m1": {"accounts": ["acme", "acme-two"]},
+                           "image/other/model-x": {"accounts": ["other"]}},
+                "checks": {"image/acme/m1": own_checks,
+                           "image/other/model-x": {"other": {"check": other_check}}}}
 
     def test_another_account_of_its_own_member_covers_it(self):
         ctx = self.ctx({"acme": {"check": "no"}, "acme-two": {"check": "paid"}}, other_check="included")
-        self.assertEqual(ex._notices_coverage("acme", ctx), [{"class": "images", "covered_by": "acme-two"}])
+        self.assertEqual(ex._notices_coverage("acme", ctx), [{"class": "image", "covered_by": "acme-two"}])
 
     def test_its_own_check_never_covers_it(self):
         ctx = self.ctx({"acme": {"check": "paid"}, "acme-two": {"check": "no"}}, other_check="included")
-        self.assertEqual(ex._notices_coverage("acme", ctx), [{"class": "images", "covered_by": "other/model-x"}])
+        self.assertEqual(ex._notices_coverage("acme", ctx), [{"class": "image", "covered_by": "other/model-x"}])
         ctx = self.ctx({"acme": {"check": "paid"}, "acme-two": {"check": "no"}})
-        self.assertEqual(ex._notices_coverage("acme", ctx), [{"class": "images", "covered_by": None}])
+        self.assertEqual(ex._notices_coverage("acme", ctx), [{"class": "image", "covered_by": None}])
 
     def test_a_class_it_does_not_serve_is_not_listed(self):
         self.assertEqual(ex._notices_coverage("nobody", self.ctx({})), [])
@@ -17085,8 +17083,8 @@ class TestNoticesWords(unittest.TestCase):
     def test_the_class_coverage_text(self):
         v = nview()
         _, _, desc = notices.message("dry", "acme", v)
-        self.assertEqual(desc, "Image generation stopped. Class images still has other/model-x; "
-                               "images-acme has nothing else. Top up: https://pay.example/acme")
+        self.assertEqual(desc, "Image generation stopped. Class image still has other/model-x; "
+                               "image-acme has nothing else. Top up: https://pay.example/acme")
         _, _, desc = notices.message("dry", "acme", nview(classes=[], serves="music generation",
                                                           resets_at=N_T0, billing_url=None))
         self.assertEqual(desc, "Music generation stopped. Nothing else covers it. "
@@ -17095,8 +17093,8 @@ class TestNoticesWords(unittest.TestCase):
             "low", "acme", nview(balance=1240, pace={"per_day": 1100.0, "span_days": 7}))
         self.assertEqual(title, "Acme: about a day of credit left")
         self.assertEqual(desc, "1,240 credits left; the last 7 days spent about 1,100 a day. "
-                               "Image generation stops when it runs out; class images still has "
-                               "other/model-x; images-acme has nothing else. "
+                               "Image generation stops when it runs out; class image still has "
+                               "other/model-x; image-acme has nothing else. "
                                "Top up: https://pay.example/acme")
         title, _, _ = notices.message("dry", "acme", nview(name=None))
         self.assertEqual(title, "acme ran dry: needs payment", "no name: the account id")

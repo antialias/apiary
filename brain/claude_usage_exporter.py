@@ -216,7 +216,7 @@ SCOPE_ALIASES = {
 #       {"priority": 2, "kind": "provider", "provider": "kimi", "model": "kimi-k3",
 #        "context_window": 256000, "anthropic_token_ratio": 0.61}]}]
 # A class may carry "request_kind": "chat" (default) or "image" (quota-model 50
-# §2.9, C4: a class of the image door; "images" is its default and must be one).
+# §2.9, C4: a class of the image door; "image" is its default and must be one).
 # An image class has provider members only, and they declare no
 # context_window, anthropic_token_ratio or calibration (it has no token
 # window), so its window fields normalize to null. Every member's model makes
@@ -601,11 +601,11 @@ _ONBOARDING_MEMBER_REASON = ("onboarding marks a class the operator offers to ne
 # so an image member declares neither, and only a provider makes images.
 _REQUEST_KINDS = ("chat", "image")
 # The image door's default class (the proxy's hpImagesDefaultClass): a request
-# that names no class (model gpt-image-*) is routed here, so a chat class under
-# this name would serve the door nothing. Other image classes, such as the
-# one-provider images-runway, are reached by name (the request's model or its
-# X-Switch-Class header).
-IMAGE_CLASS = "images"
+# that names no class is routed here, so a chat class under this name would
+# serve the door nothing. Every other image class is reached by its own name
+# (the request's X-Switch-Class header, else its model): a class named for a
+# model, such as gpt-image-2, holds exactly the members that serve it.
+IMAGE_CLASS = "image"
 
 
 def _model_modality(provider, model):

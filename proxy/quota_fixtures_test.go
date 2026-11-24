@@ -164,8 +164,8 @@ func (env *e2eEnv) quotaBlocks(payload map[string]any) {
 	}
 	image := map[string]bool{}
 	if env.imageMembers != nil {
-		served["images"] = env.imageMembers
-		image["images"] = true
+		served["image"] = env.imageMembers
+		image["image"] = true
 		for name, ms := range env.imageClasses {
 			served[name], image[name] = ms, true
 		}

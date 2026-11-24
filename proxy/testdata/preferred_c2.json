@@ -789,10 +789,10 @@
     "units": "anthropic",
     "window_changed_at": null
    },
-   "images": {
+   "image": {
     "consumer": null,
     "context_window": null,
-    "display": "Images",
+    "display": "Image",
     "floor_member": null,
     "guidance": null,
     "members": [
@@ -828,7 +828,7 @@
       "provider": "gpt",
       "reserve_ceiling": null,
       "reserved": false,
-      "route": "images/gpt/gpt-image-2",
+      "route": "image/gpt/gpt-image-2",
       "scope": "gpt-image-2",
       "status": "ok",
       "stop_at": null,
@@ -867,7 +867,7 @@
       "provider": "runway",
       "reserve_ceiling": null,
       "reserved": false,
-      "route": "images/runway/gpt_image_2",
+      "route": "image/runway/gpt_image_2",
       "scope": "gpt_image_2",
       "status": "no_quota_data",
       "stop_at": null,
@@ -1292,7 +1292,7 @@
      "room": 0.0,
      "stale": []
     },
-    "images": {
+    "image": {
      "accounts": {},
      "asks": [],
      "back_at": 1800604800,
@@ -1964,7 +1964,7 @@
      "billing_url": "https://dev.runway.com/",
      "classes": [
       {
-       "class": "images",
+       "class": "image",
        "covered_by": "gpt/gpt-image-2"
       }
      ],
@@ -2522,7 +2522,7 @@
     "stop_at": null,
     "warnings": []
    },
-   "images/gpt/gpt-image-2": {
+   "image/gpt/gpt-image-2": {
     "accounts": [
      "gpt"
     ],
@@ -2542,7 +2542,7 @@
       "until": null
      }
     },
-    "class": "images",
+    "class": "image",
     "kind": "member",
     "lane": null,
     "member": "gpt/gpt-image-2",
@@ -2556,7 +2556,7 @@
     "stop_at": null,
     "warnings": []
    },
-   "images/runway/gpt_image_2": {
+   "image/runway/gpt_image_2": {
     "accounts": [
      "runway"
     ],
@@ -2576,7 +2576,7 @@
       "until": "until_paid"
      }
     },
-    "class": "images",
+    "class": "image",
     "kind": "member",
     "lane": null,
     "member": "runway/gpt_image_2",
@@ -2835,7 +2835,7 @@
    }
   },
   "settings": {
-   "classes": "be7b95eec61cd47e",
+   "classes": "20a29d91a264455a",
    "consumers": "6517fc63f54dc0d0",
    "money": "44136fa355b3678a",
    "stale_max": 1800

@@ -119,12 +119,12 @@ type e2eEnv struct {
 	bindCalls    atomic.Int64      // how many /class-bind requests arrived
 	bindReason   atomic.Value      // string: the /class-bind `reason` ("" = "bind: pointer")
 	// imageMembers (C4): when non-nil the fake brain also serves the image
-	// door's class, "images" (request_kind image), beside the chat class:
+	// door's class, "image" (request_kind image), beside the chat class:
 	// on /preferred, with its routes, and on /class-bind, sticky per session
 	// like the chat class, NEW binds landing on its first member. Under brainMu.
 	imageMembers []map[string]any
-	// imageClasses are more image classes beside "images", by name
-	// (images-runway, images-chatgpt): served like it on /preferred, with
+	// imageClasses are more image classes beside "image", by name
+	// (runway-alone, codex-alone): served like it on /preferred, with
 	// their routes, and on /class-bind. Under brainMu.
 	imageClasses map[string][]map[string]any
 	// imageOrder is an image class's `order` ("priority"), by name; absent
@@ -418,10 +418,10 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 					classes = map[string]any{}
 					payload["classes"] = classes
 				}
-				classes["images"] = map[string]any{
+				classes["image"] = map[string]any{
 					"display": "Images", "context_window": nil, "request_kind": "image",
-					"order": env.imageOrder["images"], "pointer": nil, "pinned": nil, "sessions": map[string]any{},
-					"members": withRoutes("images", env.imageMembers),
+					"order": env.imageOrder["image"], "pointer": nil, "pinned": nil, "sessions": map[string]any{},
+					"members": withRoutes("image", env.imageMembers),
 				}
 				for name, ms := range env.imageClasses {
 					classes[name] = map[string]any{
@@ -461,8 +461,8 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 				name = "frontier"
 			}
 			bindKey, bindTo := sid, env.bindTo.Load().(string)
-			if cname == "images" && env.imageMembers != nil {
-				members, name, bindKey, bindTo = env.imageMembers, "images", "images|"+sid, ""
+			if cname == "image" && env.imageMembers != nil {
+				members, name, bindKey, bindTo = env.imageMembers, "image", "image|"+sid, ""
 			}
 			if ms, ok := env.imageClasses[cname]; ok && env.imageMembers != nil {
 				members, name, bindKey, bindTo = ms, cname, cname+"|"+sid, ""

@@ -258,10 +258,10 @@ case("local 2h stale (the PC went away after a good poll): used at its last read
 case("local never measured: unknown until the first reading",
      route(LOCAL), "local", local(as_of=None), chk("no", reason="unknown", until=NOW + 240, basis="unknown"))
 
-# --- the image route (C4): the codex image model in class `images`, at
+# --- the image route (C4): the codex image model in class `image`, at
 # pay [gpt/credits]. Same account, same checks as chat
 # (account grain): only the route differs. ---
-IMG = "images/gpt/gpt-image-2"
+IMG = "image/gpt/gpt-image-2"
 case("image: codex open is included",
      route(IMG, pay=["gpt/credits"]), "gpt", codex(), chk("included"))
 case("image: codex closed, credits open: paid from gpt/credits",
@@ -478,7 +478,7 @@ case("a ledger with no rule for the pot's unit: unknown",
      pots=B100, ledger=ledger(spend=1.0, tables={"runway_credit": []}))
 
 # --- an api account (§1.2, C8): Runway's balance, every dial money ---
-RWY = "images/runway/gpt_image_2"
+RWY = "image/runway/gpt_image_2"
 RW_POT = "runway/balance"
 def rw_route(pay=(RW_POT,)):
     return route(RWY, pay=pay, scope="gpt_image_2")
@@ -533,7 +533,7 @@ case("runway's rolling count one short, one output asked: paid",
 case("runway's rolling count unread: paid",
      rw_route(), "runway", runway(used=None), chk("paid", pot=RW_POT), request=req(5))
 case("a rolling count of another model does not bind this route",
-     route("images/runway/other", pay=[RW_POT], scope="other"), "runway", runway(used=50.0),
+     route("image/runway/other", pay=[RW_POT], scope="other"), "runway", runway(used=50.0),
      chk("paid", pot=RW_POT), request=req(5))
 case("a closed window on runway (a refusal record's): no (spent) until it reopens",
      rw_route(), "runway",
@@ -556,7 +556,7 @@ case("runway's route budget counts what this route has reserved",
 case("another route's reservation is not this route's",
      rw_route(), "runway", runway(), chk("paid", pot=RW_POT),
      pots={RW_POT: {"topup": "off", "route_budgets": {RWY: 10.0}}},
-     ledger=rw_ledger(5.0, routes={RWY: 5.0}, routes_reserved={"images/runway/other": 9.0}), request=req(2))
+     ledger=rw_ledger(5.0, routes={RWY: 5.0}, routes_reserved={"image/runway/other": 9.0}), request=req(2))
 case("last month's reservation still holds: a dial in flight has not settled",
      rw_route(), "runway", runway(), chk("no", reason="budget", until=MONTH_END),
      pots={RW_POT: {"topup": "off", "budget": 100.0}},
@@ -833,7 +833,7 @@ ucase("a route with no account beside a spent one is listed empty; the body is t
            NOW + H, "exact",
            [opt("enable", "c/lane:opus", "personal", "personal/credits",
                 "enable usage credits on personal, and add personal/credits to c/lane:opus's pay")]))
-ucase("images, codex closed (62 M2), pay []: retryable to the codex reset, with the permit",
+ucase("image, codex closed (62 M2), pay []: retryable to the codex reset, with the permit",
       [urt(IMG, ["gpt"])], {"gpt": codex(used=100.0, allowed=False)},
       body([{"route": IMG, "accounts": [acc("gpt", "pay", NOW + 4 * D, "seven_day")]}], NOW + 4 * D,
            "early_possible", [opt("permit", IMG, "gpt", "gpt/credits", f"add gpt/credits to {IMG}'s pay")]))
@@ -842,7 +842,7 @@ ucase("image: codex closed, credits closed: the reset, and money to add",
       body([{"route": IMG, "accounts": [acc("gpt", "spent", NOW + 4 * D, "seven_day")]}], NOW + 4 * D,
            "early_possible", [opt("fund", IMG, "gpt", "gpt/credits", "add money to gpt/credits")]),
       pots={"gpt/credits": {"topup": "off"}})
-ucase("images with no codex account: no body, the typed 503",
+ucase("image with no codex account: no body, the typed 503",
       [urt(IMG, [], pay=["gpt/credits"])], {}, None)
 
 # C6's budget `no` (§1.9): Retry-After is the allowance reset ahead of the money,
@@ -874,11 +874,11 @@ ucase("only the route's budget reached: the option names it alone",
       pots={"gpt/credits": {"topup": "off", "budget": 100.0, "route_budgets": {C_GPT: 10.0}}},
       ledger=ledger(spend=40.0, routes={C_GPT: 10.0}))
 
-# C8: Runway, the images class's second member (priority 2).
-RW_C = "images/runway/gpt_image_2"
+# C8: Runway, the image class's second member (priority 2).
+RW_C = "image/runway/gpt_image_2"
 def rw_urt(pay=(RW_POT,)):
     return urt(RW_C, ["runway"], pay=pay, scope="gpt_image_2")
-ucase("images, codex closed, runway pay []: the codex reset, a permit for each",
+ucase("image, codex closed, runway pay []: the codex reset, a permit for each",
       [urt(IMG, ["gpt"]), rw_urt(pay=())],
       {"gpt": codex(used=100.0, allowed=False), "runway": runway()},
       body([{"route": IMG, "accounts": [acc("gpt", "pay", NOW + 4 * D, "seven_day")]},
@@ -911,19 +911,19 @@ ucase("runway's budget reached with this request's cost: raise it, to the period
 # its not_entitled record as no (blocked). It gives no time and no option,
 # and money behind it is not offered: alone it is the non-retryable reply.
 BLOCKED = chk("no", reason="blocked", until=None)
-ucase("images, gpt blocked alone: no time, no option, not retryable",
+ucase("image, gpt blocked alone: no time, no option, not retryable",
       [urt(IMG, ["gpt"], pay=["gpt/credits"])], {"gpt": codex(used=10.0)},
       body([{"route": IMG, "accounts": [acc("gpt", "blocked", None, None)]}], None, None, [],
            retryable=False),
       given={IMG: {"gpt": BLOCKED}}, request=req(None))
-ucase("images, gpt blocked beside runway out of money: until paid, add money to runway only",
+ucase("image, gpt blocked beside runway out of money: until paid, add money to runway only",
       [urt(IMG, ["gpt"], pay=["gpt/credits"]), rw_urt()],
       {"gpt": codex(used=10.0), "runway": runway(balance=0.0)},
       body([{"route": IMG, "accounts": [acc("gpt", "blocked", None, None)]},
             {"route": RW_C, "accounts": [acc("runway", "balance", "until_paid", None)]}], None, None,
            [opt("fund", RW_C, "runway", RW_POT, f"add money to {RW_POT}")], retryable=False),
       pots=TOPUP_OFF, given={IMG: {"gpt": BLOCKED}}, request=req(5))
-ucase("images, gpt blocked beside runway's refill: the refill's time, retryable",
+ucase("image, gpt blocked beside runway's refill: the refill's time, retryable",
       [urt(IMG, ["gpt"], pay=["gpt/credits"]), rw_urt()],
       {"gpt": codex(used=10.0), "runway": runway(balance=0.0)},
       body([{"route": IMG, "accounts": [acc("gpt", "blocked", None, None)]},
@@ -931,7 +931,7 @@ ucase("images, gpt blocked beside runway's refill: the refill's time, retryable"
            "derived", [opt("fund", RW_C, "runway", RW_POT, f"add money to {RW_POT}")]),
       pots=TOPUP_ON, given={IMG: {"gpt": BLOCKED}}, request=req(5))
 
-ucase("images, gpt blocked over a spent window with a usable reset: blocked wins, no time, no option",
+ucase("image, gpt blocked over a spent window with a usable reset: blocked wins, no time, no option",
       [urt(IMG, ["gpt"], pay=["gpt/credits"])],
       {"gpt": codex(used=100.0, allowed=False, credits=False, events=[CREDIT])},
       body([{"route": IMG, "accounts": [acc("gpt", "blocked", None, None)]}], None, None, [],
