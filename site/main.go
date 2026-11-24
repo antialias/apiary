@@ -28,12 +28,11 @@ type signup struct {
 	ReceivedAt string   `json:"received_at"`
 	Email      string   `json:"email"`
 	Handle     string   `json:"handle,omitempty"`
-	Contribute []string `json:"contribute,omitempty"`
+	Uses       []string `json:"uses,omitempty"` // what runs in their hive today: claude-plan, codex, local…
 	PlanTier   string   `json:"plan_tier,omitempty"`
 	Hardware   string   `json:"hardware,omitempty"`
-	Draw       []string `json:"draw,omitempty"`
 	Spend      string   `json:"spend,omitempty"`
-	Crypto     string   `json:"crypto,omitempty"`
+	Pool       []string `json:"pool,omitempty"` // interest in the pool to come: share, draw, dev-time, funding
 	Pain       string   `json:"pain,omitempty"`
 	IPHash     string   `json:"ip_hash"` // sha256[:12] of remote IP — dedup signal, not identity
 }
@@ -82,16 +81,15 @@ func handleSignup(file string) http.HandlerFunc {
 			return
 		}
 		var body struct {
-			Email      string   `json:"email"`
-			Handle     string   `json:"handle"`
-			Contribute []string `json:"contribute"`
-			PlanTier   string   `json:"plan_tier"`
-			Hardware   string   `json:"hardware"`
-			Draw       []string `json:"draw"`
-			Spend      string   `json:"spend"`
-			Crypto     string   `json:"crypto"`
-			Pain       string   `json:"pain"`
-			Website    string   `json:"website"` // honeypot — humans never fill it
+			Email    string   `json:"email"`
+			Handle   string   `json:"handle"`
+			Uses     []string `json:"uses"`
+			PlanTier string   `json:"plan_tier"`
+			Hardware string   `json:"hardware"`
+			Spend    string   `json:"spend"`
+			Pool     []string `json:"pool"`
+			Pain     string   `json:"pain"`
+			Website  string   `json:"website"` // honeypot — humans never fill it
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -123,12 +121,11 @@ func handleSignup(file string) http.HandlerFunc {
 			ReceivedAt: time.Now().UTC().Format(time.RFC3339),
 			Email:      email,
 			Handle:     clip(body.Handle, 80),
-			Contribute: clipAll(body.Contribute, 40, 8),
+			Uses:       clipAll(body.Uses, 40, 8),
 			PlanTier:   clip(body.PlanTier, 80),
 			Hardware:   clip(body.Hardware, 200),
-			Draw:       clipAll(body.Draw, 40, 8),
 			Spend:      clip(body.Spend, 40),
-			Crypto:     clip(body.Crypto, 40),
+			Pool:       clipAll(body.Pool, 40, 8),
 			Pain:       clip(body.Pain, 2000),
 			IPHash:     hex.EncodeToString(sum[:])[:12],
 		}
@@ -148,7 +145,7 @@ func handleSignup(file string) http.HandlerFunc {
 			http.Error(w, "storage error — please try again", http.StatusInternalServerError)
 			return
 		}
-		log.Printf("signup: %s (contribute=%v draw=%v)", rec.IPHash, rec.Contribute, rec.Draw)
+		log.Printf("signup: %s (uses=%v pool=%v)", rec.IPHash, rec.Uses, rec.Pool)
 		w.WriteHeader(http.StatusCreated)
 	}
 }

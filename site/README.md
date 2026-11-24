@@ -124,7 +124,11 @@ Notes:
 
 ## Reading the signups
 
+Sign-ups before 24 Nov 2026 answered the pool-first form: `contribute`, `draw` and `crypto`
+instead of `uses` and `pool`.
+
 ```bash
-jq -s 'group_by(.contribute) | map({contribute: .[0].contribute, n: length})' data/signups.jsonl
+jq -s 'map(.uses // [] | .[]) | group_by(.) | map({uses: .[0], n: length})' data/signups.jsonl
+jq -s 'map(.pool // [] | .[]) | group_by(.) | map({pool: .[0], n: length})' data/signups.jsonl
 jq -r '.pain | select(. != "")' data/signups.jsonl     # the user-story goldmine
 ```

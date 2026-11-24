@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Apiary — pooled LLM capacity, owned by the hive</title>
-<meta name="description" content="Contribute agentic-coding capacity or self-hosted inference. Earn a stake in the pool. Draw when you need to burst.">
+<title>How Apiary works — one gateway for every coding account</title>
+<meta name="description" content="Connect your Claude, Codex, Kimi and local accounts, point your coding agents at one gateway, and keep working when one runs dry. Invite-only for now.">
 <link rel="canonical" href="https://apiary.wtf/about/">
 <meta property="og:site_name" content="Apiary">
 <meta property="og:url" content="https://apiary.wtf/about/">
-<meta property="og:title" content="Apiary — pooled LLM capacity, owned by the hive">
-<meta property="og:description" content="Contribute agentic-coding capacity or self-hosted inference. Earn a stake in the pool. Draw when you need to burst.">
+<meta property="og:title" content="How Apiary works — one gateway for every coding account">
+<meta property="og:description" content="Connect your Claude, Codex, Kimi and local accounts, point your coding agents at one gateway, and keep working when one runs dry. Invite-only for now.">
 <meta property="og:type" content="website">
-<meta property="og:image" content="https://apiary.wtf/og/home.jpg">
+<meta property="og:image" content="https://apiary.wtf/og/home.jpg?v=2">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="“Your idle LLM hours are someone else’s crunch.” Apiary, over molten honey pouring through a dark honeycomb.">
+<meta property="og:image:alt" content="“Your accounts run dry. Your work doesn’t.” Apiary, over molten honey pouring through a dark honeycomb.">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="stylesheet" href="/fonts/fonts.css">
 <link rel="icon" href="/favicon.ico" sizes="48x48">
@@ -68,6 +68,8 @@ header{padding:9vh 0 6vh;position:relative}
   font-size:.78rem;letter-spacing:.22em;text-transform:uppercase;color:var(--honey);
   margin-bottom:2.2rem;
 }
+.kicker a{color:inherit;text-decoration:none}
+.kicker a:hover{color:var(--honey-hot)}
 .kicker::before{content:"";display:inline-block;width:.85em;height:.98em;
   background:var(--honey);
   clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%);}
@@ -235,50 +237,49 @@ footer p+p{margin-top:.8em}
       <a href="/plan/">Business plan</a>
       <a href="https://github.com/antialias/apiary">Code on GitHub</a>
     </nav>
-    <div class="kicker reveal d1">apiary · a capacity pool</div>
-    <h1 class="reveal d2">Your idle LLM hours are someone else's <em>crunch</em>.</h1>
+    <div class="kicker reveal d1"><a href="/">apiary</a> · how it works</div>
+    <h1 class="reveal d2">Your accounts run dry. Your work <em>doesn’t</em>.</h1>
     <p class="sub reveal d3">
-      Apiary pools members' <strong>agentic-coding capacity</strong> and
-      <strong>self-hosted inference</strong> into one hive. Contribute what
-      sits idle, earn a stake in the pool, and draw past your own ceiling when
-      it's your turn to burst. Routing, metering, and failover are handled by
-      an engine that already runs in production for its founding operator.
+      Apiary sits between your coding agents and the AI accounts you already
+      pay for. <strong>Claude Code, Codex, Kimi</strong> and the <strong>models
+      on your own machine</strong> answer as one, and when one account gets
+      low, the next request goes to another before anything stops.
     </p>
     <div class="cta-row reveal d4">
       <a class="btn btn-fill" href="#join">Join the waggle list →</a>
       <a class="btn btn-ghost" href="#how">How it works</a>
-      <span class="hero-note">~2 minutes · no wallet needed</span>
+      <span class="hero-note">Invite-only for now</span>
     </div>
   </header>
 
   <section id="how">
-    <div class="section-tag">the loop</div>
-    <h2>Contribute. Earn. Draw.</h2>
-    <p class="lede">Individual capacity is bursty — subscriptions idle all week
-    then hit their ceiling mid-crunch; GPUs hum at 4% duty cycle. Pooled, the
-    peaks cancel out. Tokens keep score of who smoothed whom.</p>
+    <div class="section-tag">how it works</div>
+    <h2>Connect. Point. Keep working.</h2>
+    <p class="lede">Every account has a ceiling, and you meet it mid-run. Apiary
+    watches each account’s limits and spends them in the order that keeps you
+    working.</p>
     <div class="cells">
       <div class="cell">
         <span class="num">01</span>
-        <h3>Contribute</h3>
-        <p>Bring a box that serves open models, or a plan or key its provider lets you pool.
-        The pool's brain meters <b>delivered</b> capacity — the router and the
-        meter are the same process, so there's no self-reported number to game.</p>
+        <h3>Connect</h3>
+        <p>Sign in and connect what you have: Claude plans, Anthropic API keys,
+        Codex, Kimi, a model on your own GPU. Apiary checks each one’s limits,
+        and keeps checking.</p>
       </div>
       <div class="cell">
         <span class="num">02</span>
-        <h3>Earn</h3>
-        <p>Contribution mints your stake — <b>earned on delivery, never on
-        pledge</b>. Governance of the pool (which sources join, how lanes are
-        priced) belongs to the members who feed it.</p>
+        <h3>Point</h3>
+        <p>Point your agents at Apiary, once. They ask for a <b>class</b> (fast,
+        capable or frontier) instead of a model, and you decide what each class
+        means and what it falls back to.</p>
       </div>
       <div class="cell">
         <span class="num">03</span>
-        <h3>Draw</h3>
-        <p>Crunch week? Your tooling transparently rides pooled capacity,
-        <b>per model lane</b> — heavy lanes burst onto the pool while light
-        lanes stay home. If the pool vanishes, everything degrades to exactly
-        your own setup. It can never break you.</p>
+        <h3>Keep working</h3>
+        <p>Before an account runs out, the next request goes to another,
+        <b>mid-run</b>, so nothing comes back half-finished. The status line
+        stays quiet until you’re low, and Apiary can tell you when you’ll next
+        run out.</p>
       </div>
     </div>
 
@@ -286,14 +287,40 @@ footer p+p{margin-top:.8em}
       <div class="engine-head">
         <span class="led"></span>
         <strong>The engine is real</strong>
-        <span style="color:var(--cream-dim);font-size:.8rem">— extracted from a production single-operator deployment</span>
+        <span style="color:var(--cream-dim);font-size:.8rem">— it runs every day for its founding operator</span>
       </div>
       <pre>
-<b>lane=fable</b>   INJECT→9f3ac1d2 [pool-b]     <i>← heavy lane riding pooled capacity</i>
-<b>lane=haiku</b>   passthrough [home]           <i>← light lane stays on home base</i>
-<b>lane=local</b>   qwen3.6:35b → 127.0.0.1      <i>← self-hosted model, same picker</i>
-🔀 SWITCHOVER[fable] reason=scoped-cap-83% tier=<i>routine</i> (headroom at destination)
-429 → transparent retry on alternate source · <i>client saw one 200</i></pre>
+<b>class=frontier</b>  fable → account 2          <i>← account 1 is at 83%: the run carries on</i>
+<b>class=capable</b>   opus  → account 1          <i>← room to spare, so it stays put</i>
+<b>class=fast</b>      qwen3.6:35b → 127.0.0.1    <i>← your own model, in the same ladder</i>
+🔀 SWITCHOVER[frontier] reason=cap-83% (room at the destination)
+429 → retried on another account · <i>your agent saw one 200</i></pre>
+    </div>
+  </section>
+
+  <section id="ways">
+    <div class="section-tag">two ways in</div>
+    <h2>Join the hive, or keep your own.</h2>
+    <p class="lede">The same gateway either way. Your accounts stay yours.</p>
+    <div class="cells">
+      <div class="cell">
+        <h3>Join the hive</h3>
+        <p>apiary.wtf runs Apiary for invited members. Sign in with Google or
+        GitHub, connect your accounts on the web, and point your agents at it.
+        Invite-only for now: <a href="#join">join the waggle list</a>.</p>
+      </div>
+      <div class="cell">
+        <h3>Run your own</h3>
+        <p>The code is public. Two small services in Docker Compose, on your
+        own machine, and your keys never leave it.
+        <a href="https://github.com/antialias/apiary">Start with the README</a>.</p>
+      </div>
+      <div class="cell">
+        <h3>What it keeps</h3>
+        <p>Your prompts and code fly through and aren’t kept. Apiary logs each
+        trip (when, which account, how many tokens), and your keys are locked.
+        <a href="/privacy">The privacy page</a> says it all in plain words.</p>
+      </div>
     </div>
   </section>
 
@@ -363,12 +390,23 @@ footer p+p{margin-top:.8em}
     <p class="keepers-note">All hives shown are honey-cooled.</p>
   </section>
 
+  <section id="next">
+    <div class="section-tag">what comes next</div>
+    <h2>Next: share the idle.</h2>
+    <p class="lede">Most accounts sit idle all week, then run out in a crunch,
+    and everyone’s crunch comes at a different time. Once the hive has its
+    keepers, Apiary will let members pool capacity that sits idle, only where
+    a provider’s terms allow it, and draw on the pool when it’s their turn to
+    burst. If the pool goes away, you’re back to exactly your own accounts.
+    <a href="/plan/">Read the business plan →</a></p>
+  </section>
+
   <section id="join">
     <div class="section-tag">waggle list</div>
-    <h2>Tell us what you'd bring to the hive.</h2>
-    <p class="lede">We're forming the founding cohort and writing user stories
-    from real answers, not guesses. Rough numbers are fine. Only the email is
-    required.</p>
+    <h2>Tell us what your hive looks like.</h2>
+    <p class="lede">Apiary is invite-only while we find its first keepers, and
+    we build from real answers, not guesses. Rough numbers are fine. Only the
+    email is required.</p>
 
     <form id="f" novalidate>
       <fieldset>
@@ -381,52 +419,43 @@ footer p+p{margin-top:.8em}
       </fieldset>
 
       <fieldset>
-        <legend>What would you contribute?</legend>
-        <p class="hint">Pick any. "Nothing yet" is a fine answer — drawers make the pool useful.</p>
-        <div class="choices" data-name="contribute">
-          <label><input type="checkbox" value="coding-plan">a plan or key its provider lets you pool</label>
-          <label><input type="checkbox" value="gpu">self-hosted GPU inference</label>
-          <label><input type="checkbox" value="dev-time">dev time on the engine</label>
-          <label><input type="checkbox" value="funding">funding or sponsorship</label>
-          <label><input type="checkbox" value="none">nothing yet — I'd draw</label>
+        <legend>What runs in your hive today?</legend>
+        <div class="choices" data-name="uses">
+          <label><input type="checkbox" value="claude-plan">a Claude plan (Pro or Max)</label>
+          <label><input type="checkbox" value="anthropic-api">an Anthropic API key</label>
+          <label><input type="checkbox" value="codex">Codex or a ChatGPT plan</label>
+          <label><input type="checkbox" value="kimi">Kimi</label>
+          <label><input type="checkbox" value="local">models on my own machine</label>
+          <label><input type="checkbox" value="other">something else</label>
         </div>
         <div class="grid2" style="margin-top:.8rem">
-          <input type="text" name="plan_tier" placeholder="which plan or key, if any">
-          <input type="text" name="hardware" placeholder="hardware, if any (e.g. 4090 / M3 Max 48GB)">
+          <input type="text" name="plan_tier" placeholder="which plans, and how many">
+          <input type="text" name="hardware" placeholder="your own hardware, if any">
         </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>What would you draw?</legend>
-        <div class="choices" data-name="draw">
-          <label><input type="checkbox" value="burst-coding">burst coding capacity in a crunch</label>
-          <label><input type="checkbox" value="bulk-inference">cheap bulk inference</label>
-          <label><input type="checkbox" value="model-variety">model variety without more subscriptions</label>
-          <label><input type="checkbox" value="curious">just curious</label>
-        </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>Calibration</legend>
-        <div class="grid2">
+        <div class="grid2" style="margin-top:.8rem">
           <select name="spend">
-            <option value="">monthly LLM spend…</option>
+            <option value="">monthly AI spend…</option>
             <option>$0</option><option>&lt;$25</option><option>$25–100</option>
             <option>$100–300</option><option>$300+</option>
           </select>
-          <select name="crypto">
-            <option value="">crypto familiarity…</option>
-            <option>none — and keep it that way</option>
-            <option>held some, never used a dapp</option>
-            <option>comfortable with wallets</option>
-            <option>I deploy contracts</option>
-          </select>
         </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>The pool, when it opens</legend>
+        <p class="hint">Optional. Today Apiary works with your own accounts only.</p>
+        <div class="choices" data-name="pool">
+          <label><input type="checkbox" value="share">I’d share capacity that sits idle</label>
+          <label><input type="checkbox" value="draw">I’d draw on it in a crunch</label>
+          <label><input type="checkbox" value="dev-time">I’d help build it</label>
+          <label><input type="checkbox" value="funding">I’d help fund it</label>
+        </div>
+      </fieldset>        </div>
       </fieldset>
 
       <fieldset>
         <legend>The goldmine</legend>
-        <p class="hint">What's the most painful thing about your current LLM setup? Be specific — this is what we build from.</p>
+        <p class="hint">What’s the most painful thing about your setup now? Be specific — this is what we build from.</p>
         <textarea name="pain" placeholder="e.g. I hit my weekly cap every deadline week and just… wait."></textarea>
       </fieldset>
 
@@ -435,28 +464,25 @@ footer p+p{margin-top:.8em}
     </form>
 
     <div id="thanks">
-      <h3>You're on the list. 🐝</h3>
-      <p>We'll write to you when the founding cohort forms. Until then, the
-      engine keeps humming — and your answers just became a user story.</p>
+      <h3>You’re on the list. 🐝</h3>
+      <p>We’ll write when an invite opens up. Until then, the engine keeps
+      humming, and your answers shape what we build next.</p>
     </div>
   </section>
 
   <footer>
     <p><strong style="color:var(--cream)">Honesty section.</strong> Apiary is
-    early: the routing engine works today; the pool, ledger, and governance are
-    being designed in the open with the founding cohort.</p>
-    <p>No token exists. Nothing on this page is an offer, a solicitation of an
-    investment, or a promise of future value. If and when any token is
-    designed, it will happen with real legal counsel — not vibes.</p>
+    early. The gateway works today and runs every day for its founding
+    operator. The pool is being designed in the open and isn’t built.</p>
     <p>This form stores exactly what you type plus a timestamp. No analytics,
     no cookies, no trackers.</p>
-    <p><a href="/plan/">Read the business plan</a> · <a href="https://github.com/antialias/apiary">The code is on GitHub</a>, under Apache-2.0.</p>
+    <p><a href="/plan/">Read the business plan</a> · <a href="/privacy">Privacy</a> · <a href="https://github.com/antialias/apiary">The code is on GitHub</a>, under Apache-2.0.</p>
   </footer>
 </main>
 
 <script>
 const f=document.getElementById('f'),msg=document.getElementById('msg');
-// A link like /?want=gpu#join (from the plan page) ticks that choice.
+// A link like /about/?want=share#join (from the plan page) ticks that choice.
 const want=new URLSearchParams(location.search).get('want');
 if(want){const box=f.querySelector(`.choices input[value="${CSS.escape(want)}"]`);if(box)box.checked=true}
 f.addEventListener('submit',async e=>{
@@ -465,9 +491,9 @@ f.addEventListener('submit',async e=>{
   const checks=n=>[...f.querySelectorAll(`[data-name=${n}] input:checked`)].map(i=>i.value);
   const body={
     email:fd.get('email')||'',handle:fd.get('handle')||'',
-    contribute:checks('contribute'),draw:checks('draw'),
+    uses:checks('uses'),pool:checks('pool'),
     plan_tier:fd.get('plan_tier')||'',hardware:fd.get('hardware')||'',
-    spend:fd.get('spend')||'',crypto:fd.get('crypto')||'',
+    spend:fd.get('spend')||'',
     pain:fd.get('pain')||'',website:fd.get('website')||''
   };
   if(!/.+@.+\..+/.test(body.email)){msg.textContent='a real email is the one thing we need';msg.classList.add('err');return}
