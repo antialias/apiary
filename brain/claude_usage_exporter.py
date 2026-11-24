@@ -565,7 +565,12 @@ _BUDGET_REASON = ("a budget lives in the money document: pots[<pot id>].budget, 
                   "pots[<pot id>].route_budgets[<route id>] for one route")
 # The keys a class and a member may carry (§1.9: nothing is dropped or
 # ignored, so an unknown key, a typo included, is refused at PUT).
-_CLASS_KEYS = frozenset(("class", "display", "guidance", "request_kind", "members", "onboarding"))
+_CLASS_KEYS = frozenset(("class", "display", "guidance", "request_kind", "order", "members", "onboarding"))
+# How a class's members are walked (_class_pointer, and the proxy's ranker):
+# "funding", the default, takes every included member before any paid one
+# (quota-model 50 §2.3); "priority" takes them in priority order, whatever
+# pays for each, so an owner can put a paid member ahead of a free one.
+_CLASS_ORDERS = ("funding", "priority")
 # The LAN tenant's mark on a class it offers to new members (_starter); a
 # member's document cannot offer anything, so it may not carry the key.
 # The previous brain's visibility mark (one classes document for every
@@ -684,6 +689,8 @@ def _class_error(c, seen, *, lan, check_guidance=True, strict=False):
     rk = c.get("request_kind", "chat")
     if rk not in _REQUEST_KINDS:
         return f"request_kind must be one of {', '.join(_REQUEST_KINDS)}"
+    if c.get("order", "funding") not in _CLASS_ORDERS:
+        return f"order must be one of {', '.join(_CLASS_ORDERS)}"
     image = rk == "image"
     if name == IMAGE_CLASS and not image:
         return f"class {IMAGE_CLASS!r} is the image door's default: its request_kind must be image"
@@ -880,7 +887,8 @@ def _normalize_classes(raw, warnings=None, *, lan):
         seen.add(name)
         if image:
             out.append({"class": name, "display": str(c.get("display") or name),
-                        "guidance": guidance, "request_kind": rk, "context_window": None,
+                        "guidance": guidance, "request_kind": rk, "order": c.get("order", "funding"),
+                        "context_window": None,
                         "floor_member": None, "units": None, "members": members})
             continue
         # The governing window is min() over ALL members' effective windows —
@@ -902,6 +910,7 @@ def _normalize_classes(raw, warnings=None, *, lan):
                     "display": str(c.get("display") or name),
                     "guidance": guidance,
                     "request_kind": rk,
+                    "order": c.get("order", "funding"),
                     "context_window": derived,
                     "floor_member": floor_id,
                     "units": units,
@@ -4512,7 +4521,14 @@ def _class_pointer(cls, verdicts, pay_order):
     Then the paid tier: the first paid member by pay_order_key (the drawn
     pot's rank in pay_order, then priority, then pot id, §1.9).
 
+    A class in priority order (`order: "priority"`) takes instead its first
+    member in priority order whose check is included or paid.
+
     None when no member is included or paid: the class is unavailable."""
+    if cls.get("order") == "priority":
+        return next((_member_id(m) for m in sorted(cls["members"], key=lambda m: m["priority"])
+                     if (verdicts[_member_id(m)]["check"] or {}).get("check") in ("included", "paid")),
+                    None)
     for basis in _BASES:
         tier = [m for m in cls["members"]
                 if (verdicts[_member_id(m)]["check"] or {}).get("check") == "included"
@@ -4957,6 +4973,9 @@ def _classes_payload(t, snap, now, ctx):
                 # §2.9 (C4): "image" is the image door's class; the proxy
                 # serves it there and nowhere else, so it is no picker row.
                 "request_kind": c["request_kind"],
+                # How the members are walked (_CLASS_ORDERS); the proxy ranks
+                # by it. A proxy that predates it reads every class as funding.
+                "order": c.get("order", "funding"),
                 "context_window": c["context_window"],
                 # #44: which member's effective window governs, whose tokenizer
                 # units the number is in, and when it last moved (§10).

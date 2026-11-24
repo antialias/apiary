@@ -700,3 +700,18 @@ func TestSuppressedFireDoesNotExtendRepeatWindow(t *testing.T) {
 	bc.waitForN(t, 2)
 	bc.assertCountStable(t, 2, 250*time.Millisecond)
 }
+
+// A switchover to or from a member classAlertQuiet names logs and sends
+// no alert; every other one alerts, an image class's included.
+func TestClassAlertQuietMember(t *testing.T) {
+	bc := newBridgeCapture(t)
+	swapAlertTestWorld(t, bc, false, nil, nil, testCritDefault, testRepeatDefault, testCoalesce)
+	old := classAlertQuiet
+	classAlertQuiet = func(id string) bool { return strings.HasPrefix(id, "away/") }
+	t.Cleanup(func() { classAlertQuiet = old })
+	lan.fireClassAlert("pics", "img:a", "x/one", "away/two", "test")
+	lan.fireClassAlert("pics", "img:a", "away/two", "x/one", "test")
+	lan.fireClassAlert("pics", "img:a", "x/one", "y/two", "test")
+	bc.waitForN(t, 1)
+	bc.assertCountStable(t, 1, 250*time.Millisecond)
+}

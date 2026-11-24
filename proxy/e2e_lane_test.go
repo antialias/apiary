@@ -127,6 +127,9 @@ type e2eEnv struct {
 	// (images-runway, images-chatgpt): served like it on /preferred, with
 	// their routes, and on /class-bind. Under brainMu.
 	imageClasses map[string][]map[string]any
+	// imageOrder is an image class's `order` ("priority"), by name; absent
+	// is funding order. Under brainMu.
+	imageOrder map[string]string
 	// brainHard > 0 makes /preferred carry `thresholds.hard` (the real brain
 	// always does; the default fake omits it so the proxy's mirrored default is
 	// what most tests exercise). Under brainMu.
@@ -417,13 +420,13 @@ func newE2E(t *testing.T) (*e2eEnv, func()) {
 				}
 				classes["images"] = map[string]any{
 					"display": "Images", "context_window": nil, "request_kind": "image",
-					"pointer": nil, "pinned": nil, "sessions": map[string]any{},
+					"order": env.imageOrder["images"], "pointer": nil, "pinned": nil, "sessions": map[string]any{},
 					"members": withRoutes("images", env.imageMembers),
 				}
 				for name, ms := range env.imageClasses {
 					classes[name] = map[string]any{
 						"display": name, "context_window": nil, "request_kind": "image",
-						"pointer": nil, "pinned": nil, "sessions": map[string]any{},
+						"order": env.imageOrder[name], "pointer": nil, "pinned": nil, "sessions": map[string]any{},
 						"members": withRoutes(name, ms),
 					}
 				}

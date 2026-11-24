@@ -48,6 +48,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,6 +94,11 @@ type classMemberPref struct {
 	Incumbent string              `json:"incumbent"`
 	Targets   map[string]*float64 `json:"targets"`
 
+	// priorityOrder is its class's `order: "priority"` (classPref.Order),
+	// stamped on every member as /preferred is read, so the ranker, which
+	// sees members only, knows the class walks in priority order.
+	priorityOrder bool
+
 	// req is the request this member would be dialled for (requestKind's
 	// request: a Runway image's max_cost and output count), set by routeClass
 	// once the request is known; zero elsewhere, the brain's own check.
@@ -121,6 +127,29 @@ type classPref struct {
 	// RequestKind is what the class serves (§2.9, C4): "chat", or "image" for
 	// the image door's class. A brain before C4 serves none: every class chat.
 	RequestKind string `json:"request_kind"`
+	// Order is how the class's members are walked: "" (funding, the default:
+	// every included member before any paid one, §2.3) or "priority" (in
+	// priority order, whatever pays; priorityOrder). A brain that serves none
+	// is funding order.
+	Order string `json:"order"`
+}
+
+// classOrderPriority is classPref.Order's priority order.
+const classOrderPriority = "priority"
+
+// stampOrder marks each member of a class in priority order (priorityOrder).
+func stampOrder(classes map[string]classPref) {
+	for name, c := range classes {
+		if c.Order != classOrderPriority {
+			continue
+		}
+		ms := slices.Clone(c.Members)
+		for i := range ms {
+			ms[i].priorityOrder = true
+		}
+		c.Members = ms
+		classes[name] = c
+	}
 }
 
 // classRoute travels on reqInfo for class-routed requests: everything the
@@ -749,6 +778,9 @@ func (tn *tenant) rankCandidatesSkips(members []classMemberPref, exclude string,
 	for _, b := range buckets {
 		out = append(out, b...)
 	}
+	if inPriorityOrder(members) {
+		out = priorityOrder(out)
+	}
 	if opt.health {
 		allOpen := true
 		for _, rc := range out {
@@ -768,6 +800,33 @@ func (tn *tenant) rankCandidatesSkips(members []classMemberPref, exclude string,
 		}
 	}
 	return out, skipped
+}
+
+// inPriorityOrder reports a class whose document says `order: "priority"`:
+// its members are walked in priority order whatever pays for them.
+func inPriorityOrder(members []classMemberPref) bool {
+	return len(members) > 0 && members[0].priorityOrder
+}
+
+// priorityOrder is a ranking (funding tiers, above) re-cut for a class in
+// priority order: members are taken in priority order, and only a run of
+// neighbours of one funding (included or paid) is ranked among itself by
+// its tiers, so a throttled or OPEN member still yields to a healthy
+// neighbour of its own funding but never to a member past a member of the
+// other funding.
+func priorityOrder(in []ranked) []ranked {
+	out := slices.Clone(in)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].m.Priority < out[j].m.Priority })
+	for lo := 0; lo < len(out); {
+		hi := lo + 1
+		for hi < len(out) && out[hi].check.paid() == out[lo].check.paid() {
+			hi++
+		}
+		run := out[lo:hi]
+		sort.SliceStable(run, func(i, j int) bool { return run[i].tier < run[j].tier })
+		lo = hi
+	}
+	return out
 }
 
 // ranked is one candidate plus the evidence that ordered it (spec §5.1).
@@ -820,8 +879,19 @@ func (tn *tenant) memberDialable(m classMemberPref, now time.Time) string {
 // still applies: the dedup key is (class, from→to) — the session id is
 // deliberately EXCLUDED, so two sessions flap-flopping the same member pair
 // read as ONE alert stream and gate 2 suppresses the repeats.
+// classAlertQuiet reports whether a class switchover to or from a member or
+// account (its id, or an id with it as one "/" segment) sends no alert: one
+// that is often away by design, for which a switchover is the ordinary
+// route. An edition may set it; by default every switchover alerts.
+var classAlertQuiet = func(id string) bool { return false }
+
 func (tn *tenant) fireClassAlert(class, session, from, to, reason string) {
 	log.Printf("🔀 CLASS SWITCHOVER[%s] sess=%s %s -> %s (%s)", class, fpSess(session), from, to, reason)
+	if classAlertQuiet(from) || classAlertQuiet(to) {
+		// A member whose closing is routine (classAlertQuiet) pages no one
+		// on a switchover to or from it. The log line above records it.
+		return
+	}
 	if bridgeTarget() == "" {
 		log.Printf("   (no SWITCH_BRIDGE_URL set — class switch alert skipped)")
 		return
@@ -1000,6 +1070,10 @@ func (tn *tenant) routeClass(ce *registryEntry, sess string, q classReq, hdr htt
 				try = append(try, m)
 			}
 		}
+	case hopKind == "bound" && inPriorityOrder(members):
+		// A class in priority order walks its members in that order on
+		// every request: the session's binding names no lead of its own.
+		try = tn.classCandidates(q.ctx, members, "")
 	case hopKind == "bound" && tn.memberThrottled(lead, nowFn()):
 		// A throttle deranks (§2.3): the bound member, throttled on the
 		// account it would dial, ranks with the rest, so a healthy member of

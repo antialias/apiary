@@ -644,6 +644,7 @@ func (tn *tenant) applyPreferred(body io.Reader) {
 	var classes map[string]classPref
 	if d.Classes != nil {
 		classes = *d.Classes
+		stampOrder(classes)
 	}
 	// The brain serves a route's id only as its key; the policy carries it
 	// because the unavailable body (§2.8) names routes and reads their
@@ -2008,6 +2009,25 @@ func (t *failoverTransport) dispatch(req *http.Request, info reqInfo) (*http.Res
 // untouched, so the ladders can call this unconditionally. A hop whose wire is
 // not one HTTP exchange (Runway's task, runway_wire.go) is the wire's own trip.
 func (t *failoverTransport) tripWithReauth(req *http.Request) (*http.Response, error) {
+	if info, ok := req.Context().Value(infoKey).(reqInfo); ok {
+		if hb, ok := info.wire.(hopBounded); ok && info.wire.owns(req) {
+			if d := hb.hopDeadline(info); d > 0 {
+				ctx, cancel := context.WithTimeout(req.Context(), d)
+				resp, err := t.tripHop(req.WithContext(ctx))
+				if err != nil || resp == nil || resp.Body == nil {
+					cancel()
+					return resp, err
+				}
+				resp.Body = cancelOnClose{resp.Body, cancel}
+				return resp, nil
+			}
+		}
+	}
+	return t.tripHop(req)
+}
+
+// tripHop is tripWithReauth's hop, within whatever deadline it was given.
+func (t *failoverTransport) tripHop(req *http.Request) (*http.Response, error) {
 	if info, ok := req.Context().Value(infoKey).(reqInfo); ok {
 		if tw, ok := info.wire.(tripWire); ok && info.wire.owns(req) {
 			return tw.trip(req, info)

@@ -780,6 +780,7 @@
       "usable": true
      }
     ],
+    "order": "funding",
     "pinned": "lane:opus",
     "pointer": "kimi/kimi-k3",
     "previous_context_window": null,
@@ -876,6 +877,7 @@
       "usable": false
      }
     ],
+    "order": "funding",
     "pinned": null,
     "pointer": "gpt/gpt-image-2",
     "previous_context_window": null,

@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"regexp"
 	"strconv"
+	"time"
 )
 
 // ---- provider wires (#41) ----
@@ -272,4 +274,24 @@ func (b *hpRestoredBody) Close() error               { return b.c.Close() }
 // hands it the built hop, and it answers with the response the router reads.
 type tripWire interface {
 	trip(req *http.Request, info reqInfo) (*http.Response, error)
+}
+
+// hopBounded is a wire whose hop, for some requests, has a deadline of its
+// own besides its request's (0: none). It runs from the hop's send to the
+// close of its reply's body, so one slow member of a walk cannot spend the
+// time the members after it would draw in.
+type hopBounded interface {
+	hopDeadline(info reqInfo) time.Duration
+}
+
+// cancelOnClose ends a hop's own deadline when its reply's body is closed.
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c cancelOnClose) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
 }

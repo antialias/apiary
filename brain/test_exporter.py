@@ -4699,6 +4699,41 @@ class ClassPolicyBase(unittest.TestCase):
         T.classes = []
 
 
+class TestClassOrder(unittest.TestCase):
+    """A class's `order`: funding (the default) takes the included before the
+    paid; priority takes the first included-or-paid member in priority order."""
+
+    def cls(self, order=None):
+        c = {"class": "pics", "members": [
+            {"priority": 1, "kind": "provider", "provider": "gpt", "model": "a"},
+            {"priority": 2, "kind": "provider", "provider": "kimi", "model": "b"},
+            {"priority": 3, "kind": "provider", "provider": "local", "model": "c"}]}
+        if order:
+            c["order"] = order
+        return c
+
+    def verdicts(self, *checks):
+        ids = ("gpt/a", "kimi/b", "local/c")
+        return {i: {"check": {"check": c, "basis": "fresh", "pot": "kimi/credits" if c == "paid" else None},
+                    "effective": 10.0}
+                for i, c in zip(ids, checks)}
+
+    def test_pointer(self):
+        v = self.verdicts("no", "paid", "included")
+        self.assertEqual(ex._class_pointer(self.cls(), v, []), "local/c", "funding: included first")
+        self.assertEqual(ex._class_pointer(self.cls("funding"), v, []), "local/c")
+        self.assertEqual(ex._class_pointer(self.cls("priority"), v, []), "kimi/b", "priority: the paid member ahead")
+        self.assertEqual(ex._class_pointer(self.cls("priority"), self.verdicts("no", "no", "included"), []),
+                         "local/c")
+        self.assertIsNone(ex._class_pointer(self.cls("priority"), self.verdicts("no", "no", "no"), []))
+
+    def test_validated(self):
+        self.assertFalse((ex._class_error(self.cls("priority"), set(), lan=True, strict=True) or "")
+                         .startswith(("order", "unknown key")))
+        self.assertEqual(ex._class_error(self.cls("cheapest"), set(), lan=True, strict=True),
+                         "order must be one of funding, priority")
+
+
 class TestClassPointer(ClassPolicyBase):
     def pointer(self):
         return class_pointer()
