@@ -1,6 +1,6 @@
 // Apiary interest-signup stub.
 //
-// Serves the landing page and appends signup submissions to a JSONL file
+// Serves the front door and the long page, and appends signup submissions to a JSONL file
 // (SIGNUPS_FILE, default ./data/signups.jsonl). No accounts, no cookies, no
 // analytics — this is a signal sweep, not onboarding. See ../docs/DESIGN.md §6.
 package main
@@ -170,12 +170,38 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("apiary-site listening on %s, signups → %s", listen, file)
+	log.Fatal(http.ListenAndServe(listen, site(pages, file)))
+}
+
+// site serves the pages: the one-screen front door at /, the long page at
+// /about/, the plan, the og cards and the signup form.
+func site(pages fs.FS, signups string) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/", http.FileServer(http.FS(pages)))
 	mux.Handle("/og/", ogCards(pages))
-	mux.HandleFunc("/signup", handleSignup(file))
+	mux.HandleFunc("/signup", handleSignup(signups))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	return oneHost(mux)
+}
 
-	log.Printf("apiary-site listening on %s, signups → %s", listen, file)
-	log.Fatal(http.ListenAndServe(listen, mux))
+// oneHost sends www.apiary.wtf to apiary.wtf, path and query kept, so each page
+// has one address. /healthz answers on any host.
+func oneHost(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		bare, www := strings.CutPrefix(strings.ToLower(host), "www.")
+		if !www || r.URL.Path == "/healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		code := http.StatusMovedPermanently
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			code = http.StatusPermanentRedirect // keeps a POST a POST
+		}
+		http.Redirect(w, r, "https://"+bare+r.URL.RequestURI(), code)
+	})
 }

@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apiary — pooled LLM capacity, owned by the hive</title>
+<meta name="description" content="Contribute agentic-coding capacity or self-hosted inference. Earn a stake in the pool. Draw when you need to burst.">
+<link rel="canonical" href="https://apiary.wtf/about/">
+<meta property="og:site_name" content="Apiary">
+<meta property="og:url" content="https://apiary.wtf/about/">
+<meta property="og:title" content="Apiary — pooled LLM capacity, owned by the hive">
+<meta property="og:description" content="Contribute agentic-coding capacity or self-hosted inference. Earn a stake in the pool. Draw when you need to burst.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://apiary.wtf/og/home.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="“Your idle LLM hours are someone else’s crunch.” Apiary, over molten honey pouring through a dark honeycomb.">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,400..900,50,1&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><polygon points='50 3 93 27 93 73 50 97 7 73 7 27' fill='%23eda72c'/></svg>">
+<style>
+:root{
+  --wax:#16130d;
+  --comb:#1e1910;
+  --line:#3a3021;
+  --honey:#eda72c;
+  --honey-hot:#ffc65c;
+  --cream:#f3e8cf;
+  --cream-dim:#b9ac8d;
+  --danger:#e0603a;
+  --mono:"IBM Plex Mono",ui-monospace,monospace;
+  --serif:"Fraunces",Georgia,serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--wax);
+  color:var(--cream);
+  font-family:var(--mono);
+  font-size:16px;
+  line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+  overflow-x:hidden;
+}
+/* faint honeycomb field behind everything */
+body::before{
+  content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='97' viewBox='0 0 56 97'%3E%3Cg fill='none' stroke='%23eda72c' stroke-opacity='0.055' stroke-width='1'%3E%3Cpath d='M28 0 56 16v32L28 64 0 48V16zM28 64l28 16v32M28 64 0 80v32'/%3E%3C/g%3E%3C/svg%3E");
+  background-size:56px 97px;
+  mask-image:radial-gradient(120% 90% at 70% 0%,#000 0%,transparent 70%);
+  -webkit-mask-image:radial-gradient(120% 90% at 70% 0%,#000 0%,transparent 70%);
+}
+main{position:relative;z-index:1;max-width:1060px;margin:0 auto;padding:0 24px}
+a{color:var(--honey)}
+::selection{background:var(--honey);color:var(--wax)}
+
+/* ---------- hero ---------- */
+header{padding:9vh 0 6vh;position:relative}
+.top-links{position:absolute;top:1.05rem;right:0;display:flex;gap:2.3rem}
+.top-links a{color:var(--cream);text-decoration:none;font-size:.9rem;letter-spacing:.06em;padding:.6rem 0;white-space:nowrap}
+.top-links a:hover{color:var(--honey)}
+@media(max-width:640px){.top-links{gap:1.4rem}}
+@media(max-width:400px){.top-links{gap:1rem}.top-links a{font-size:.8rem}}
+.kicker{
+  display:inline-flex;align-items:center;gap:.6em;
+  font-size:.78rem;letter-spacing:.22em;text-transform:uppercase;color:var(--honey);
+  margin-bottom:2.2rem;
+}
+.kicker::before{content:"";display:inline-block;width:.85em;height:.98em;
+  background:var(--honey);
+  clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%);}
+h1{
+  font-family:var(--serif);
+  font-variation-settings:"opsz" 144,"SOFT" 50,"WONK" 1;
+  font-weight:850;
+  font-size:clamp(3.4rem,9.5vw,7.2rem);
+  line-height:.95;letter-spacing:-.02em;
+  color:var(--cream);
+}
+h1 em{font-style:italic;color:var(--honey)}
+.sub{
+  max-width:34em;margin-top:2rem;color:var(--cream-dim);font-size:1.02rem;
+}
+.sub strong{color:var(--cream);font-weight:500}
+.cta-row{margin-top:2.6rem;display:flex;gap:1rem;flex-wrap:wrap;align-items:center}
+.btn{
+  font-family:var(--mono);font-size:.95rem;letter-spacing:.04em;
+  padding:.95em 1.7em;border:1px solid var(--honey);cursor:pointer;
+  text-decoration:none;display:inline-block;
+  transition:transform .15s ease,box-shadow .15s ease,background .15s ease;
+}
+.btn-fill{background:var(--honey);color:var(--wax);font-weight:500}
+.btn-fill:hover{background:var(--honey-hot);transform:translateY(-2px);box-shadow:0 6px 24px rgba(237,167,44,.28)}
+.btn-ghost{color:var(--honey);background:transparent}
+.btn-ghost:hover{background:rgba(237,167,44,.08)}
+.hero-note{font-size:.8rem;color:var(--smoke, #8a7f66)}
+
+/* staggered reveal */
+.reveal{opacity:0;transform:translateY(14px);animation:rise .7s cubic-bezier(.2,.7,.2,1) forwards}
+@keyframes rise{to{opacity:1;transform:none}}
+.d1{animation-delay:.05s}.d2{animation-delay:.18s}.d3{animation-delay:.31s}.d4{animation-delay:.44s}
+
+/* ---------- section scaffolding ---------- */
+section{padding:5rem 0;border-top:1px solid var(--line)}
+h2{
+  font-family:var(--serif);font-weight:700;font-size:clamp(1.7rem,3.6vw,2.5rem);
+  letter-spacing:-.01em;margin-bottom:.6rem;
+}
+.section-tag{font-size:.72rem;letter-spacing:.24em;text-transform:uppercase;color:var(--honey);margin-bottom:1rem}
+.lede{color:var(--cream-dim);max-width:38em;margin-bottom:2.6rem}
+
+/* ---------- how it works: three cells ---------- */
+.cells{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1px;background:var(--line);border:1px solid var(--line)}
+.cell{background:var(--comb);padding:2rem 1.8rem;position:relative;transition:background .2s}
+.cell:hover{background:#241d11}
+.cell .num{
+  font-family:var(--serif);font-style:italic;font-size:2.4rem;color:var(--honey);
+  line-height:1;display:block;margin-bottom:1rem;
+}
+.cell h3{font-family:var(--serif);font-size:1.35rem;font-weight:700;margin-bottom:.7rem}
+.cell p{font-size:.92rem;color:var(--cream-dim)}
+.cell p b{color:var(--cream);font-weight:500}
+
+/* ---------- engine strip ---------- */
+.engine{background:var(--comb);border:1px solid var(--line);padding:2.2rem;margin-top:3rem}
+.engine-head{display:flex;align-items:baseline;gap:1em;flex-wrap:wrap;margin-bottom:1.4rem}
+.engine-head .led{width:.6em;height:.6em;border-radius:50%;background:#79c96f;box-shadow:0 0 10px #79c96f;display:inline-block;animation:pulse 2.4s infinite}
+@keyframes pulse{50%{opacity:.45}}
+.engine pre{
+  font-size:.78rem;line-height:1.75;color:var(--cream-dim);overflow-x:auto;
+}
+.engine pre b{color:var(--honey);font-weight:500}
+.engine pre i{color:#79c96f;font-style:normal}
+
+/* ---------- keepers: the hive-cam sculpture ---------- */
+.hivecam{--bleed:max(24px,calc(50vw - 506px));display:grid;grid-template-columns:minmax(0,36fr) minmax(0,64fr);
+  grid-template-areas:"head art" "list art";column-gap:2.5rem;margin-inline:calc(50% - 50vw);padding-inline:var(--bleed);overflow-x:clip}
+.hivecam-head{grid-area:head;position:relative;z-index:4}
+.hivecam .section-tag{display:flex;align-items:center;gap:.6em;text-transform:none;letter-spacing:.16em;font-size:.78rem}
+.hex-dot{display:inline-block;width:.72em;height:.8em;background:var(--honey);clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%)}
+.hivecam h2{white-space:nowrap;font-size:clamp(2.7rem,5vw,6rem);font-weight:850;font-variation-settings:"opsz" 144,"SOFT" 50,"WONK" 0;
+  line-height:.98;letter-spacing:-.02em;margin-bottom:1.6rem}
+.hivecam .lede{font-size:.95rem;margin-bottom:2.8rem;max-width:30em}
+.keeper-list{grid-area:list;list-style:none;margin:0;padding:0 0 1rem;display:grid;gap:2.2rem;align-content:start}
+.keeper-list li{position:relative;padding-left:1.7rem}
+.keeper-list li::before{content:"";position:absolute;left:0;top:.42rem;width:.95rem;height:1.05rem;background:var(--honey);
+  clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%)}
+.keeper-list h3{font-family:var(--mono);font-weight:600;font-size:1.3rem;line-height:1.35;letter-spacing:.03em;color:var(--honey)}
+.keeper-list .role{margin-top:.25rem;font-size:.7rem;letter-spacing:.2em;text-transform:uppercase;color:#c99234}
+.keeper-list blockquote{margin-top:.7rem;font-size:.86rem;line-height:1.65;color:var(--cream);max-width:36em}
+.keeper-list blockquote a{color:var(--honey)}
+/* the sculpture: photos sit under the art, in the screen holes; captions sit over it */
+.skep{grid-area:art;position:sticky;top:1rem;align-self:start;justify-self:start;margin:-2.5rem calc(-1 * var(--bleed)) 0 0;
+  width:min(calc(100% + var(--bleed)),calc(100vh - 2rem))}
+.skep-stage{position:relative;aspect-ratio:1;container-type:inline-size}
+.skep-art{position:absolute;inset:0;z-index:2;width:100%;height:100%;pointer-events:none;
+  -webkit-mask-image:linear-gradient(180deg,#000 78%,transparent 99%);mask-image:linear-gradient(180deg,#000 78%,transparent 99%)}
+.hc-shot,.hc-cap{position:absolute;left:var(--x);top:var(--y);width:var(--w);height:var(--h)}
+.hc-shot{z-index:1;overflow:hidden;background:#000}
+.hc-shot img{position:absolute;inset:-2%;width:104%;height:104%;max-width:none;object-fit:cover;object-position:var(--pos);filter:saturate(1.08) contrast(1.04)}
+.hc-shot::after{content:"";position:absolute;inset:0;
+  background:repeating-linear-gradient(180deg,rgba(0,0,0,.16) 0 1px,transparent 1px 3px),radial-gradient(ellipse at 50% 45%,transparent 55%,rgba(0,0,0,.5) 100%),
+  linear-gradient(160deg,rgba(255,255,255,.1),transparent 35%)}
+.hc-cap{z-index:3;pointer-events:none;font-family:var(--mono)}
+.hc-rec{position:absolute;top:7%;right:5%;display:flex;align-items:center;gap:.45em;font-size:max(8px,1.05cqw);font-weight:600;letter-spacing:.08em;color:#fff4e0}
+.hc-rec::before{content:"";width:.8em;height:.8em;border-radius:50%;background:#e8402f;box-shadow:0 0 .6em #e8402f;animation:hc-rec 1.6s steps(1) infinite}
+@keyframes hc-rec{50%{opacity:.15}}
+.hc-bottom{position:absolute;left:4%;right:4%;bottom:5%;display:flex;flex-direction:column;align-items:flex-start;gap:.3em}
+.hc-lower{max-width:100%;background:var(--honey);color:var(--wax);padding:.28em .6em .22em;
+  font-size:max(7.5px,.9cqw);letter-spacing:.03em;text-transform:uppercase;line-height:1.3}
+.hc-lower b{font-weight:600}
+.hc-lower span{font-size:.82em;opacity:.85}
+.hc-sub{align-self:stretch;background:rgba(10,8,5,.82);color:var(--cream);padding:.3em .55em;
+  font-size:max(8px,.92cqw);line-height:1.35}
+/* subtitles only where the screens are big enough to read them; the list carries every line */
+.hc-sub{display:none}
+@container (min-width:840px){.hc-sub{display:block}}
+.keepers-note{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--line);font-size:.75rem;color:#8a7f66}
+@media(max-width:860px){
+  .hivecam{grid-template-columns:minmax(0,1fr);grid-template-areas:"head" "art" "list"}
+  .hivecam h2{white-space:normal;font-size:clamp(2.5rem,11vw,3.4rem)}
+  .skep{position:relative;top:0;justify-self:stretch;width:auto;margin:0 calc(-1 * var(--bleed) - 6vw) -6vw}
+  .hc-lower span{display:none}
+  .hivecam .lede{margin-bottom:1.6rem}
+  .hc-lower{font-size:max(7.5px,1.75cqw)}
+  .hc-rec{font-size:max(7px,1.8cqw)}
+}
+@media(prefers-reduced-motion:reduce){.hc-rec::before{animation:none}}
+
+/* ---------- form ---------- */
+form{max-width:660px}
+fieldset{border:0;margin-bottom:2.2rem}
+legend{
+  font-family:var(--serif);font-size:1.15rem;font-weight:700;margin-bottom:.35rem;color:var(--cream);
+}
+.hint{font-size:.8rem;color:var(--cream-dim);margin-bottom:1rem}
+input[type=email],input[type=text],textarea,select{
+  width:100%;background:var(--comb);border:1px solid var(--line);color:var(--cream);
+  font-family:var(--mono);font-size:.95rem;padding:.85em 1em;outline:none;
+  transition:border-color .15s;border-radius:0;appearance:none;
+}
+textarea{min-height:7.5em;resize:vertical}
+input:focus,textarea:focus,select:focus{border-color:var(--honey)}
+.choices{display:flex;flex-wrap:wrap;gap:.6rem}
+.choices label{
+  border:1px solid var(--line);padding:.55em 1em;cursor:pointer;font-size:.87rem;
+  color:var(--cream-dim);user-select:none;transition:all .12s;display:inline-flex;gap:.5em;align-items:center;
+}
+.choices label:hover{border-color:var(--honey);color:var(--cream)}
+.choices input{position:absolute;opacity:0;pointer-events:none}
+.choices label:has(input:checked){background:var(--honey);border-color:var(--honey);color:var(--wax);font-weight:500}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+@media(max-width:640px){.grid2{grid-template-columns:1fr}}
+.form-msg{margin-top:1rem;font-size:.9rem;min-height:1.5em}
+.form-msg.err{color:var(--danger)}
+.form-msg.ok{color:#79c96f}
+.hp{position:absolute;left:-9999px;opacity:0}
+
+/* thanks card swap */
+#thanks{display:none;border:1px solid var(--honey);background:var(--comb);padding:2.4rem;max-width:660px}
+#thanks h3{font-family:var(--serif);font-size:1.6rem;color:var(--honey);margin-bottom:.8rem}
+#thanks p{color:var(--cream-dim)}
+
+/* ---------- footer ---------- */
+footer{border-top:1px solid var(--line);padding:3rem 0 4rem;margin-top:4rem;font-size:.78rem;color:#8a7f66;max-width:52em}
+footer p+p{margin-top:.8em}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <nav class="top-links reveal d1" aria-label="Site">
+      <a href="/plan/">Business plan</a>
+      <a href="https://github.com/antialias/apiary">Code on GitHub</a>
+    </nav>
+    <div class="kicker reveal d1">apiary · a capacity pool</div>
+    <h1 class="reveal d2">Your idle LLM hours are someone else's <em>crunch</em>.</h1>
+    <p class="sub reveal d3">
+      Apiary pools members' <strong>agentic-coding capacity</strong> and
+      <strong>self-hosted inference</strong> into one hive. Contribute what
+      sits idle, earn a stake in the pool, and draw past your own ceiling when
+      it's your turn to burst. Routing, metering, and failover are handled by
+      an engine that already runs in production for its founding operator.
+    </p>
+    <div class="cta-row reveal d4">
+      <a class="btn btn-fill" href="#join">Join the waggle list →</a>
+      <a class="btn btn-ghost" href="#how">How it works</a>
+      <span class="hero-note">~2 minutes · no wallet needed</span>
+    </div>
+  </header>
+
+  <section id="how">
+    <div class="section-tag">the loop</div>
+    <h2>Contribute. Earn. Draw.</h2>
+    <p class="lede">Individual capacity is bursty — subscriptions idle all week
+    then hit their ceiling mid-crunch; GPUs hum at 4% duty cycle. Pooled, the
+    peaks cancel out. Tokens keep score of who smoothed whom.</p>
+    <div class="cells">
+      <div class="cell">
+        <span class="num">01</span>
+        <h3>Contribute</h3>
+        <p>Bring a box that serves open models, or a plan or key its provider lets you pool.
+        The pool's brain meters <b>delivered</b> capacity — the router and the
+        meter are the same process, so there's no self-reported number to game.</p>
+      </div>
+      <div class="cell">
+        <span class="num">02</span>
+        <h3>Earn</h3>
+        <p>Contribution mints your stake — <b>earned on delivery, never on
+        pledge</b>. Governance of the pool (which sources join, how lanes are
+        priced) belongs to the members who feed it.</p>
+      </div>
+      <div class="cell">
+        <span class="num">03</span>
+        <h3>Draw</h3>
+        <p>Crunch week? Your tooling transparently rides pooled capacity,
+        <b>per model lane</b> — heavy lanes burst onto the pool while light
+        lanes stay home. If the pool vanishes, everything degrades to exactly
+        your own setup. It can never break you.</p>
+      </div>
+    </div>
+
+    <div class="engine">
+      <div class="engine-head">
+        <span class="led"></span>
+        <strong>The engine is real</strong>
+        <span style="color:var(--cream-dim);font-size:.8rem">— extracted from a production single-operator deployment</span>
+      </div>
+      <pre>
+<b>lane=fable</b>   INJECT→9f3ac1d2 [pool-b]     <i>← heavy lane riding pooled capacity</i>
+<b>lane=haiku</b>   passthrough [home]           <i>← light lane stays on home base</i>
+<b>lane=local</b>   qwen3.6:35b → 127.0.0.1      <i>← self-hosted model, same picker</i>
+🔀 SWITCHOVER[fable] reason=scoped-cap-83% tier=<i>routine</i> (headroom at destination)
+429 → transparent retry on alternate source · <i>client saw one 200</i></pre>
+    </div>
+  </section>
+
+  <section id="keepers">
+    <div class="hivecam">
+      <div class="hivecam-head">
+        <div class="section-tag"><span class="hex-dot" aria-hidden="true"></span>the keepers</div>
+        <h2>Meet your<br>fellow keepers</h2>
+        <p class="lede">Everyone here keeps more than one hive. Apiary makes each keeper’s own hives work as one.</p>
+      </div>
+      <figure class="skep">
+        <div class="skep-stage">
+          <div class="hc-shot" style="--x:37.86%;--y:11.61%;--w:24.11%;--h:17.08%;--pos:50% 62%"><img src="/og/keepers/marigold.webp" width="960" height="960" loading="lazy" decoding="async" alt="A beekeeper asleep in a deck chair under the stars, beside three beehives built like server racks."></div>
+          <div class="hc-shot" style="--x:23.49%;--y:32.24%;--w:21.20%;--h:18.96%;--pos:50% 38%"><img src="/og/keepers/basil.webp" width="960" height="960" loading="lazy" decoding="async" alt="A tall beekeeper points a stick at a board of coloured pegs, between two server-rack beehives joined by a little bridge of marching bees."></div>
+          <div class="hc-shot" style="--x:54.90%;--y:32.19%;--w:23.28%;--h:19.22%;--pos:56% 42%"><img src="/og/keepers/society.webp" width="960" height="960" loading="lazy" decoding="async" alt="A beekeeper running along a long row of server-rack beehives with an armful of servers and honeycomb frames, past a tipped-over wheelbarrow."></div>
+          <div class="hc-shot" style="--x:33.70%;--y:55.26%;--w:28.07%;--h:19.32%;--pos:50% 56%"><img src="/og/keepers/penny.webp" width="960" height="960" loading="lazy" decoding="async" alt="In a walled kitchen garden, a beekeeper in a patched suit squeezes one drop from an eyedropper into a small gilded server-rack hive wearing a crown, while a watering can pours sugar water into a plain one."></div>
+          <img class="skep-art" src="/og/keepers/skep.webp" width="1440" height="1440" loading="lazy" decoding="async" alt="">
+          <div class="hc-cap" style="--x:37.86%;--y:11.61%;--w:24.11%;--h:17.08%;--pos:50% 62%" aria-hidden="true"><span class="hc-rec">REC</span><span class="hc-bottom"><span class="hc-lower"><b>Marigold Thrice</b><span> / three hives, all hers</span></span><span class="hc-sub">“One hive was never enough for me, so now I keep three.”</span></span></div>
+          <div class="hc-cap" style="--x:23.49%;--y:32.24%;--w:21.20%;--h:18.96%;--pos:50% 38%" aria-hidden="true"><span class="hc-rec">REC</span><span class="hc-bottom"><span class="hc-lower"><b>Basil Overbee</b><span> / runs a tight colony</span></span><span class="hc-sub">“Every worker here has a role. Scouts plan, builders build, inspectors check the comb, and I redo the rota most mornings.”</span></span></div>
+          <div class="hc-cap" style="--x:54.90%;--y:32.19%;--w:23.28%;--h:19.22%;--pos:56% 42%" aria-hidden="true"><span class="hc-rec">REC</span><span class="hc-bottom"><span class="hc-lower"><b>The Ten Hive Society</b><span> / not beekeepers by trade</span></span><span class="hc-sub">“None of us keep bees for a living. We bought a hive, then another, and somehow ended up with ten.”</span></span></div>
+          <div class="hc-cap" style="--x:33.70%;--y:55.26%;--w:28.07%;--h:19.32%;--pos:50% 56%" aria-hidden="true"><span class="hc-rec">REC</span><span class="hc-bottom"><span class="hc-lower"><b>Penny Combsworth</b><span> / counts every drop</span></span><span class="hc-sub">“The queen does the thinking. The workers do the building, and they do it perfectly well on sugar water.”</span></span></div>
+        </div>
+      </figure>
+      <ol class="keeper-list">
+        <li>
+          <h3>Marigold Thrice</h3>
+          <p class="role">three hives, all hers</p>
+          <blockquote>“One hive was never enough for me, so now I keep three. The trouble
+          used to come mid-job: a hive would run dry, the whole swarm would down
+          tools, and when the flow came back they’d swear they had finished. They
+          had not finished. Now when one gets low the workers slip next door and
+          carry on. I hear nothing until all three are nearly empty, and it tells
+          me the day that will be.”</blockquote>
+        </li>
+        <li>
+          <h3>Basil Overbee</h3>
+          <p class="role">runs a tight colony</p>
+          <blockquote>“Every worker here has a role. Scouts plan, builders build, inspectors
+          check the comb, and I redo the rota most mornings, depending on who’s
+          having a good week. Nothing touches my rota. I wanted one small thing:
+          when my best forager’s hive runs low, she carries on from my other
+          hive, and nobody swaps her for someone cheaper. Both hives are mine. It
+          doesn’t go near anyone else’s.”</blockquote>
+        </li>
+        <li>
+          <h3>The Ten Hive Society</h3>
+          <p class="role">not beekeepers by trade</p>
+          <blockquote>“None of us keep bees for a living. We just found we couldn’t get our
+          work done without them, so we bought a hive, then another, and somehow
+          ended up with ten. For months we’d work one until it ran dry, pick
+          everything up, carry it to the next and start again, days at a stretch.
+          The honey bill was remarkable. Now it’s one big hive as far as anyone
+          here can tell, and we can finally see where the honey goes.”</blockquote>
+        </li>
+        <li>
+          <h3>Penny Combsworth</h3>
+          <p class="role">counts every drop</p>
+          <blockquote>“The queen does the thinking. The workers do the building, and they do
+          it perfectly well on sugar water. I’m not paying royal-jelly prices for
+          a job a worker can do, and some jobs never leave my own garden at all.
+          Before I let it near a hive I asked who keeps the key to the honey
+          house. The answer is on <a href="https://apiary.wtf/privacy">the privacy page</a>,
+          in plain words. I read the whole thing. I’ve never done that before.”</blockquote>
+        </li>
+      </ol>
+    </div>
+    <p class="keepers-note">All hives shown are honey-cooled.</p>
+  </section>
+
+  <section id="join">
+    <div class="section-tag">waggle list</div>
+    <h2>Tell us what you'd bring to the hive.</h2>
+    <p class="lede">We're forming the founding cohort and writing user stories
+    from real answers, not guesses. Rough numbers are fine. Only the email is
+    required.</p>
+
+    <form id="f" novalidate>
+      <fieldset>
+        <legend>You</legend>
+        <div class="grid2">
+          <input type="email" name="email" placeholder="email (required)" required autocomplete="email">
+          <input type="text" name="handle" placeholder="name / handle (optional)">
+        </div>
+        <input class="hp" type="text" name="website" tabindex="-1" autocomplete="off">
+      </fieldset>
+
+      <fieldset>
+        <legend>What would you contribute?</legend>
+        <p class="hint">Pick any. "Nothing yet" is a fine answer — drawers make the pool useful.</p>
+        <div class="choices" data-name="contribute">
+          <label><input type="checkbox" value="coding-plan">a plan or key its provider lets you pool</label>
+          <label><input type="checkbox" value="gpu">self-hosted GPU inference</label>
+          <label><input type="checkbox" value="dev-time">dev time on the engine</label>
+          <label><input type="checkbox" value="funding">funding or sponsorship</label>
+          <label><input type="checkbox" value="none">nothing yet — I'd draw</label>
+        </div>
+        <div class="grid2" style="margin-top:.8rem">
+          <input type="text" name="plan_tier" placeholder="which plan or key, if any">
+          <input type="text" name="hardware" placeholder="hardware, if any (e.g. 4090 / M3 Max 48GB)">
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>What would you draw?</legend>
+        <div class="choices" data-name="draw">
+          <label><input type="checkbox" value="burst-coding">burst coding capacity in a crunch</label>
+          <label><input type="checkbox" value="bulk-inference">cheap bulk inference</label>
+          <label><input type="checkbox" value="model-variety">model variety without more subscriptions</label>
+          <label><input type="checkbox" value="curious">just curious</label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Calibration</legend>
+        <div class="grid2">
+          <select name="spend">
+            <option value="">monthly LLM spend…</option>
+            <option>$0</option><option>&lt;$25</option><option>$25–100</option>
+            <option>$100–300</option><option>$300+</option>
+          </select>
+          <select name="crypto">
+            <option value="">crypto familiarity…</option>
+            <option>none — and keep it that way</option>
+            <option>held some, never used a dapp</option>
+            <option>comfortable with wallets</option>
+            <option>I deploy contracts</option>
+          </select>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>The goldmine</legend>
+        <p class="hint">What's the most painful thing about your current LLM setup? Be specific — this is what we build from.</p>
+        <textarea name="pain" placeholder="e.g. I hit my weekly cap every deadline week and just… wait."></textarea>
+      </fieldset>
+
+      <button class="btn btn-fill" type="submit">Add me to the hive →</button>
+      <div class="form-msg" id="msg" role="status"></div>
+    </form>
+
+    <div id="thanks">
+      <h3>You're on the list. 🐝</h3>
+      <p>We'll write to you when the founding cohort forms. Until then, the
+      engine keeps humming — and your answers just became a user story.</p>
+    </div>
+  </section>
+
+  <footer>
+    <p><strong style="color:var(--cream)">Honesty section.</strong> Apiary is
+    early: the routing engine works today; the pool, ledger, and governance are
+    being designed in the open with the founding cohort.</p>
+    <p>No token exists. Nothing on this page is an offer, a solicitation of an
+    investment, or a promise of future value. If and when any token is
+    designed, it will happen with real legal counsel — not vibes.</p>
+    <p>This form stores exactly what you type plus a timestamp. No analytics,
+    no cookies, no trackers.</p>
+    <p><a href="/plan/">Read the business plan</a> · <a href="https://github.com/antialias/apiary">The code is on GitHub</a>, under Apache-2.0.</p>
+  </footer>
+</main>
+
+<script>
+const f=document.getElementById('f'),msg=document.getElementById('msg');
+// A link like /?want=gpu#join (from the plan page) ticks that choice.
+const want=new URLSearchParams(location.search).get('want');
+if(want){const box=f.querySelector(`.choices input[value="${CSS.escape(want)}"]`);if(box)box.checked=true}
+f.addEventListener('submit',async e=>{
+  e.preventDefault();msg.className='form-msg';msg.textContent='';
+  const fd=new FormData(f);
+  const checks=n=>[...f.querySelectorAll(`[data-name=${n}] input:checked`)].map(i=>i.value);
+  const body={
+    email:fd.get('email')||'',handle:fd.get('handle')||'',
+    contribute:checks('contribute'),draw:checks('draw'),
+    plan_tier:fd.get('plan_tier')||'',hardware:fd.get('hardware')||'',
+    spend:fd.get('spend')||'',crypto:fd.get('crypto')||'',
+    pain:fd.get('pain')||'',website:fd.get('website')||''
+  };
+  if(!/.+@.+\..+/.test(body.email)){msg.textContent='a real email is the one thing we need';msg.classList.add('err');return}
+  try{
+    const r=await fetch('/signup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(r.status===201||r.status===202){f.style.display='none';document.getElementById('thanks').style.display='block';
+      document.getElementById('thanks').scrollIntoView({behavior:'smooth',block:'center'});}
+    else{msg.textContent=await r.text()||'something went sideways — try again';msg.classList.add('err')}
+  }catch(_){msg.textContent='network hiccup — try again';msg.classList.add('err')}
+});
+</script>
+</body>
+</html>

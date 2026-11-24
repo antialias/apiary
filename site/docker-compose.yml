@@ -13,14 +13,14 @@ services:
     labels:
       - "traefik.enable=true"
       # apiary.wtf is shared with the members app (sign-in, invites, the dashboard), so this router
-      # takes only the paths this site serves (main.go: the pages, /plan/, the og cards, /signup,
+      # takes only the paths this site serves (main.go: the front door, /about/, /plan/, the og cards, /signup,
       # /healthz) at an explicit priority. Traefik's default priority is the rule's length, which
       # would put a short rule like this above the app's. The order on apiary.wtf:
       #   20  the app's signed-in home: Path(/) with its session cookie
-      #   17  this site: the paths below (a signed-out visitor at / sees the landing page)
+      #   17  this site: the paths below (a signed-out visitor at / sees the front door)
       #   15  the app: everything else (/sign-in, /join/..., /account, /api/...)
-      # www.apiary.wtf is this site's alone.
-      - "traefik.http.routers.apiary.rule=Host(`www.apiary.wtf`) || (Host(`apiary.wtf`) && (Path(`/`) || Path(`/index.html`) || PathPrefix(`/plan`) || PathPrefix(`/og/`) || Path(`/signup`) || Path(`/healthz`)))"
+      # www.apiary.wtf is this site's alone; it redirects to apiary.wtf.
+      - "traefik.http.routers.apiary.rule=Host(`www.apiary.wtf`) || (Host(`apiary.wtf`) && (Path(`/`) || Path(`/index.html`) || PathPrefix(`/about`) || PathPrefix(`/plan`) || PathPrefix(`/og/`) || Path(`/signup`) || Path(`/healthz`)))"
       - "traefik.http.routers.apiary.priority=17"
       - "traefik.http.routers.apiary.entrypoints=websecure"
       - "traefik.http.routers.apiary.tls=true"
