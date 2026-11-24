@@ -3,6 +3,9 @@
 - The repo is public. No member names or emails, and no private hostnames or addresses, in code,
   docs or commit messages.
 - The site: read `site/README.md` first.
+- **A new public page goes in `site/static/sitemap.xml`**, unless it carries `noindex`; its
+  description stays under 155 characters, and it loads nothing from another host.
+  `site/search_test.go` checks.
 - **Every public page keeps its link-preview card current, still and animated.** Changing a page's
   headline, pitch or look updates, in the same commit, its art and `PAGES` row (`site/og/card.html`),
   the still (`render.sh`), the clip if the art changed (`motion.py`), the animated card

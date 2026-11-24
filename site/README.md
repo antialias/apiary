@@ -36,6 +36,23 @@ docker run -d --name apiary-site -p 8080:8080 -v apiary_signups:/data apiary-sit
 Behind a reverse proxy, keep `X-Forwarded-For` flowing (the throttle and IP
 hash use it).
 
+## Search engines and browsers
+
+- `static/robots.txt` lets crawlers fetch everything and points at `static/sitemap.xml`. A page that
+  should stay out of search says so itself (`<meta name="robots" content="noindex">`, as `/plan/`
+  does for now). The sitemap lists every page that may be in search, and only those.
+- Each page's `<meta name="description">` stays under about 155 characters, which is what a search
+  result shows.
+- The front door carries the site's name and logo for search results as JSON-LD (`WebSite`,
+  `Organization`). The icons are files (`favicon.ico`, `favicon.svg`, `apple-touch-icon.png`),
+  since search results show only an icon they can fetch.
+- Nothing comes from another host. The fonts are in `static/fonts/` (from Google Fonts, Latin
+  subsets, under the SIL Open Font License beside them), so a visit tells no one else it happened.
+- `delivery.go` gzips text and sets caching: pages are checked on every visit, fonts keep a year
+  (a changed font gets a new name), the rest an hour.
+- `search_test.go` checks all of this: the sitemap against the pages' `noindex`, robots.txt, the
+  length of descriptions, no outside hosts, and the headers.
+
 ## Link-preview cards
 
 Each page's preview card is `static/og/<page>.jpg` (1200x630), named by the page's `og:image`.

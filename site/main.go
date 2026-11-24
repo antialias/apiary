@@ -182,7 +182,7 @@ func site(pages fs.FS, signups string) http.Handler {
 	mux.Handle("/og/", ogCards(pages))
 	mux.HandleFunc("/signup", handleSignup(signups))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
-	return oneHost(mux)
+	return oneHost(delivery(mux))
 }
 
 // oneHost sends www.apiary.wtf to apiary.wtf, path and query kept, so each page

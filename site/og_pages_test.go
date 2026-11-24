@@ -24,20 +24,6 @@ func TestEveryPageHasItsOwnCurrentPreviewCard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	meta := func(doc, attr, name string) string {
-		m := regexp.MustCompile(`<meta ` + attr + `="` + regexp.QuoteMeta(name) + `" content="([^"]*)"`).FindStringSubmatch(doc)
-		if m == nil {
-			return ""
-		}
-		return html.UnescapeString(m[1])
-	}
-	first := func(doc, re string) string {
-		m := regexp.MustCompile(re).FindStringSubmatch(doc)
-		if m == nil {
-			return ""
-		}
-		return m[1]
-	}
 	cardOf := map[string]string{}
 	err = fs.WalkDir(pages, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".html") {
@@ -49,23 +35,23 @@ func TestEveryPageHasItsOwnCurrentPreviewCard(t *testing.T) {
 		if !strings.HasSuffix(want, "/") {
 			want += "/"
 		}
-		title := html.UnescapeString(first(doc, `<title>([^<]*)</title>`))
-		if title == "" || meta(doc, "property", "og:title") != title {
-			t.Errorf("%s: og:title %q, want the page's <title> %q", p, meta(doc, "property", "og:title"), title)
+		title := html.UnescapeString(firstOf(doc, `<title>([^<]*)</title>`))
+		if title == "" || metaOf(doc, "property", "og:title") != title {
+			t.Errorf("%s: og:title %q, want the page's <title> %q", p, metaOf(doc, "property", "og:title"), title)
 		}
-		if c := first(doc, `<link rel="canonical" href="([^"]*)"`); c != want || meta(doc, "property", "og:url") != want {
-			t.Errorf("%s: canonical %q and og:url %q, want both %q", p, c, meta(doc, "property", "og:url"), want)
+		if c := firstOf(doc, `<link rel="canonical" href="([^"]*)"`); c != want || metaOf(doc, "property", "og:url") != want {
+			t.Errorf("%s: canonical %q and og:url %q, want both %q", p, c, metaOf(doc, "property", "og:url"), want)
 		}
 		for _, name := range []string{"og:description", "og:site_name", "og:type"} {
-			if meta(doc, "property", name) == "" {
+			if metaOf(doc, "property", name) == "" {
 				t.Errorf("%s: no %s", p, name)
 			}
 		}
-		if meta(doc, "name", "twitter:card") != "summary_large_image" {
+		if metaOf(doc, "name", "twitter:card") != "summary_large_image" {
 			t.Errorf("%s: twitter:card should be summary_large_image", p)
 		}
 
-		img := meta(doc, "property", "og:image")
+		img := metaOf(doc, "property", "og:image")
 		card, ok := strings.CutPrefix(img, "https://apiary.wtf/")
 		// A changed card gets a new ?v=<n>, so chat apps that kept the old one fetch it again.
 		card, version, versioned := strings.Cut(card, "?")
@@ -98,12 +84,12 @@ func TestEveryPageHasItsOwnCurrentPreviewCard(t *testing.T) {
 			t.Errorf("%s: animated card %s barely moves (%.1f%% of it visibly changes; at least 1%%): "+
 				"in a chat app's preview it looks still", p, anim, 100*m)
 		}
-		if meta(doc, "property", "og:image:width") != "1200" || meta(doc, "property", "og:image:height") != "630" {
+		if metaOf(doc, "property", "og:image:width") != "1200" || metaOf(doc, "property", "og:image:height") != "630" {
 			t.Errorf("%s: og:image:width/height should say 1200 and 630", p)
 		}
 
-		headline := plain(first(doc, `(?s)<h1[^>]*>(.*?)</h1>`))
-		alt := plain(meta(doc, "property", "og:image:alt"))
+		headline := plain(firstOf(doc, `(?s)<h1[^>]*>(.*?)</h1>`))
+		alt := plain(metaOf(doc, "property", "og:image:alt"))
 		if headline == "" || !strings.HasPrefix(alt, "“"+headline+"”") {
 			t.Errorf("%s: og:image:alt should open with the headline in quotes, “%s”; it says %q. Redo the card if the headline changed.", p, headline, alt)
 		}
@@ -162,4 +148,22 @@ func visibleMotion(g *gif.GIF) float64 {
 		}
 	}
 	return most
+}
+
+// metaOf is the content of a page's <meta attr="name">, unescaped, or "".
+func metaOf(doc, attr, name string) string {
+	m := regexp.MustCompile(`<meta ` + attr + `="` + regexp.QuoteMeta(name) + `" content="([^"]*)"`).FindStringSubmatch(doc)
+	if m == nil {
+		return ""
+	}
+	return html.UnescapeString(m[1])
+}
+
+// firstOf is the first group of re's first match in doc, or "".
+func firstOf(doc, re string) string {
+	m := regexp.MustCompile(re).FindStringSubmatch(doc)
+	if m == nil {
+		return ""
+	}
+	return m[1]
 }

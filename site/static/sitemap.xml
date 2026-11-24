@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Every public page that may be in search. og_pages_test.go checks this against the pages. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://apiary.wtf/</loc></url>
+  <url><loc>https://apiary.wtf/about/</loc></url>
+</urlset>
