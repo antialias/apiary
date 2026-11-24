@@ -159,7 +159,9 @@ h2{
   -webkit-mask-image:linear-gradient(180deg,#000 78%,transparent 99%);mask-image:linear-gradient(180deg,#000 78%,transparent 99%)}
 .hc-shot,.hc-cap{position:absolute;left:var(--x);top:var(--y);width:var(--w);height:var(--h)}
 .hc-shot{z-index:1;overflow:hidden;background:#000}
-.hc-shot img{position:absolute;inset:-2%;width:104%;height:104%;max-width:none;object-fit:cover;object-position:var(--pos);filter:saturate(1.08) contrast(1.04)}
+.hc-shot img,.hc-shot video{position:absolute;inset:-2%;width:104%;height:104%;max-width:none;object-fit:cover;object-position:var(--pos);filter:saturate(1.08) contrast(1.04)}
+.hc-shot video{opacity:0;transition:opacity .5s}
+.hc-shot video.on{opacity:1}
 .hc-shot::after{content:"";position:absolute;inset:0;
   background:repeating-linear-gradient(180deg,rgba(0,0,0,.16) 0 1px,transparent 1px 3px),radial-gradient(ellipse at 50% 45%,transparent 55%,rgba(0,0,0,.5) 100%),
   linear-gradient(160deg,rgba(255,255,255,.1),transparent 35%)}
@@ -306,10 +308,10 @@ footer p+p{margin-top:.8em}
       </div>
       <figure class="skep">
         <div class="skep-stage">
-          <div class="hc-shot" style="--x:37.86%;--y:11.61%;--w:24.11%;--h:17.08%;--pos:50% 62%"><img src="/og/keepers/marigold.webp" width="960" height="960" loading="lazy" decoding="async" alt="A beekeeper asleep in a deck chair under the stars, beside three beehives built like server racks."></div>
-          <div class="hc-shot" style="--x:23.49%;--y:32.24%;--w:21.20%;--h:18.96%;--pos:50% 38%"><img src="/og/keepers/basil.webp" width="960" height="960" loading="lazy" decoding="async" alt="A tall beekeeper points a stick at a board of coloured pegs, between two server-rack beehives joined by a little bridge of marching bees."></div>
-          <div class="hc-shot" style="--x:54.90%;--y:32.19%;--w:23.28%;--h:19.22%;--pos:56% 42%"><img src="/og/keepers/society.webp" width="960" height="960" loading="lazy" decoding="async" alt="A beekeeper running along a long row of server-rack beehives with an armful of servers and honeycomb frames, past a tipped-over wheelbarrow."></div>
-          <div class="hc-shot" style="--x:33.70%;--y:55.26%;--w:28.07%;--h:19.32%;--pos:50% 56%"><img src="/og/keepers/penny.webp" width="960" height="960" loading="lazy" decoding="async" alt="In a walled kitchen garden, a beekeeper in a patched suit squeezes one drop from an eyedropper into a small gilded server-rack hive wearing a crown, while a watering can pours sugar water into a plain one."></div>
+          <div class="hc-shot" style="--x:37.86%;--y:11.61%;--w:24.11%;--h:17.08%;--pos:50% 62%"><img src="/og/keepers/marigold.webp" width="960" height="960" loading="lazy" decoding="async" alt="A beekeeper asleep in a deck chair under the stars, beside three beehives built like server racks."><video src="/og/keepers/marigold.mp4" muted loop playsinline preload="none" disablepictureinpicture aria-hidden="true"></video></div>
+          <div class="hc-shot" style="--x:23.49%;--y:32.24%;--w:21.20%;--h:18.96%;--pos:50% 38%"><img src="/og/keepers/basil.webp" width="960" height="960" loading="lazy" decoding="async" alt="A tall beekeeper points a stick at a board of coloured pegs, between two server-rack beehives joined by a little bridge of marching bees."><video src="/og/keepers/basil.mp4" muted loop playsinline preload="none" disablepictureinpicture aria-hidden="true"></video></div>
+          <div class="hc-shot" style="--x:54.90%;--y:32.19%;--w:23.28%;--h:19.22%;--pos:56% 42%"><img src="/og/keepers/society.webp" width="960" height="960" loading="lazy" decoding="async" alt="A beekeeper running along a long row of server-rack beehives with an armful of servers and honeycomb frames, past a tipped-over wheelbarrow."><video src="/og/keepers/society.mp4" muted loop playsinline preload="none" disablepictureinpicture aria-hidden="true"></video></div>
+          <div class="hc-shot" style="--x:33.70%;--y:55.26%;--w:28.07%;--h:19.32%;--pos:50% 56%"><img src="/og/keepers/penny.webp" width="960" height="960" loading="lazy" decoding="async" alt="In a walled kitchen garden, a beekeeper in a patched suit squeezes one drop from an eyedropper into a small gilded server-rack hive wearing a crown, while a watering can pours sugar water into a plain one."><video src="/og/keepers/penny.mp4" muted loop playsinline preload="none" disablepictureinpicture aria-hidden="true"></video></div>
           <img class="skep-art" src="/og/keepers/skep.webp" width="1440" height="1440" loading="lazy" decoding="async" alt="">
           <div class="hc-cap" style="--x:37.86%;--y:11.61%;--w:24.11%;--h:17.08%;--pos:50% 62%" aria-hidden="true"><span class="hc-rec">REC</span><span class="hc-bottom"><span class="hc-lower"><b>Marigold Thrice</b><span> / three hives, all hers</span></span><span class="hc-sub">“One hive was never enough for me, so now I keep three.”</span></span></div>
           <div class="hc-cap" style="--x:23.49%;--y:32.24%;--w:21.20%;--h:18.96%;--pos:50% 38%" aria-hidden="true"><span class="hc-rec">REC</span><span class="hc-bottom"><span class="hc-lower"><b>Basil Overbee</b><span> / runs a tight colony</span></span><span class="hc-sub">“Every worker here has a role. Scouts plan, builders build, inspectors check the comb, and I redo the rota most mornings.”</span></span></div>
@@ -478,6 +480,14 @@ f.addEventListener('submit',async e=>{
     else{msg.textContent=await r.text()||'something went sideways — try again';msg.classList.add('err')}
   }catch(_){msg.textContent='network hiccup — try again';msg.classList.add('err')}
 });
+// The hive-cam screens play while they are on screen, and not at all for a reader who asked
+// for less motion: they keep the still photo.
+if(!matchMedia('(prefers-reduced-motion: reduce)').matches&&'IntersectionObserver' in window){
+  const cams=new IntersectionObserver(es=>es.forEach(e=>{const v=e.target;
+    if(e.isIntersecting)v.play().catch(()=>{});else v.pause()}),{rootMargin:'200px'});
+  document.querySelectorAll('.hc-shot video').forEach(v=>{
+    v.addEventListener('playing',()=>v.classList.add('on'),{once:true});cams.observe(v)});
+}
 </script>
 </body>
 </html>

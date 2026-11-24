@@ -61,6 +61,16 @@ four screens cut out (transparent). Each keeper's photo sits under a hole, and a
 scales as one. The subtitles show only when the sculpture is wide enough to read them; the list beside
 it carries every keeper's full line. The accepted design is `docs/design/keepers/`.
 
+The screens are live: each shows a short loop, `static/og/keepers/<name>.mp4`, over its photo. A loop
+starts as a five-second clip made with Runway (Kling 3.0) from the keeper's photo as both its first
+and its last frame, so it ends where it began; the clips are kept in `og/motion/keepers/`.
+`og/keepers-loop.sh <name>` makes the seamless 640 square loop: it evens out the small difference in
+light the model leaves between the last frame and the first, drops the last, skips the few frames
+where the model eases into and out of the photo, and steadies the grain with the loop wrapped round,
+so the restart shows neither a jump nor a pause. The page plays a screen only while it is in view,
+and never for a reader who asked for reduced motion; they, and any browser without the script, see
+the photo.
+
 The photos are generated, and every face is behind a veil. They are `static/og/keepers/<name>.webp`
 (960x960), under `/og/` because that is a path apiary.wtf's shared router already sends to this site;
 a new top-level path would need the production router changed first.
