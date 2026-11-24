@@ -1,17 +1,21 @@
 # Apiary landing site (stub)
 
-Two static pages (the landing page and the business plan) + an interest sign-up
-form, served by one Go binary. Its job is to gauge interest and collect rough
+Three static pages (the front door, the long page and the business plan) + an
+interest sign-up form, served by one Go binary. Its job is to gauge interest and collect rough
 profiles to ground user stories (see [`../docs/DESIGN.md`](../docs/DESIGN.md)
 §6) — not to onboard anyone.
 
-- `GET /` — the page (embedded at build time)
+- `GET /` — the front door: one screen, never scrolls, for a signed-out visitor
+  (a signed-in one gets the members app's console there instead). Embedded at
+  build time; its spec is [`../docs/design/front-door/`](../docs/design/front-door/)
+- `GET /about/` — the long page, with the waggle-list form at `#join`
 - `GET /plan/` — the business plan, embedded the same way (its spec is
   [`../docs/design/plan/`](../docs/design/plan/))
 - `POST /signup` — appends one JSON line to `SIGNUPS_FILE`
   (default `data/signups.jsonl`); honeypot field + 10s per-IP throttle,
   16 KiB body cap, everything clipped server-side
 - `GET /healthz` — liveness
+- `www.apiary.wtf` redirects to `apiary.wtf`, path and query kept
 
 No accounts, no cookies, no analytics. The stored record is exactly the form
 fields + UTC timestamp + a 12-hex-char IP hash (dedup signal, not identity).
@@ -36,8 +40,14 @@ hash use it).
 
 Each page's preview card is `static/og/<page>.jpg` (1200x630), named by the page's `og:image`.
 `og/card.html` lays out a card: the page's art from `og/art/<page>.jpg`, its kicker and its headline,
-in the site's own fonts. `og/render.sh [page ...]` screenshots it with Google Chrome into
+in the site's own fonts. `og/render.sh [page ...]` screenshots it with Playwright's own browser into
 `static/og/`. A new page adds a row to `PAGES` in `card.html`, its art, and its `og:*` tags.
+
+**A change to a public page updates its card in the same commit.** A new or changed headline, pitch
+or look means new art or a new `PAGES` row, a fresh `render.sh`, and `og:*` tags that say the same
+thing as the page (title, description, alt text). `og_pages_test.go` holds the floor: every page has
+a full set of tags, its own card at 1200x630, and alt text that opens with the page's headline in
+quotes, so a headline changed without its card fails the build.
 
 Two cards are for the members app that shares apiary.wtf: `signin` for its `/sign-in` page and
 `invite` for every `/join/...` link. They live here so `/og/` serves every card; the app's pages
@@ -50,7 +60,7 @@ page's art, so its first frame is the still card; it fades back into that frame 
 
 ## The keepers
 
-The landing page's "the keepers" section, "Meet your fellow keepers", introduces four beekeepers, each
+The long page's (`/about/`) "the keepers" section, "Meet your fellow keepers", introduces four beekeepers, each
 a kind of person with more than one account, as if they were members. They are types, not customers:
 pun names, server racks for hives and a honey-cooling joke keep them plainly parody. Nobody real is
 quoted or pictured, and no keeper may be rewritten to read as a real customer's review.
