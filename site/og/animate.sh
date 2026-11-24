@@ -4,7 +4,8 @@
 # The clip, og/motion/<page>.mp4, is image-to-video from og/art/<page>.jpg, so its first frame is
 # the still card's art. This lays the card's words (card.html?layer=words) over the clip, fades the
 # last moments back into the first frame so the loop is seamless, and writes a GIF whose first
-# frame is the still card. Needs ffmpeg, ffprobe and Google Chrome (for the words).
+# frame is the still card. Needs ffmpeg, ffprobe and Playwright's headless browser for the words
+# (npx playwright install chromium-headless-shell, if it isn't there yet).
 # Run: site/og/animate.sh <page> [width, default 720] [frames per second, default 10]
 set -eu
 page=$1
@@ -12,22 +13,23 @@ width=${2:-720}
 here=$(cd "$(dirname "$0")" && pwd)
 clip="$here/motion/$page.mp4"
 out="$here/../static/og/$page.gif"
-chrome=${CHROME:-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"}
+chrome=${CHROME:-$(ls -d "$HOME"/Library/Caches/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell \
+  "$HOME"/.cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell 2>/dev/null | sort -V | tail -1)}
+[ -x "$chrome" ] || { echo "animate.sh: no Playwright headless browser; run: npx playwright install chromium-headless-shell" >&2; exit 1; }
 fps=${3:-10}
 fade=0.6
 [ -f "$clip" ] || { echo "animate.sh: no clip at $clip" >&2; exit 1; }
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-# The words, on a transparent 1200x630 page. Chrome on macOS often dies in teardown after writing
-# the screenshot, so the check is the picture itself (as in render.sh).
-"$chrome" --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
+# The words, on a transparent 1200x630 page. The check is the picture itself (as in render.sh).
+"$chrome" --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
   --window-size=1200,630 --virtual-time-budget=10000 --default-background-color=00000000 \
   --user-data-dir="$tmp/profile" --screenshot="$tmp/words.png" \
   "file://$here/card.html?page=$page&layer=words" >"$tmp/chrome.log" 2>&1 || true
 size=$(sips -g pixelWidth -g pixelHeight "$tmp/words.png" 2>/dev/null | awk '/pixel/ {printf "%s ", $2}')
 if [ "$size" != "1200 630 " ]; then
-  echo "animate.sh: no 1200x630 words layer for $page (got '$size'); Chrome said:" >&2
+  echo "animate.sh: no 1200x630 words layer for $page (got '$size'); the browser said:" >&2
   tail -5 "$tmp/chrome.log" >&2
   exit 1
 fi

@@ -18,21 +18,38 @@ h1 em{font-style:italic;font-weight:750;color:var(--honey)}
 .wordmark{position:absolute;left:68px;bottom:50px;display:flex;align-items:center;gap:16px;color:var(--cream)}
 .wordmark svg{width:44px;height:47px;color:var(--honey)}
 .wordmark span{font:700 48px/1 var(--serif);letter-spacing:-.01em;font-variation-settings:"SOFT" 50,"WONK" 1;margin-top:-6px}
+/* A page's own words that sit on its art (the front door's jar labels and meter): in card pixels,
+   so they ride over the moving art in the animated card instead of being baked into it. */
+.over{position:absolute;inset:0}
+.over .hive{position:absolute;left:690.6px;top:35px;width:465.3px;height:550px}
+.over .jar{position:absolute;transform:translate(-50%,-50%);width:17%;text-align:center;font:500 11.9px/1 var(--mono);color:var(--cream);white-space:nowrap}
+.over .j1{left:12.65%;top:22%}.over .j2{left:37.73%;top:22.8%}.over .j3{left:62.12%;top:22.8%}.over .j4{left:87.27%;top:23%}
+.over .meter{position:absolute;left:49.5%;top:74.7%;transform:translate(-50%,-50%);text-align:center;color:var(--cream)}
+.over .meter b{display:block;font-family:var(--serif);font-variation-settings:"opsz" 144,"SOFT" 50,"WONK" 0;font-weight:800;font-size:77.5px;line-height:.9}
+.over .meter b small{font-size:.62em}
+.over .meter i{display:block;font-family:var(--serif);font-variation-settings:"WONK" 0;font-weight:750;font-size:42.5px;color:var(--honey);line-height:1}
+.over .meter span{display:block;font:400 10.6px/1 var(--mono);color:#b9ac8d;margin-top:11px;letter-spacing:.04em}
 .url{position:absolute;right:64px;bottom:58px;margin:0;font:500 17px/1 var(--mono);letter-spacing:.2em;color:var(--honey)}
 </style>
 </head>
 <body>
 <div class="art" id="art"></div>
 <div class="scrim"></div>
+<div class="over" id="over"></div>
 <p class="kicker" id="kicker"></p>
 <h1 id="headline"></h1>
 <div class="wordmark"><svg viewBox="0 0 100 100" aria-hidden="true"><polygon points="50 3 93 27 93 73 50 97 7 73 7 27" fill="currentColor"/></svg><span>apiary</span></div>
 <p class="url">apiary.wtf</p>
 <script>
-// Each page's card: its art (art/<name>.jpg), kicker and headline. A new page adds a row here and its art.
+// Each page's card: its art (art/<name>.jpg), kicker and headline, and optionally `over`, words that sit
+// on the art (kept out of the art so the animated card's clip has no text to smear). A new page adds a
+// row here and its art.
 const PAGES = {
   front: {kicker: "The gateway your coding agents point at", size: 96,
-         headline: "All your<br>coding<br>accounts.<br><em>One hive</em>."},
+         headline: "All your<br>coding<br>accounts.<br><em>One hive</em>.",
+         over: `<div class="hive"><span class="jar j1">Claude Code</span><span class="jar j2">Codex</span>
+                <span class="jar j3">Kimi</span><span class="jar j4">local</span>
+                <span class="meter"><b>38<small>%</small></b><i>left</i><span>across 4 accounts</span></span></div>`},
   home: {kicker: "Pooled LLM capacity · owned by the hive", size: 92,
          headline: "Your idle LLM<br>hours are<br>someone else’s<br><em>crunch</em>."},
   plan: {kicker: "Business plan · November 2026", size: 108,
@@ -54,6 +71,7 @@ if (art) art.style.backgroundImage = `url(art/${name}.jpg)`;
 document.getElementById("kicker").textContent = p.kicker;
 const h = document.getElementById("headline");
 h.innerHTML = p.headline; h.style.fontSize = p.size + "px";
+document.getElementById("over").innerHTML = p.over || "";
 </script>
 </body>
 </html>

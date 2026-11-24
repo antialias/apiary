@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"html"
+	"image/gif"
 	"image/jpeg"
 	"io/fs"
 	"path"
@@ -11,10 +12,11 @@ import (
 	"testing"
 )
 
-// Every public page has its own link-preview card, and the card keeps up with
-// the page: the tags are complete, the card exists at 1200x630, and its alt
-// text quotes the page's headline. Change a headline and this fails until the
-// card (site/og, render.sh) and its tags are redone in the same commit.
+// Every public page has its own link-preview card, still and animated, and the
+// card keeps up with the page: the tags are complete, the still is 1200x630,
+// the GIF beside it has the same shape, and the alt text quotes the page's
+// headline. Change a headline and this fails until the card (site/og:
+// render.sh, motion.py, animate.sh) and its tags are redone in the same commit.
 func TestEveryPageHasItsOwnCurrentPreviewCard(t *testing.T) {
 	pages, err := fs.Sub(static, "static")
 	if err != nil {
@@ -79,6 +81,12 @@ func TestEveryPageHasItsOwnCurrentPreviewCard(t *testing.T) {
 		cfg, err := jpeg.DecodeConfig(bytes.NewReader(jb))
 		if err != nil || cfg.Width != 1200 || cfg.Height != 630 {
 			t.Errorf("%s: card %s is not a 1200x630 JPEG (%v, %dx%d)", p, card, err, cfg.Width, cfg.Height)
+		}
+		anim := strings.TrimSuffix(card, ".jpg") + ".gif"
+		if gb, err := fs.ReadFile(pages, anim); err != nil {
+			t.Errorf("%s: no animated card %s (og/motion.py, then og/animate.sh)", p, anim)
+		} else if g, err := gif.DecodeConfig(bytes.NewReader(gb)); err != nil || g.Width*630 != g.Height*1200 {
+			t.Errorf("%s: animated card %s is not a GIF shaped like the card (%v, %dx%d)", p, anim, err, g.Width, g.Height)
 		}
 		if meta(doc, "property", "og:image:width") != "1200" || meta(doc, "property", "og:image:height") != "630" {
 			t.Errorf("%s: og:image:width/height should say 1200 and 630", p)

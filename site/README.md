@@ -41,13 +41,23 @@ hash use it).
 Each page's preview card is `static/og/<page>.jpg` (1200x630), named by the page's `og:image`.
 `og/card.html` lays out a card: the page's art from `og/art/<page>.jpg`, its kicker and its headline,
 in the site's own fonts. `og/render.sh [page ...]` screenshots it with Playwright's own browser into
-`static/og/`. A new page adds a row to `PAGES` in `card.html`, its art, and its `og:*` tags.
+`static/og/`. A new page adds a row to `PAGES` in `card.html`, its art, its clip, and its `og:*` tags.
 
-**A change to a public page updates its card in the same commit.** A new or changed headline, pitch
-or look means new art or a new `PAGES` row, a fresh `render.sh`, and `og:*` tags that say the same
-thing as the page (title, description, alt text). `og_pages_test.go` holds the floor: every page has
-a full set of tags, its own card at 1200x630, and alt text that opens with the page's headline in
-quotes, so a headline changed without its card fails the build.
+**A change to a public page updates its card, still and animated, in the same commit.** A new or
+changed headline, pitch or look means, in order:
+
+1. New art (`og/art/<page>.jpg`, no words in it) or a changed `PAGES` row in `card.html`. Words that
+   sit on the art go in the row's `over`, so they ride over the clip instead of smearing in it.
+2. `og/render.sh <page>`: the still card.
+3. If the art changed, a new clip: delete `og/motion/<page>.mp4`, add or adjust its prompt in
+   `og/motion.py`, and run it (Runway's API, `RUNWAY_API_KEY`). The art is the clip's first and last
+   frame. Look at it before using it: the words must still sit right on the moving art.
+4. `og/animate.sh <page>`: the animated card, from the clip, with the card's words over it.
+5. `og:*` tags that say the same thing as the page (title, description, alt text).
+
+`og_pages_test.go` holds the floor: every page has a full set of tags, its own 1200x630 card and a
+GIF of the same shape beside it, and alt text that opens with the page's headline in quotes, so a
+headline changed without its card fails the build.
 
 Two cards are for the members app that shares apiary.wtf: `signin` for its `/sign-in` page and
 `invite` for every `/join/...` link. They live here so `/og/` serves every card; the app's pages
