@@ -17,6 +17,8 @@ func TestOGCardsServeTheAnimatedCardOnlyToAppsThatPlayIt(t *testing.T) {
 	for _, c := range []struct{ path, ua, want, wantType string }{
 		{"/og/home.jpg", "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)", "GIF89a animated home", "image/gif"},
 		{"/og/home.jpg", "Slack-ImgProxy (+https://api.slack.com/robots)", "GIF89a animated home", "image/gif"},
+		{"/og/home.jpg?v=2", "Slack-ImgProxy (+https://api.slack.com/robots)", "GIF89a animated home", "image/gif"},
+		{"/og/home.jpg?v=2", "facebookexternalhit/1.1", "still home", "image/jpeg"},
 		{"/og/home.jpg", "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)", "GIF89a animated home", "image/gif"},
 		{"/og/home.jpg", "Twitterbot/1.0", "still home", "image/jpeg"},
 		{"/og/home.jpg", "facebookexternalhit/1.1", "still home", "image/jpeg"},

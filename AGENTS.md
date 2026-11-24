@@ -6,6 +6,6 @@
 - **Every public page keeps its link-preview card current, still and animated.** Changing a page's
   headline, pitch or look updates, in the same commit, its art and `PAGES` row (`site/og/card.html`),
   the still (`render.sh`), the clip if the art changed (`motion.py`), the animated card
-  (`animate.sh`), and its `og:*` tags. The steps are in `site/README.md`. `site/og_pages_test.go`
-  fails when a page's tags are incomplete, its card or its GIF is missing or misshapen, two pages
-  share a card, or the card's alt text no longer quotes the page's headline.
+  (`animate.sh`), and its `og:*` tags, with a new `?v=<n>` on `og:image` so chat apps drop the old card. The steps are in `site/README.md`. `site/og_pages_test.go`
+  fails when a page's tags are incomplete, its card or its GIF is missing or misshapen, its GIF
+  barely moves, two pages share a card, or the card's alt text no longer quotes the page's headline.

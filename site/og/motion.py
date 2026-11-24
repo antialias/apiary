@@ -4,8 +4,9 @@
 Five seconds of image-to-video through Runway's API (Kling 3.0 Pro, 1920:1080), with og/art/<page>.jpg
 as both the first and the last frame, so the clip stays anchored to the art and ends where it began.
 The art carries no words (card.html lays them over it), and each prompt keeps the camera still and
-the motion small, so the words stay readable over it. Asked for drops running down the pipes, the
-model spilled honey out of them; keep the motion to light, bubbles and glints.
+the motion small, so the words stay readable over it. A video model may not hold what the words sit
+on: asked for honey running down the front door's pipes it spilled it, and asked for less it barely
+moved, so that card's clip is drawn by front_motion.py instead.
 
 Needs RUNWAY_API_KEY; RUNWAY_BASE overrides the API's address. An existing clip is kept: delete it
 to make a new one. The clips for home, plan, signin and invite came before this script.
@@ -18,11 +19,7 @@ BASE = os.environ.get("RUNWAY_BASE", "https://api.dev.runwayml.com/v1").rstrip("
 STILL = ("Static locked-off camera; the framing never moves. Everything stays exactly as in the image, "
          "in the same place, size and brightness; only small details move. ")
 PROMPTS = {
-    "front": STILL + "The four glass jars, the dark blank label plate on each jar, the honey level in each "
-    "jar, the pipes and the hexagon all stay exactly as they are, and the centre of the hexagon stays dark "
-    "and empty. Tiny bubbles drift slowly up through the honey, a faint glint slides across the glass, and "
-    "a soft warm glow pulses gently along the pipes and the hexagon's rim. The dark left side stays dark. "
-    "Calm, subtle, quiet motion.",
+    # "<page>": STILL + "what moves, and what that motion says about the page",
 }
 
 
